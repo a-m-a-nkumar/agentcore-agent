@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional
 
 import boto3
 
+# Import prompt templates from separate module
+from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig
+
 # Configure logging for CloudWatch
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -627,113 +630,54 @@ def lambda_handler(event, context):
             }
         }
 
-    # Build base prompt (instructions without template/transcript)
-    prompt_base = """You are a Product Manager in a software solutions company for payments. A discussion has happened within a product team, and the meeting transcript is available. You are tasked with creating a Business Requirements Document (BRD).
-
-Below is the template structure that must be followed exactly.
-
-### Utmost IMPORTANT
-"Keep the BRD concise to fit within available tokens"
-"Use bullet points and tables where possible instead of long paragraphs"
-"Prioritize covering ALL 16 sections concisely rather than detailed elaboration"
-"Be brief but comprehensive - quality over quantity"
-
-
-### CRITICAL: The BRD MUST contain ALL 16 sections listed below:"""
+    # Build prompt using separated prompt templates
+    # Calculate token estimates using PromptConfig
+    from prompts.brd_generator_prompts import get_prompt_base_length
     
-    prompt_instructions_section = f"""{prompt_base}
-1. Document Overview
-2. Purpose
-3. Background / Context
-4. Stakeholders
-5. Scope
-6. Business Objectives & ROI
-7. Functional Requirements
-8. Non-Functional Requirements
-9. User Stories / Use Cases
-10. Assumptions
-11. Constraints
-12. Acceptance Criteria / KPIs
-13. Timeline / Milestones
-14. Risks and Dependencies
-15. Approval & Review
-16. Glossary & Appendix
-
-### Instructions:
-1. Preserve Structure
-   - Follow the exact structural integrity of the template.
-   - You MUST generate ALL 16 sections listed above, even if some sections have limited information from the transcript.
-   - For sections with limited transcript information, use reasonable professional assumptions and standard practices.
-   - Maintain all sections, headings, and tables exactly as they appear.
-   - Place the transcript-derived information into the corresponding sections without adding or removing sections.
-   - DO NOT skip any of the 16 sections - all must be present in the final BRD.
-   - CRITICAL: DO NOT create numbered subsections beyond section 16. If you need to show use case flows, steps, or sub-items within a section, use bullet points, tables, or unnumbered paragraphs instead of creating new numbered sections like "17.", "18.", etc.
-   - For example, in section 9 (User Stories / Use Cases), if you need to show a use case flow, use bullet points or a table, NOT numbered items like "11. Step 1", "12. Step 2" that could be mistaken for new sections."""
-
-    # Calculate prompt length and truncate if needed
-    # Llama 3.1 8B has 8192 token context window TOTAL
-    # Reserve ~2000 tokens for instructions + template, ~1000 tokens safety margin
-    # This leaves ~5000 tokens for transcript + output
-    
-    instructions_length = len(prompt_instructions_section)
-    template_length = len(template_text)
-    transcript_length = len(transcript_text)
-    
-    # Estimate tokens (rough: 1 token ≈ 4 characters)
-    instructions_tokens = instructions_length // 4
-    template_tokens = template_length // 4
-    transcript_tokens = transcript_length // 4
+    instructions_tokens = PromptConfig.estimate_tokens(str(get_prompt_base_length()))
+    template_tokens = PromptConfig.estimate_tokens(template_text)
+    transcript_tokens = PromptConfig.estimate_tokens(transcript_text)
     
     # Target: Keep total input under 2000 tokens to leave ~6000 for output
     # This ensures we have enough room for comprehensive BRD generation
     # More aggressive truncation to prevent token limit issues
-    max_input_tokens = 2000
-    safety_margin = 200
-    reserved_for_template = 600  # Reserve up to 600 tokens for template (reduced from 800)
+    max_input_tokens = PromptConfig.MAX_INPUT_TOKENS
+    safety_margin = PromptConfig.SAFETY_MARGIN_TOKENS
+    reserved_for_template = PromptConfig.RESERVED_TEMPLATE_TOKENS
     
     # Truncate template if extremely long
     if template_tokens > reserved_for_template:
-        max_template_chars = reserved_for_template * 4
+        max_template_chars = reserved_for_template * PromptConfig.CHARS_PER_TOKEN
         logger.warning(f"Template is very long ({template_tokens} tokens). Truncating to ~{reserved_for_template} tokens ({max_template_chars} chars)")
         template_text = _truncate_text(template_text, max_template_chars)
         template_length = len(template_text)
-        template_tokens = template_length // 4
+        template_tokens = PromptConfig.estimate_tokens(template_text)
     
     # Calculate available space for transcript
     max_transcript_tokens = max_input_tokens - instructions_tokens - template_tokens - safety_margin
     
     # Ensure minimum space for transcript (at least 500 tokens)
-    if max_transcript_tokens < 500:
+    if max_transcript_tokens < PromptConfig.MIN_TRANSCRIPT_TOKENS:
         logger.warning(f"Very little space for transcript ({max_transcript_tokens} tokens). Further truncating template if needed.")
         # Recalculate with more aggressive template truncation
-        max_template_tokens = max_input_tokens - instructions_tokens - 500 - safety_margin
+        max_template_tokens = max_input_tokens - instructions_tokens - PromptConfig.MIN_TRANSCRIPT_TOKENS - safety_margin
         if max_template_tokens > 0:
-            max_template_chars = max_template_tokens * 4
+            max_template_chars = max_template_tokens * PromptConfig.CHARS_PER_TOKEN
             template_text = _truncate_text(template_text, max_template_chars)
             template_length = len(template_text)
-            template_tokens = template_length // 4
-            max_transcript_tokens = 500  # Minimum for transcript
+            template_tokens = PromptConfig.estimate_tokens(template_text)
+            max_transcript_tokens = PromptConfig.MIN_TRANSCRIPT_TOKENS
     
     # Truncate transcript if too long
     if transcript_tokens > max_transcript_tokens:
-        max_transcript_chars = max_transcript_tokens * 4
+        max_transcript_chars = max_transcript_tokens * PromptConfig.CHARS_PER_TOKEN
         logger.warning(f"Transcript is too long ({transcript_tokens} tokens). Truncating to ~{max_transcript_tokens} tokens ({max_transcript_chars} chars)")
         transcript_text = _truncate_text(transcript_text, max_transcript_chars)
         transcript_length = len(transcript_text)
-        transcript_tokens = transcript_length // 4
+        transcript_tokens = PromptConfig.estimate_tokens(transcript_text)
     
-    # Build final prompt with (possibly truncated) transcript
-    prompt = f"""{prompt_instructions_section}
-
-   
---- TEMPLATE ---
-{template_text}
-
---- TRANSCRIPT ---
-{transcript_text}
-
-Return only the completed BRD as plain text.
-""".strip()
+    # Build final prompt using the separated prompt template function
+    prompt = get_full_brd_generation_prompt(template_text, transcript_text)
 
     # Calculate dynamic max tokens based on actual prompt length
     # Recalculate after truncation to get accurate estimate
@@ -808,6 +752,7 @@ Return only the completed BRD as plain text.
                     }
                 }
             }
+            
         }
         logger.info(f"Returning error response. brd_id: {brd_id}")
         return error_response

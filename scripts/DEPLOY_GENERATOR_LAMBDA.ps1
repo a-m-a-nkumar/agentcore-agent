@@ -35,6 +35,19 @@ try {
         Write-Host "  [WARN] lambda_brd_generator.py not found in root directory" -ForegroundColor Yellow
     }
     
+    # Copy prompts directory to package (required for separated prompt templates)
+    if (Test-Path "prompts") {
+        # Remove old prompts directory if exists
+        if (Test-Path "lambda_generator_package\prompts") {
+            Remove-Item "lambda_generator_package\prompts" -Recurse -Force
+        }
+        # Copy entire prompts directory
+        Copy-Item "prompts" "lambda_generator_package\prompts" -Recurse -Force
+        Write-Host "  [OK] Copied prompts directory to package" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] prompts directory not found - Lambda may fail!" -ForegroundColor Yellow
+    }
+    
     # Remove old zip if exists
     if (Test-Path "lambda_generator_package.zip") {
         Remove-Item "lambda_generator_package.zip" -Force
