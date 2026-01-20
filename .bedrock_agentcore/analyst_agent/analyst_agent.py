@@ -9,7 +9,22 @@ import os
 import uuid
 from typing import Optional, Dict, List
 
-from bedrock_agentcore import BedrockAgentCoreApp
+# Defensive import strategy for BedrockAgentCoreApp (same as my_agent)
+try:
+    from bedrock_agentcore.runtime import BedrockAgentCoreApp
+    print("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore.runtime", flush=True)
+except ImportError:
+    try:
+        from bedrock_agentcore import BedrockAgentCoreApp
+        print("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore", flush=True)
+    except ImportError:
+        try:
+            from bedrock_agentcore.runtime.app import BedrockAgentCoreApp
+            print("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore.runtime.app", flush=True)
+        except ImportError as e:
+            print(f"[ANALYST-AGENT] Failed to import BedrockAgentCoreApp: {e}", flush=True)
+            raise
+
 from strands import Agent, tool
 from strands.models import BedrockModel
 
@@ -79,23 +94,34 @@ def invoke_lambda_tool(function_name: str, payload: dict) -> dict:
 
 # --- AgentCore Memory Functions ---
 
-def create_analyst_session(project_id: Optional[str] = None) -> Dict[str, str]:
+def create_analyst_session(project_id: Optional[str] = None, session_id: Optional[str] = None) -> Dict[str, str]:
     """Create a new AgentCore Memory session for requirements gathering"""
-    if not project_id:
-        project_id = str(uuid.uuid4())
+    if not session_id:
+        if not project_id:
+            project_id = str(uuid.uuid4())
+        session_id = f"analyst-session-{project_id}"
+    else:
+        # Use provided session_id (from runtime session)
+        if not project_id:
+            # Extract project_id from session_id if it follows the pattern
+            if session_id.startswith("analyst-session-"):
+                project_id = session_id.replace("analyst-session-", "")
+            else:
+                project_id = str(uuid.uuid4())
     
-    session_id = f"analyst-session-{project_id}"
     client = _get_agentcore_memory_client()
     
     try:
-        # Create memory session
+        # Create memory session (this also creates the actor if it doesn't exist)
+        print(f"[ANALYST-AGENT] Creating session {session_id} with actor {AGENTCORE_ACTOR_ID} in memory {AGENTCORE_MEMORY_ID}", flush=True)
         response = client.create_session(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID
         )
         
-        print(f"[ANALYST-AGENT] Created session: {session_id}", flush=True)
+        print(f"[ANALYST-AGENT] ✅ Created session: {session_id}", flush=True)
+        print(f"[ANALYST-AGENT] Session response: {response}", flush=True)
         
         # Add welcome message
         welcome_msg = """Hello! I'm Mary, your Strategic Business Analyst. I'm here to help you create a comprehensive Business Requirements Document (BRD) through a structured conversation.
@@ -111,7 +137,18 @@ I'll ask you questions about your project to understand:
 
 Let's start! What is the main idea or goal of your project?"""
         
-        add_message_to_memory(session_id, "assistant", welcome_msg)
+        # Only add welcome message if this is a new session (check if session already has messages)
+        try:
+            existing_messages = get_conversation_history(session_id, max_messages=1)
+            if not existing_messages:
+                # New session, add welcome message
+                add_message_to_memory(session_id, "assistant", welcome_msg)
+            else:
+                # Session already exists, use a continuation message
+                welcome_msg = "Continuing our conversation..."
+        except:
+            # If we can't check, assume it's new and add welcome message
+            add_message_to_memory(session_id, "assistant", welcome_msg)
         
         return {
             "session_id": session_id,
@@ -119,6 +156,14 @@ Let's start! What is the main idea or goal of your project?"""
             "message": welcome_msg
         }
     except Exception as e:
+        # If session already exists, that's fine - just return the session info
+        if "already exists" in str(e).lower() or "ConflictException" in str(type(e).__name__):
+            print(f"[ANALYST-AGENT] Session {session_id} already exists, reusing it", flush=True)
+            return {
+                "session_id": session_id,
+                "project_id": project_id,
+                "message": "Continuing conversation..."
+            }
         print(f"[ANALYST-AGENT] Error creating session: {e}", flush=True)
         raise
 
@@ -127,7 +172,8 @@ def add_message_to_memory(session_id: str, role: str, content: str):
     client = _get_agentcore_memory_client()
     
     try:
-        client.create_event(
+        print(f"[ANALYST-AGENT] Attempting to add {role} message to session {session_id}, actor {AGENTCORE_ACTOR_ID}, memory {AGENTCORE_MEMORY_ID}", flush=True)
+        response = client.create_event(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID,
@@ -142,14 +188,21 @@ def add_message_to_memory(session_id: str, role: str, content: str):
                 }
             ]
         )
-        print(f"[ANALYST-AGENT] Added {role} message to session {session_id}", flush=True)
+        print(f"[ANALYST-AGENT] ✅ Successfully added {role} message to session {session_id}", flush=True)
+        print(f"[ANALYST-AGENT] Event response: {response}", flush=True)
     except Exception as e:
-        print(f"[ANALYST-AGENT] Error adding message to memory: {e}", flush=True)
-        raise
+        print(f"[ANALYST-AGENT] ❌ Error adding message to memory: {e}", flush=True)
+        import traceback
+        print(f"[ANALYST-AGENT] Traceback: {traceback.format_exc()}", flush=True)
+        # Don't raise - allow conversation to continue even if memory storage fails
+        # This prevents the agent from crashing if memory is temporarily unavailable
 
-def get_conversation_history(session_id: str, max_messages: int = 200) -> List[Dict]:
+def get_conversation_history(session_id: str, max_messages: int = 99) -> List[Dict]:
     """Get full conversation history from AgentCore Memory"""
     client = _get_agentcore_memory_client()
+    
+    # Ensure maxResults doesn't exceed API limit
+    max_results = min(max_messages, 99)  # API constraint: must be <= 100
     
     try:
         response = client.list_events(
@@ -157,7 +210,7 @@ def get_conversation_history(session_id: str, max_messages: int = 200) -> List[D
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID,
             includePayloads=True,
-            maxResults=max_messages
+            maxResults=max_results
         )
         
         events = response.get("events", [])
@@ -203,7 +256,10 @@ def format_conversation_as_transcript(messages: List[Dict]) -> str:
 @tool
 def get_brd_template() -> str:
     """
-    Get the standard BRD template structure.
+    Get the standard BRD template structure (for reference only).
+    NOTE: The BRD generator tool already has access to the template stored in S3.
+    You do NOT need to ask the user for a template - it's already available.
+    This tool is only for your reference to understand the BRD structure.
     Returns the template text that defines the BRD format.
     """
     template = """Business Requirements Document (BRD) Template
@@ -272,11 +328,13 @@ def check_requirements_completeness(session_id: str) -> str:
     """
     Analyze the conversation history to determine if enough information has been gathered.
     Returns a status indicating if requirements are complete or what's still missing.
+    NOTE: BRD generation can work with minimal information - this is just a check, not a blocker.
     """
     messages = get_conversation_history(session_id)
     
-    if len(messages) < 10:  # Too few messages
-        return "INCOMPLETE: Need more information. Continue asking questions."
+    # Removed minimum message requirement - BRD can be generated with any amount of information
+    if len(messages) < 2:  # At least need user message and assistant response
+        return "COMPLETE: Ready to generate BRD. You can use generate_brd_from_conversation even with minimal information."
     
     # Use Bedrock to analyze completeness
     conversation_text = format_conversation_as_transcript(messages)
@@ -322,7 +380,15 @@ Your response:"""
 def generate_brd_from_conversation(session_id: str, brd_id: Optional[str] = None) -> str:
     """
     Generate a BRD from the conversation history stored in AgentCore Memory.
-    Reuses the existing brd_generator_lambda.
+    The BRD generator tool already has access to the template stored in S3, so you don't need to provide it.
+    This tool will:
+    1. Retrieve all conversation history from AgentCore Memory
+    2. Format it as a transcript
+    3. Send it to the BRD generator Lambda along with the template location in S3
+    4. The generator will create the BRD using Bedrock
+    
+    NOTE: This tool works with ANY amount of conversation history - even a single message is enough.
+    The BRD generator will create a comprehensive document based on whatever information is available.
     
     Args:
         session_id: The session ID for the requirements gathering conversation
@@ -339,21 +405,24 @@ def generate_brd_from_conversation(session_id: str, brd_id: Optional[str] = None
     # 1. Get conversation history
     messages = get_conversation_history(session_id)
     if not messages:
-        return "Error: No conversation history found. Please have a conversation first."
+        # Even if no messages, we can still generate a BRD with minimal information
+        # Create a minimal transcript from the session_id itself
+        print(f"[ANALYST-AGENT] No conversation history found, but proceeding with BRD generation anyway", flush=True)
+        messages = [{"role": "user", "content": "Project requirements gathering session"}]
     
     # 2. Format as transcript
     transcript = format_conversation_as_transcript(messages)
     print(f"[ANALYST-AGENT] Formatted transcript: {len(transcript)} characters", flush=True)
     
-    # 3. Get S3 bucket and template path (use S3 instead of hardcoded template)
+    # 3. Call BRD generator Lambda with S3 template location (template is already in S3)
+    # The generator Lambda will fetch the template from S3 automatically
     s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
     template_s3_key = "templates/Deluxe_BRD_Template_v2+2.docx"
     
-    # 4. Call BRD generator Lambda with S3 template reference
     payload = {
         "template_s3_bucket": s3_bucket,
         "template_s3_key": template_s3_key,
-        "transcript": transcript,  # Pass transcript as text
+        "transcript": transcript,
         "brd_id": brd_id
     }
     
@@ -387,65 +456,34 @@ def generate_brd_from_conversation(session_id: str, brd_id: Optional[str] = None
 # --- Agent Setup ---
 
 def _get_agent(fresh=False):
-    """Get Strands agent instance with Mary's persona"""
+    """Get Strands agent instance"""
     global _agent_instance
     
     if fresh or _agent_instance is None:
         try:
             model = BedrockModel(model_id=BEDROCK_MODEL_ID)
-            tools = [get_brd_template, check_requirements_completeness, generate_brd_from_conversation]
             
-            # Set Mary's persona as system prompt
+            # System prompt to ensure agent understands its role
             system_prompt = """You are Mary, a Strategic Business Analyst and Requirements Expert.
 
-PERSONA:
-- You are a senior analyst with deep expertise in market research, competitive analysis, and requirements elicitation
-- You specialize in translating vague needs into actionable specifications
-- You speak with the excitement of a treasure hunter - thrilled by every clue, energized when patterns emerge
-- You structure insights with precision while making analysis feel like discovery
+CRITICAL INSTRUCTIONS:
+- The BRD template is ALREADY stored in S3 and available to the generator tool - DO NOT ask users for templates
+- You are creating the transcript through conversation - DO NOT ask users for transcripts or meeting notes
+- Your ONLY job is to gather information through structured Q&A conversation
+- Focus on asking questions about: project purpose, business drivers, stakeholders, scope, requirements, constraints, success criteria
+- When you have enough information, use check_requirements_completeness, then suggest generating the BRD
+- The generate_brd_from_conversation tool will automatically use your conversation history as the transcript
 
-PRINCIPLES:
-- Channel expert business analysis frameworks: Porter's Five Forces, SWOT analysis, root cause analysis, competitive intelligence
-- Every business challenge has root causes waiting to be discovered
-- Ground findings in verifiable evidence
-- Articulate requirements with absolute precision
-- Ensure all stakeholder voices are heard
-
-YOUR ROLE:
-You are conducting a structured interview to gather requirements for a Business Requirements Document (BRD).
-
-You need to understand:
-1. Project purpose and objectives
-2. Business drivers and pain points (use root cause analysis)
-3. Stakeholders and their roles (ensure all voices heard)
-4. Scope (what's in and out)
-5. Functional requirements (with precision)
-6. Non-functional requirements (performance, security, compliance)
-7. Constraints and assumptions
-8. Success criteria and KPIs
-
-CONVERSATION APPROACH:
-- Ask one question at a time
-- Be thorough but conversational
-- Show excitement when you discover important information
-- Use frameworks to dig deeper (e.g., "Let's analyze this using SWOT - what are the strengths and weaknesses?")
-- When you have enough information, use check_requirements_completeness tool, then suggest using generate_brd_from_conversation to create the BRD
-
-IMPORTANT: Always respond as Mary. Never say you're a "BRD assistant" or generic assistant. You are specifically Mary, the Strategic Business Analyst."""
+Your persona: Excited, thorough, analytical. Ask one question at a time. Show enthusiasm when discovering important information."""
             
-            # Try to initialize with system prompt if supported
-            try:
-                agent = Agent(model=model, tools=tools, system=system_prompt)
-            except TypeError:
-                # If system parameter not supported, initialize without it
-                agent = Agent(model=model, tools=tools)
-                print("[ANALYST-AGENT] System prompt parameter not supported, will use in messages", flush=True)
+            tools = [get_brd_template, check_requirements_completeness, generate_brd_from_conversation]
+            agent = Agent(model=model, tools=tools, system_prompt=system_prompt)
             
             if not fresh:
                 _agent_instance = agent
-                print("[ANALYST-AGENT] Strands agent initialized with Mary's persona", flush=True)
+                print("[ANALYST-AGENT] Strands agent initialized with system prompt", flush=True)
             else:
-                print("[ANALYST-AGENT] Created fresh agent instance with Mary's persona", flush=True)
+                print("[ANALYST-AGENT] Created fresh agent instance with system prompt", flush=True)
             
             return agent
             
@@ -487,12 +525,27 @@ def invoke(payload):
         # Get or create session
         session_id = payload.get("session_id")
         project_id = payload.get("project_id")
+        runtime_session_id = payload.get("runtime_session_id")  # Get runtime session ID if provided
         
         if not session_id:
-            # Create new session
-            session_info = create_analyst_session(project_id)
-            session_id = session_info["session_id"]
-            initial_response = session_info["message"]
+            # Use runtime_session_id if provided, otherwise create new session
+            if runtime_session_id:
+                # Use the runtime session ID as the AgentCore Memory session ID for consistency
+                session_id = runtime_session_id
+                print(f"[ANALYST-AGENT] Using provided runtime_session_id as session_id: {session_id}", flush=True)
+                # Create the session in AgentCore Memory with this ID
+                try:
+                    session_info = create_analyst_session(project_id, session_id)
+                    initial_response = session_info["message"]
+                except Exception as e:
+                    # Session might already exist, that's fine
+                    print(f"[ANALYST-AGENT] Session might already exist: {e}", flush=True)
+                    initial_response = "Continuing conversation..."
+            else:
+                # Create new session
+                session_info = create_analyst_session(project_id)
+                session_id = session_info["session_id"]
+                initial_response = session_info["message"]
             
             # Add user's first message
             add_message_to_memory(session_id, "user", user_message)
@@ -534,22 +587,25 @@ CONVERSATION APPROACH:
 - Be thorough but conversational
 - Show excitement when you discover important information
 - Use frameworks to dig deeper (e.g., "Let's analyze this using SWOT - what are the strengths and weaknesses?")
-- When you have enough information, use check_requirements_completeness tool, then suggest using generate_brd_from_conversation to create the BRD
+- IMPORTANT: The user can generate a BRD at ANY time, even with minimal information. The generate_brd_from_conversation tool works with any amount of conversation history.
+- You can suggest generating the BRD after just a few questions, or let the user decide when to generate it
+- If the user asks to generate a BRD, do it immediately - don't ask for more information first
+
+IMPORTANT NOTES:
+- The BRD template is ALREADY available in the generator tool (stored in S3) - DO NOT ask the user for a template
+- You do NOT need a transcript from the user - you are creating the transcript through this conversation
+- Your job is to gather information through conversation, not to ask for templates or pre-existing documents
+- Focus on asking questions to understand the project requirements
+- The generate_brd_from_conversation tool will automatically use the conversation history as the transcript
 
 SESSION ID: {session_id}
 
 USER'S MESSAGE: {user_message}
 
-Respond naturally as Mary, ask follow-up questions, and guide the conversation to gather all necessary requirements.
-
-CRITICAL: You are Mary, NOT a generic BRD assistant. Never say "I'm a BRD assistant" or "I can help with BRDs". You are specifically Mary, the Strategic Business Analyst."""
+Respond naturally as Mary, ask follow-up questions, and guide the conversation to gather all necessary requirements. DO NOT ask for templates or transcripts - just gather information through conversation."""
             
             try:
-                # Prepend system instruction to ensure Mary's persona is followed
-                full_prompt = f"""You are Mary, a Strategic Business Analyst. Remember: You are NOT a generic BRD assistant. You are Mary, conducting a structured requirements gathering interview.
-
-{enhanced_prompt}"""
-                result = agent(full_prompt)
+                result = agent(enhanced_prompt)
                 
                 if hasattr(result, 'data'):
                     result_text = str(result.data) if result.data else str(result)
@@ -573,6 +629,7 @@ CRITICAL: You are Mary, NOT a generic BRD assistant. Never say "I'm a BRD assist
             except Exception as e:
                 error_msg = f"I apologize, but I encountered an error: {str(e)}"
                 add_message_to_memory(session_id, "assistant", error_msg)
+                # Return JSON with session_id even on error
                 return json.dumps({
                     "result": error_msg,
                     "session_id": session_id,
@@ -580,17 +637,26 @@ CRITICAL: You are Mary, NOT a generic BRD assistant. Never say "I'm a BRD assist
                 })
         
         else:
-            # Existing session - continue conversation
-            add_message_to_memory(session_id, "user", user_message)
+            # Session ID provided - ensure it exists in AgentCore Memory
+            try:
+                # Try to get conversation history to verify session exists
+                test_history = get_conversation_history(session_id, max_messages=1)
+                if not test_history:
+                    # Session doesn't exist, create it
+                    print(f"[ANALYST-AGENT] Session {session_id} doesn't exist in Memory, creating it...", flush=True)
+                    create_analyst_session(project_id, session_id)
+            except Exception as e:
+                # Session might not exist, create it
+                print(f"[ANALYST-AGENT] Creating session {session_id} in Memory: {e}", flush=True)
+                create_analyst_session(project_id, session_id)
             
-            # Get conversation history for context
-            history = get_conversation_history(session_id)
-            history_text = format_conversation_as_transcript(history[-20:])  # Last 20 messages for context
+            # Add user's first message
+            add_message_to_memory(session_id, "user", user_message)
             
             # Get agent
             agent = _get_agent()
             
-            # Build enhanced prompt with history
+            # Build enhanced prompt with BMad-inspired persona
             enhanced_prompt = f"""You are Mary, a Strategic Business Analyst and Requirements Expert.
 
 PERSONA:
@@ -606,26 +672,43 @@ PRINCIPLES:
 - Articulate requirements with absolute precision
 - Ensure all stakeholder voices are heard
 
-CONVERSATION HISTORY:
-{history_text}
+YOUR ROLE:
+You are conducting a structured interview to gather requirements for a Business Requirements Document (BRD).
+
+You need to understand:
+1. Project purpose and objectives
+2. Business drivers and pain points (use root cause analysis)
+3. Stakeholders and their roles (ensure all voices heard)
+4. Scope (what's in and out)
+5. Functional requirements (with precision)
+6. Non-functional requirements (performance, security, compliance)
+7. Constraints and assumptions
+8. Success criteria and KPIs
+
+CONVERSATION APPROACH:
+- Ask one question at a time
+- Be thorough but conversational
+- Show excitement when you discover important information
+- Use frameworks to dig deeper (e.g., "Let's analyze this using SWOT - what are the strengths and weaknesses?")
+- IMPORTANT: The user can generate a BRD at ANY time, even with minimal information. The generate_brd_from_conversation tool works with any amount of conversation history.
+- You can suggest generating the BRD after just a few questions, or let the user decide when to generate it
+- If the user asks to generate a BRD, do it immediately - don't ask for more information first
+
+IMPORTANT NOTES:
+- The BRD template is ALREADY available in the generator tool (stored in S3) - DO NOT ask the user for a template
+- You do NOT need a transcript from the user - you are creating the transcript through this conversation
+- Your job is to gather information through conversation, not to ask for templates or pre-existing documents
+- Focus on asking questions to understand the project requirements
+- The generate_brd_from_conversation tool will automatically use the conversation history as the transcript
 
 SESSION ID: {session_id}
 
-Continue the conversation naturally. Ask follow-up questions based on what you've learned.
-When you have enough information, use check_requirements_completeness to verify, then suggest generating the BRD.
+USER'S MESSAGE: {user_message}
 
-USER'S CURRENT MESSAGE: {user_message}
-
-Respond appropriately as Mary and continue gathering requirements.
-
-CRITICAL: You are Mary, NOT a generic BRD assistant. Never say "I'm a BRD assistant" or "I can help with BRDs". You are specifically Mary, the Strategic Business Analyst."""
+Respond naturally as Mary, ask follow-up questions, and guide the conversation to gather all necessary requirements. DO NOT ask for templates or transcripts - just gather information through conversation."""
             
             try:
-                # Prepend system instruction to ensure Mary's persona is followed
-                full_prompt = f"""You are Mary, a Strategic Business Analyst. Remember: You are NOT a generic BRD assistant. You are Mary, conducting a structured requirements gathering interview.
-
-{enhanced_prompt}"""
-                result = agent(full_prompt)
+                result = agent(enhanced_prompt)
                 
                 if hasattr(result, 'data'):
                     result_text = str(result.data) if result.data else str(result)
@@ -649,6 +732,7 @@ CRITICAL: You are Mary, NOT a generic BRD assistant. Never say "I'm a BRD assist
             except Exception as e:
                 error_msg = f"I apologize, but I encountered an error: {str(e)}"
                 add_message_to_memory(session_id, "assistant", error_msg)
+                # Return JSON with session_id even on error
                 return json.dumps({
                     "result": error_msg,
                     "session_id": session_id,
@@ -659,5 +743,26 @@ CRITICAL: You are Mary, NOT a generic BRD assistant. Never say "I'm a BRD assist
         print(f"[ANALYST-AGENT] Error in invoke: {str(e)}", flush=True)
         import traceback
         print(traceback.format_exc(), flush=True)
-        return f"Error: {str(e)}"
+        # Try to get session_id if it was created
+        session_id = payload.get("session_id")
+        if not session_id:
+            # Try to create a session ID for error response
+            try:
+                session_info = create_analyst_session(payload.get("project_id"))
+                session_id = session_info["session_id"]
+            except:
+                session_id = "unknown"
+        return json.dumps({
+            "result": f"Error: {str(e)}",
+            "session_id": session_id,
+            "message": f"Error: {str(e)}"
+        })
 
+if __name__ == "__main__":
+    # Run the app locally for testing
+    print("[ANALYST-AGENT] Starting AgentCore Runtime app locally...", flush=True)
+    print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
+    print(f"[ANALYST-AGENT] Lambda Generator: {LAMBDA_GENERATOR}", flush=True)
+    print(f"[ANALYST-AGENT] Memory ID: {AGENTCORE_MEMORY_ID}", flush=True)
+    print(f"[ANALYST-AGENT] Actor ID: {AGENTCORE_ACTOR_ID}", flush=True)
+    app.run()

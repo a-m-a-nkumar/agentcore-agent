@@ -84,32 +84,58 @@ try {
     $env:PYTHONIOENCODING = "utf-8"
     $env:PYTHONLEGACYWINDOWSSTDIO = "1"
     
-    # IMPORTANT: agentcore launch must be run from ROOT directory (like my_agent script)
-    # It automatically looks for .bedrock_agentcore/analyst_agent
-    # DO NOT cd into the agent directory - stay in root!
-    Write-Host "  Running agentcore launch from root directory..." -ForegroundColor Gray
-    Write-Host "  (agentcore launch will automatically detect .bedrock_agentcore/analyst_agent)" -ForegroundColor Gray
+    # IMPORTANT: Use --agent flag to explicitly specify analyst_agent
+    # This ensures it deploys analyst_agent, not my_agent (which is the default)
+    Write-Host "  Running agentcore launch with --agent analyst_agent flag..." -ForegroundColor Gray
+    Write-Host "  (This explicitly deploys analyst_agent, not my_agent)" -ForegroundColor Gray
     Write-Host ""
     
-    # Run agentcore launch from ROOT directory (same as my_agent script)
-    # It will automatically detect and use .bedrock_agentcore/analyst_agent
-    $output = agentcore launch 2>&1 | Out-String
+    # Run agentcore launch with --agent flag to explicitly deploy analyst_agent
+    # Must be run from root directory where .bedrock_agentcore.yaml is located
+    Write-Host "  Executing: agentcore launch --agent analyst_agent" -ForegroundColor Gray
+    $output = agentcore launch --agent analyst_agent 2>&1 | Out-String
     $exitCode = $LASTEXITCODE
     
-    # Check if deployment succeeded (ignore encoding errors if deployment worked)
-    if ($exitCode -eq 0 -or $output -match "deployed|success|complete|runtime") {
-        Write-Host "  [OK] Analyst agent deployed successfully" -ForegroundColor Green
-        
-        # Try to extract the agent ARN from output
-        $agentArn = $null
+    # Check if deployment succeeded
+    $deploymentSuccess = $false
+    $agentArn = $null
+    
+    if ($exitCode -eq 0) {
+        # Extract agent ARN from output
         if ($output -match "arn:aws:bedrock-agentcore:([^\s]+)") {
             $agentArn = $matches[0]
+            Write-Host "  [OK] Analyst agent deployed successfully!" -ForegroundColor Green
             Write-Host "  [INFO] Agent ARN: $agentArn" -ForegroundColor Cyan
+            $deploymentSuccess = $true
+        } elseif ($output -match "Deployment completed successfully" -or $output -match "Agent created/updated") {
+            Write-Host "  [OK] Analyst agent deployed successfully!" -ForegroundColor Green
+            $deploymentSuccess = $true
+        } else {
+            Write-Host "  [WARN] Deployment may have succeeded but ARN not found in output" -ForegroundColor Yellow
+            Write-Host "  [INFO] Checking output for success indicators..." -ForegroundColor Gray
+            if ($output -match "CodeBuild completed successfully" -or $output -match "Deploying to Bedrock AgentCore") {
+                $deploymentSuccess = $true
+                Write-Host "  [OK] Deployment appears successful based on output" -ForegroundColor Green
+            }
         }
+    } else {
+        Write-Host "  [ERROR] Deployment failed with exit code: $exitCode" -ForegroundColor Red
+        Write-Host "  [INFO] Last 500 chars of output:" -ForegroundColor Gray
+        Write-Host $output.Substring([Math]::Max(0, $output.Length - 500)) -ForegroundColor Gray
+    }
+    
+    if (-not $deploymentSuccess) {
+        Write-Host "  [ERROR] Analyst agent deployment failed!" -ForegroundColor Red
+        Write-Host "  [INFO] Full output saved above" -ForegroundColor Gray
+        exit 1
+    }
         
-        # We're already in script directory (root), no need to cd
+        # We're back in root directory after agentcore launch
         
-        # Always retag from 'latest' to 'analyst-agent' after deployment
+        # IMPORTANT: Only retag if we can verify this is the analyst agent image
+        # Check the image was created recently (within last 5 minutes) to ensure it's from this deployment
+        Write-Host ""
+        Write-Host "[5/5] Verifying and retagging analyst agent image..." -ForegroundColor Yellow
         # This ensures the most recent image is always tagged as 'analyst-agent'
         Write-Host ""
         Write-Host "[5/5] Retagging image from 'latest' to 'analyst-agent'..." -ForegroundColor Yellow
@@ -122,18 +148,35 @@ try {
             # Check if 'latest' tag exists (should exist after agentcore launch)
             $latestCheck = aws ecr describe-images --repository-name deluxe-sdlc --region us-east-1 --image-ids imageTag=latest 2>&1
             if ($LASTEXITCODE -eq 0) {
-                Write-Host "  [OK] Found 'latest' tag, retagging to 'analyst-agent'..." -ForegroundColor Green
-                
-                # Set environment variables for retag script
-                $env:ECR_REPOSITORY = "deluxe-sdlc"
-                $env:SOURCE_TAG = "latest"
-                $env:TARGET_TAG = "analyst-agent"
-                python retag_image.py
+                # Verify this is a recent image (created within last 5 minutes) to ensure it's from this deployment
+                $imageDetails = aws ecr describe-images --repository-name deluxe-sdlc --region us-east-1 --image-ids imageTag=latest --query 'imageDetails[0].imagePushedAt' --output text 2>&1
                 if ($LASTEXITCODE -eq 0) {
-                    Write-Host "  [OK] Image retagged to 'analyst-agent' and 'latest' tag removed" -ForegroundColor Green
-                    Write-Host "  [INFO] Most recent image is now tagged as 'analyst-agent'" -ForegroundColor Cyan
+                    $pushedTime = [DateTime]::Parse($imageDetails)
+                    $now = Get-Date
+                    $timeDiff = ($now - $pushedTime).TotalMinutes
+                    
+                    if ($timeDiff -le 10) {
+                        Write-Host "  [OK] Found 'latest' tag (pushed $([math]::Round($timeDiff, 1)) minutes ago)" -ForegroundColor Green
+                        Write-Host "  [OK] This appears to be from the current deployment, retagging to 'analyst-agent'..." -ForegroundColor Green
+                        
+                        # Set environment variables for retag script
+                        $env:ECR_REPOSITORY = "deluxe-sdlc"
+                        $env:SOURCE_TAG = "latest"
+                        $env:TARGET_TAG = "analyst-agent"
+                        python retag_image.py
+                        if ($LASTEXITCODE -eq 0) {
+                            Write-Host "  [OK] Image retagged to 'analyst-agent' and 'latest' tag removed" -ForegroundColor Green
+                            Write-Host "  [INFO] Most recent analyst agent image is now tagged as 'analyst-agent'" -ForegroundColor Cyan
+                        } else {
+                            Write-Host "  [WARN] Image retagging failed - check if 'latest' tag exists" -ForegroundColor Yellow
+                        }
+                    } else {
+                        Write-Host "  [WARN] 'latest' tag is too old ($([math]::Round($timeDiff, 1)) minutes) - may be from my_agent deployment" -ForegroundColor Yellow
+                        Write-Host "  [INFO] Skipping retag to avoid affecting my_agent image" -ForegroundColor Gray
+                        Write-Host "  [INFO] The analyst agent image may have been tagged differently" -ForegroundColor Gray
+                    }
                 } else {
-                    Write-Host "  [WARN] Image retagging failed - check if 'latest' tag exists" -ForegroundColor Yellow
+                    Write-Host "  [WARN] Could not verify image timestamp, skipping retag to be safe" -ForegroundColor Yellow
                 }
             } else {
                 Write-Host "  [WARN] 'latest' tag not found - image may have been tagged differently" -ForegroundColor Yellow
@@ -173,16 +216,6 @@ try {
             Write-Host "  ANALYST_AGENT_ARN = `"$agentArn`"" -ForegroundColor Gray
             Write-Host ""
         }
-    } elseif ($output -match "UnicodeEncodeError|charmap") {
-        # Encoding error but deployment might have succeeded
-        Write-Host "  [WARN] Console encoding issue detected, checking deployment status..." -ForegroundColor Yellow
-        Write-Host "  [INFO] Deployment may have succeeded despite encoding error" -ForegroundColor Yellow
-        Write-Host "  Please check AWS Console to verify deployment" -ForegroundColor Gray
-    } else {
-        Write-Host "  [ERROR] Analyst agent deployment failed!" -ForegroundColor Red
-        Write-Host "  Error output: $($output.Substring(0, [Math]::Min(500, $output.Length)))" -ForegroundColor Red
-        exit 1
-    }
 } catch {
     Write-Host "  [ERROR] Failed to deploy analyst agent: $_" -ForegroundColor Red
     exit 1
