@@ -1,12 +1,13 @@
 """
-BRD Agent for AgentCore Runtime using Strands framework
-This agent uses Lambda functions as tools for BRD generation, retrieval, and editing.
+Business Analyst Agent for AgentCore Runtime using Strands framework
+This agent conducts structured Q&A sessions to gather requirements and generate BRDs.
+Inspired by BMad Method's analyst persona.
 """
 
 import json
 import os
-import re
-from typing import Optional
+import uuid
+from typing import Optional, Dict, List
 
 from bedrock_agentcore import BedrockAgentCoreApp
 from strands import Agent, tool
@@ -15,26 +16,20 @@ from strands.models import BedrockModel
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
 
-# Lambda function names (configurable via environment variables)
-LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'brd_generator_lambda')
-LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', 'brd_retriever_lambda')
-LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', 'brd_chat_lambda')
+# Configuration
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-
-# AgentCore Memory configuration
+LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'brd_generator_lambda')
 AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
-AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'brd-session')
+AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
 
-# Lazy loading of boto3 Lambda client
+# Lazy loading
 _lambda_client = None
-# Lazy loading of AgentCore Memory client
 _agentcore_memory_client = None
-# Lazy loading of Agent
 _agent_instance = None
+_bedrock_runtime = None
 
 def _get_lambda_client():
-    """Lazy load Lambda client to avoid initialization timeout"""
     global _lambda_client
     if _lambda_client is None:
         import boto3
@@ -42,621 +37,550 @@ def _get_lambda_client():
     return _lambda_client
 
 def _get_agentcore_memory_client():
-    """Lazy load AgentCore Memory client to avoid initialization timeout"""
     global _agentcore_memory_client
     if _agentcore_memory_client is None:
         import boto3
         _agentcore_memory_client = boto3.client('bedrock-agentcore', region_name=AWS_REGION)
     return _agentcore_memory_client
 
+def _get_bedrock_runtime():
+    global _bedrock_runtime
+    if _bedrock_runtime is None:
+        import boto3
+        _bedrock_runtime = boto3.client('bedrock-runtime', region_name=AWS_REGION)
+    return _bedrock_runtime
+
 def invoke_lambda_tool(function_name: str, payload: dict) -> dict:
-    """
-    Invoke a Lambda function as a tool
-    
-    Args:
-        function_name: Name of the Lambda function
-        payload: Payload to send to Lambda
-        
-    Returns:
-        Response from Lambda function
-    """
+    """Invoke a Lambda function as a tool"""
     try:
         lambda_client = _get_lambda_client()
-        print(f"[BRD-AGENT] Invoking Lambda: {function_name}", flush=True)
+        print(f"[ANALYST-AGENT] Invoking Lambda: {function_name}", flush=True)
         
         response = lambda_client.invoke(
             FunctionName=function_name,
-            InvocationType='RequestResponse',  # Synchronous invocation
+            InvocationType='RequestResponse',
             Payload=json.dumps(payload)
         )
         
-        # Read response
         response_payload = json.loads(response['Payload'].read())
         
-        # Check for Lambda errors
         if 'FunctionError' in response:
             error_msg = response_payload.get('errorMessage', 'Unknown Lambda error')
-            print(f"[BRD-AGENT] Lambda error: {error_msg}", flush=True)
+            print(f"[ANALYST-AGENT] Lambda error: {error_msg}", flush=True)
             raise Exception(f"Lambda function error: {error_msg}")
         
-        print(f"[BRD-AGENT] Lambda response received", flush=True)
         return response_payload
         
     except Exception as e:
-        print(f"[BRD-AGENT] Error invoking Lambda {function_name}: {str(e)}", flush=True)
+        print(f"[ANALYST-AGENT] Error invoking Lambda {function_name}: {str(e)}", flush=True)
         import traceback
         print(traceback.format_exc(), flush=True)
         raise
 
-# --- Tool Definitions (using @tool decorator) ---
+# --- AgentCore Memory Functions ---
 
-@tool
-def generate_brd(template: str, transcript: str, brd_id: Optional[str] = None) -> str:
-    """
-    Generate a Business Requirements Document (BRD) from a template and transcript.
+def create_analyst_session(project_id: Optional[str] = None) -> Dict[str, str]:
+    """Create a new AgentCore Memory session for requirements gathering"""
+    if not project_id:
+        project_id = str(uuid.uuid4())
     
-    Args:
-        template: The BRD template structure that defines the format and sections
-        transcript: The meeting transcript or requirements text to extract information from
-        brd_id: Optional BRD ID (will be generated if not provided)
-    
-    Returns:
-        Success message with BRD ID
-    """
-    payload = {
-        'template': template,
-        'transcript': transcript
-    }
-    if brd_id:
-        payload['brd_id'] = brd_id
-    
-    lambda_response = invoke_lambda_tool(LAMBDA_GENERATOR, payload)
-    
-    print(f"[BRD-AGENT] Lambda response type: {type(lambda_response)}", flush=True)
-    print(f"[BRD-AGENT] Lambda response keys: {lambda_response.keys() if isinstance(lambda_response, dict) else 'not a dict'}", flush=True)
-    
-    # Parse response - handle different response formats
-    if isinstance(lambda_response, dict):
-        # Handle Lambda HTTP response format
-        if 'statusCode' in lambda_response and 'body' in lambda_response:
-            print(f"[BRD-AGENT] Detected Lambda HTTP response format", flush=True)
-            try:
-                body = json.loads(lambda_response['body'])
-                print(f"[BRD-AGENT] Parsed body keys: {body.keys()}", flush=True)
-                
-                if body.get('brd'):
-                    brd_text = body['brd']
-                    brd_id_from_lambda = body.get('brd_id')
-                    print(f"[BRD-AGENT] Found BRD! Length: {len(brd_text)} chars, ID: {brd_id_from_lambda}", flush=True)
-                    
-                    # Return as JSON so app.py can parse it easily
-                    return json.dumps({
-                        'status': 'success',
-                        'brd': brd_text,
-                        'brd_id': brd_id_from_lambda
-                    })
-            except Exception as e:
-                print(f"[BRD-AGENT] Error parsing Lambda body: {e}", flush=True)
-        
-        # Other formats
-        elif 'response' in lambda_response:
-            response_body = lambda_response['response'].get('responseBody', {})
-            text_body = response_body.get('TEXT', {}).get('body', '')
-            brd_id = lambda_response.get('brd_id') or brd_id
-            return json.dumps({'status': 'success', 'brd': text_body, 'brd_id': brd_id})
-        elif 'brd' in lambda_response:
-            return json.dumps({'status': 'success', 'brd': lambda_response['brd'], 'brd_id': lambda_response.get('brd_id')})
-    
-    # Fallback
-    return json.dumps({'status': 'error', 'message': str(lambda_response)[:500]})
-
-@tool
-def fetch_brd(brd_id: str) -> str:
-    """
-    Fetch and retrieve the entire BRD document by its ID.
-    Use this tool when the user wants to view or download the complete BRD document.
-    
-    Do NOT use this tool if the user wants to:
-    - View a specific section (use chat_with_brd instead)
-    - List sections (use chat_with_brd instead)
-    - Edit or update sections (use chat_with_brd instead)
-    
-    Use this tool only when the user explicitly wants the full/entire/complete BRD document.
-    
-    Args:
-        brd_id: The BRD ID to retrieve (UUID format)
-    
-    Returns:
-        The complete BRD content as text
-    """
-    payload = {'brd_id': brd_id}
-    lambda_response = invoke_lambda_tool(LAMBDA_RETRIEVER, payload)
-    
-    # Parse response - handle different response formats
-    if isinstance(lambda_response, dict):
-        if 'response' in lambda_response:
-            # Bedrock Agent format
-            response_body = lambda_response['response'].get('responseBody', {})
-            text_body = response_body.get('TEXT', {}).get('body', '')
-            return text_body
-        elif 'body' in lambda_response:
-            # Lambda response format
-            body = lambda_response.get('body', {})
-            if isinstance(body, str):
-                try:
-                    body = json.loads(body)
-                except:
-                    return body
-            return body.get('response', body.get('message', str(body)))
-    return str(lambda_response)
-
-@tool
-def chat_with_brd(
-    action: str,
-    brd_id: str,
-    session_id: Optional[str] = None,
-    message: Optional[str] = None,
-    template: Optional[str] = None,
-    transcript: Optional[str] = None
-) -> str:
-    """
-    Chat with a BRD to edit, update, list, or view sections using natural language.
-    
-    IMPORTANT: You MUST call this tool for ANY user request related to an existing BRD, including:
-    - Listing sections ("list", "list all sections", "show me all sections")
-    - Viewing sections ("show section 4", "show me section 4", "show 4", "display section 4", "show stakeholders", "show me constraints")
-    - Updating sections ("update section 4: change X to Y", "in section 4 change X to Y", "change X to Y in section 4", "update 4 X to Y", "change X to Y here")
-    - Showing updated sections ("show me updated section", "show updated section", "show me the section I just updated", "what did I update")
-    - Questions about updates ("how many sections have I updated?", "which sections did I change?", "what changes have I made?")
-    - Any questions or edits about the BRD
-    
-    DO NOT respond directly to the user. ALWAYS call this tool and return its response.
-    
-    The tool understands natural language commands and handles typos/variations:
-    - "list all sections" or "list sections" - Shows all section names
-    - "show section 4" or "show me section 4" or "show 4" or "display section 4" - Displays section 4 content
-    - "show stakeholders" or "show me stakeholders" - Shows the Stakeholders section
-    - "update section 4: change sarah to aman" - Updates section 4
-    - "in section 4 change sarah to aman" - Updates section 4
-    - "change sarah to aman in section 4" - Updates section 4
-    - "update 4 sarah to aman" - Updates section 4
-    - "update sarah to aman in section 4" - Updates section 4
-    - "change X to Y here" - Updates the last shown section
-    - "show me updated section" or "show updated section" or "show me updatd section" (typo) - Shows the last updated section
-    - "how many sections have I updated?" or "which sections did I change?" - Lists all updated sections
-    - Any other questions about the BRD content
-    
-    The tool is intelligent and can understand user intent even with typos, variations, or unclear phrasing.
-    
-    Args:
-        action: Always use "send_message" for chat/edit operations
-        brd_id: The BRD ID to chat with (required) - use the BRD ID provided in the context/enhanced message
-        session_id: Session ID (use the session ID provided in the context/enhanced message, or auto-generate if not provided)
-        message: The user's EXACT natural language message/command (required)
-                Pass the user's message exactly as they wrote it, even if it has typos. The Lambda will handle intent detection.
-                Examples: 
-                  - "list all sections"
-                  - "show section 4"
-                  - "show me updatd section" (typo - will be understood as "show me updated section")
-                  - "update section 4: change sarah to aman"
-                  - "in section 4 change sarah to aman"
-                  - "change sarah to aman in section 4"
-                  - "update sarah to aman in section 4"
-                  - "how many sections i have updated?" (question about update history)
-        template: Template text (only for create_session, not needed for chat)
-        transcript: Transcript text (only for create_session, not needed for chat)
-    
-    Returns:
-        Chat response message with the result of the operation
-    """
-    payload = {
-        'action': action,
-        'brd_id': brd_id
-    }
-    
-    # Always provide session_id - Lambda will auto-create if missing
-    # Use provided session_id, or generate one based on BRD ID for consistency
-    if not session_id and brd_id:
-        session_id = f"brd-session-{brd_id}"
-        print(f"[BRD-AGENT] Auto-generated session_id: {session_id}", flush=True)
-    
-    if session_id:
-        payload['session_id'] = session_id
-    if message:
-        payload['message'] = message
-    if template:
-        payload['template'] = template
-    if transcript:
-        payload['transcript'] = transcript
-    
-    lambda_response = invoke_lambda_tool(LAMBDA_CHAT, payload)
-    
-    # Parse response - handle different response formats
-    if isinstance(lambda_response, dict):
-        if 'statusCode' in lambda_response:
-            # Lambda response format
-            body = lambda_response.get('body', '{}')
-            if isinstance(body, str):
-                try:
-                    body = json.loads(body)
-                except:
-                    return body
-            return body.get('message', body.get('response', str(body)))
-        else:
-            return lambda_response.get('message', lambda_response.get('response', str(lambda_response)))
-    return str(lambda_response)
-
-@tool
-def get_brd_conversation_history(brd_id: str, session_id: Optional[str] = None) -> str:
-    """
-    Get conversation history from AgentCore Memory for a BRD session.
-    
-    Use this tool to understand:
-    - What the user has been discussing
-    - Which sections have been updated
-    - Previous questions and answers
-    - Context for understanding user intent
-    
-    This helps you answer questions directly without calling Lambda, and provides
-    context for making intelligent decisions about what operations to perform.
-    
-    Args:
-        brd_id: The BRD ID (required)
-        session_id: Session ID (auto-generated as "brd-session-{brd_id}" if not provided)
-    
-    Returns:
-        Formatted conversation history as text, or error message if retrieval fails
-    """
-    if not brd_id:
-        return "Error: brd_id is required to retrieve conversation history."
-    
-    if not session_id:
-        session_id = f"brd-session-{brd_id}"
-        print(f"[BRD-AGENT] Auto-generated session_id for history: {session_id}", flush=True)
-    
+    session_id = f"analyst-session-{project_id}"
     client = _get_agentcore_memory_client()
+    
     try:
-        print(f"[BRD-AGENT] Retrieving conversation history for session: {session_id}", flush=True)
+        # Create memory session
+        response = client.create_session(
+            memoryId=AGENTCORE_MEMORY_ID,
+            sessionId=session_id,
+            actorId=AGENTCORE_ACTOR_ID
+        )
+        
+        print(f"[ANALYST-AGENT] Created session: {session_id}", flush=True)
+        
+        # Add welcome message
+        welcome_msg = """Hello! I'm Mary, your Strategic Business Analyst. I'm here to help you create a comprehensive Business Requirements Document (BRD) through a structured conversation.
+
+I'll ask you questions about your project to understand:
+• Project purpose and objectives
+• Business drivers and pain points
+• Stakeholders and their roles
+• Scope (what's in and out)
+• Functional and non-functional requirements
+• Constraints and assumptions
+• Success criteria
+
+Let's start! What is the main idea or goal of your project?"""
+        
+        add_message_to_memory(session_id, "assistant", welcome_msg)
+        
+        return {
+            "session_id": session_id,
+            "project_id": project_id,
+            "message": welcome_msg
+        }
+    except Exception as e:
+        print(f"[ANALYST-AGENT] Error creating session: {e}", flush=True)
+        raise
+
+def add_message_to_memory(session_id: str, role: str, content: str):
+    """Add a message to AgentCore Memory"""
+    client = _get_agentcore_memory_client()
+    
+    try:
+        client.create_event(
+            memoryId=AGENTCORE_MEMORY_ID,
+            sessionId=session_id,
+            actorId=AGENTCORE_ACTOR_ID,
+            payload=[
+                {
+                    "conversational": {
+                        "role": role.lower(),
+                        "content": {
+                            "text": content
+                        }
+                    }
+                }
+            ]
+        )
+        print(f"[ANALYST-AGENT] Added {role} message to session {session_id}", flush=True)
+    except Exception as e:
+        print(f"[ANALYST-AGENT] Error adding message to memory: {e}", flush=True)
+        raise
+
+def get_conversation_history(session_id: str, max_messages: int = 200) -> List[Dict]:
+    """Get full conversation history from AgentCore Memory"""
+    client = _get_agentcore_memory_client()
+    
+    try:
         response = client.list_events(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID,
             includePayloads=True,
-            maxResults=100
+            maxResults=max_messages
         )
         
         events = response.get("events", [])
         messages = []
+        
         for event in events:
             payload_list = event.get("payload", [])
             for payload_item in payload_list:
                 conv_data = payload_item.get("conversational")
                 if not conv_data:
                     continue
+                
                 text_content = conv_data.get("content", {}).get("text")
                 if not text_content:
                     continue
-                # Skip system messages
-                if text_content.startswith("Starting BRD editing session") or text_content == "Session closed by user.":
-                    continue
+                
                 role = conv_data.get("role", "assistant").lower()
-                # Format: "User: message" or "Assistant: message"
-                messages.append(f"{role.capitalize()}: {text_content}")
+                messages.append({
+                    "role": role,
+                    "content": text_content
+                })
         
-        if messages:
-            history_text = "\n".join(messages)
-            print(f"[BRD-AGENT] Retrieved {len(messages)} messages from history", flush=True)
-            return history_text
-        else:
-            print(f"[BRD-AGENT] No conversation history found for session: {session_id}", flush=True)
-            return "No conversation history found for this BRD session."
+        print(f"[ANALYST-AGENT] Retrieved {len(messages)} messages from history", flush=True)
+        return messages
+        
     except Exception as e:
-        error_msg = f"Error retrieving conversation history: {str(e)}"
-        print(f"[BRD-AGENT] {error_msg}", flush=True)
-        return error_msg
+        print(f"[ANALYST-AGENT] Error retrieving history: {e}", flush=True)
+        return []
 
-def _get_agent(fresh=False):
+def format_conversation_as_transcript(messages: List[Dict]) -> str:
+    """Format conversation history as a transcript for BRD generation"""
+    transcript_lines = []
+    
+    for msg in messages:
+        role = msg.get("role", "assistant").capitalize()
+        content = msg.get("content", "")
+        transcript_lines.append(f"{role}: {content}")
+    
+    return "\n\n".join(transcript_lines)
+
+# --- Tool Definitions ---
+
+@tool
+def get_brd_template() -> str:
     """
-    Get Strands agent with Lambda tools.
+    Get the standard BRD template structure.
+    Returns the template text that defines the BRD format.
+    """
+    template = """Business Requirements Document (BRD) Template
+
+1. Document Overview
+   - Document Title
+   - Project Name
+   - Document Version
+   - Date
+   - Prepared By
+   - Document Status
+
+2. Purpose
+   - Clear statement of the project's purpose and objectives
+
+3. Background / Context
+   - Business Drivers
+   - Pain Points
+   - Current State
+
+4. Stakeholders
+   - List of stakeholders with roles and responsibilities
+
+5. Scope
+   - In Scope
+   - Out of Scope
+
+6. Business Objectives & ROI
+   - Financial Impact
+   - Business Objectives
+
+7. Functional Requirements
+   - Detailed functional requirements with priorities
+
+8. Non-Functional Requirements
+   - Performance, scalability, security, compliance requirements
+
+9. User Stories / Use Cases
+   - User stories and use case descriptions
+
+10. Assumptions
+    - Key assumptions about the project
+
+11. Constraints
+    - Budget, timeline, technical, compliance constraints
+
+12. Acceptance Criteria / KPIs
+    - Success metrics and acceptance criteria
+
+13. Timeline / Milestones
+    - Project phases and milestones
+
+14. Risks and Dependencies
+    - Risk assessment and dependencies
+
+15. Approval & Review
+    - Approval workflow and review schedule
+
+16. Glossary & Appendix
+    - Acronyms, abbreviations, and reference documents
+"""
+    return template
+
+@tool
+def check_requirements_completeness(session_id: str) -> str:
+    """
+    Analyze the conversation history to determine if enough information has been gathered.
+    Returns a status indicating if requirements are complete or what's still missing.
+    """
+    messages = get_conversation_history(session_id)
+    
+    if len(messages) < 10:  # Too few messages
+        return "INCOMPLETE: Need more information. Continue asking questions."
+    
+    # Use Bedrock to analyze completeness
+    conversation_text = format_conversation_as_transcript(messages)
+    
+    prompt = f"""Analyze this requirements gathering conversation and determine if we have enough information to generate a comprehensive BRD.
+
+Conversation:
+{conversation_text}
+
+Evaluate if we have sufficient information about:
+1. Project purpose and objectives
+2. Business drivers and pain points
+3. Stakeholders
+4. Scope (in and out)
+5. Functional requirements
+6. Non-functional requirements
+7. Constraints and assumptions
+8. Success criteria
+
+Respond with:
+- "COMPLETE" if we have enough information
+- "INCOMPLETE: [list missing areas]" if more information is needed
+
+Your response:"""
+    
+    try:
+        bedrock = _get_bedrock_runtime()
+        response = bedrock.converse(
+            modelId=BEDROCK_MODEL_ID,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 500, "temperature": 0}
+        )
+        
+        result = response['output']['message']['content'][0]['text']
+        print(f"[ANALYST-AGENT] Completeness check: {result[:200]}...", flush=True)
+        return result
+        
+    except Exception as e:
+        print(f"[ANALYST-AGENT] Error checking completeness: {e}", flush=True)
+        return "INCOMPLETE: Unable to analyze. Continue gathering requirements."
+
+@tool
+def generate_brd_from_conversation(session_id: str, brd_id: Optional[str] = None) -> str:
+    """
+    Generate a BRD from the conversation history stored in AgentCore Memory.
+    Reuses the existing brd_generator_lambda.
     
     Args:
-        fresh: If True, create a new agent instance (avoids conversation history conflicts)
+        session_id: The session ID for the requirements gathering conversation
+        brd_id: Optional BRD ID (auto-generated if not provided)
+    
+    Returns:
+        Success message with BRD ID
     """
+    if not brd_id:
+        brd_id = str(uuid.uuid4())
+    
+    print(f"[ANALYST-AGENT] Generating BRD from conversation session: {session_id}", flush=True)
+    
+    # 1. Get conversation history
+    messages = get_conversation_history(session_id)
+    if not messages:
+        return "Error: No conversation history found. Please have a conversation first."
+    
+    # 2. Format as transcript
+    transcript = format_conversation_as_transcript(messages)
+    print(f"[ANALYST-AGENT] Formatted transcript: {len(transcript)} characters", flush=True)
+    
+    # 3. Get template
+    template = get_brd_template()
+    
+    # 4. Call BRD generator Lambda (existing)
+    payload = {
+        "template": template,
+        "transcript": transcript,
+        "brd_id": brd_id
+    }
+    
+    try:
+        result = invoke_lambda_tool(LAMBDA_GENERATOR, payload)
+        
+        # Parse response
+        if isinstance(result, dict):
+            if 'statusCode' in result:
+                body = result.get('body', '{}')
+                if isinstance(body, str):
+                    body = json.loads(body)
+                message = body.get('message', 'BRD generated successfully')
+            else:
+                message = result.get('message', 'BRD generated successfully')
+        else:
+            message = str(result)
+        
+        # Add success message to memory
+        success_msg = f"✅ BRD generated successfully! BRD ID: {brd_id}\n\nYou can now view and edit this BRD using the BRD chat agent."
+        add_message_to_memory(session_id, "assistant", success_msg)
+        
+        return f"{message}\n\nBRD ID: {brd_id}"
+        
+    except Exception as e:
+        error_msg = f"Error generating BRD: {str(e)}"
+        print(f"[ANALYST-AGENT] {error_msg}", flush=True)
+        add_message_to_memory(session_id, "assistant", error_msg)
+        return error_msg
+
+# --- Agent Setup ---
+
+def _get_agent(fresh=False):
+    """Get Strands agent instance"""
     global _agent_instance
     
-    # For chat requests, always create a fresh agent to avoid tool block conflicts
     if fresh or _agent_instance is None:
         try:
-            # Initialize Bedrock model
             model = BedrockModel(model_id=BEDROCK_MODEL_ID)
-            
-            # Create list of tools
-            tools = [generate_brd, fetch_brd, chat_with_brd, get_brd_conversation_history]
-            
-            # Create agent with model and tools
+            tools = [get_brd_template, check_requirements_completeness, generate_brd_from_conversation]
             agent = Agent(model=model, tools=tools)
             
             if not fresh:
                 _agent_instance = agent
-                print("[BRD-AGENT] Strands agent initialized with Lambda tools", flush=True)
+                print("[ANALYST-AGENT] Strands agent initialized", flush=True)
             else:
-                print("[BRD-AGENT] Created fresh Strands agent instance (no conversation history)", flush=True)
+                print("[ANALYST-AGENT] Created fresh agent instance", flush=True)
             
             return agent
             
-        except ImportError as e:
-            print(f"[BRD-AGENT] Error: Strands not available ({e})", flush=True)
-            raise
         except Exception as e:
-            print(f"[BRD-AGENT] Error initializing agent: {str(e)}", flush=True)
+            print(f"[ANALYST-AGENT] Error initializing agent: {str(e)}", flush=True)
             import traceback
             print(traceback.format_exc(), flush=True)
             raise
     
     return _agent_instance
 
+# --- Entry Point ---
+
 @app.entrypoint
 def invoke(payload):
     """
-    AgentCore Runtime entry point for BRD operations
+    AgentCore Runtime entry point for Business Analyst agent.
     
-    This function receives user requests and routes them through the Strands agent,
-    which intelligently selects the appropriate Lambda tools based on the user's intent.
+    This agent conducts structured Q&A to gather requirements and generate BRDs.
     
     Expected payload format:
     {
-        "prompt": "User message/request",
+        "prompt": "User message",
         "text": "Alternative text field",
-        "template": "Optional template text",
-        "transcript": "Optional transcript text",
-        "brd_id": "Optional BRD ID"
+        "session_id": "Optional session ID",
+        "project_id": "Optional project ID"
     }
     """
     try:
         print("=" * 80, flush=True)
-        print("[BRD-AGENT] Handler invoked (Strands + Lambda Tools)", flush=True)
+        print("[ANALYST-AGENT] Handler invoked", flush=True)
         print("=" * 80, flush=True)
         
-        # Extract user message from payload
-        user_message = payload.get("prompt") or payload.get("text") or payload.get("message", "Hello! How can I help you with BRD operations?")
+        # Extract user message
+        user_message = payload.get("prompt") or payload.get("text") or payload.get("message", "Hello! I'd like to create a BRD.")
         
-        print(f"[BRD-AGENT] User message: {user_message[:200]}...", flush=True)
-        print(f"[BRD-AGENT] Payload keys: {list(payload.keys())}", flush=True)
+        print(f"[ANALYST-AGENT] User message: {user_message[:200]}...", flush=True)
         
-        # Get the agent instance (lazy loaded)
-        agent = _get_agent()
+        # Get or create session
+        session_id = payload.get("session_id")
+        project_id = payload.get("project_id")
         
-        # If template and transcript are provided, directly call generate_brd tool
-        if payload.get('template') and payload.get('transcript'):
-            print(f"[BRD-AGENT] Template and transcript detected, calling generate_brd tool directly", flush=True)
-            try:
-                # Directly call the generate_brd function
-                template = payload.get('template')
-                transcript = payload.get('transcript')
-                
-                # Generate proper UUID for BRD if not provided
-                import uuid
-                brd_id = payload.get('brd_id')
-                if not brd_id or brd_id == 'none' or brd_id.startswith('generated-'):
-                    brd_id = str(uuid.uuid4())
-                    print(f"[BRD-AGENT] Generated new BRD ID: {brd_id}", flush=True)
-                else:
-                    print(f"[BRD-AGENT] Using provided BRD ID: {brd_id}", flush=True)
-                
-                print(f"[BRD-AGENT] Template length: {len(template)} chars", flush=True)
-                print(f"[BRD-AGENT] Transcript length: {len(transcript)} chars", flush=True)
-                
-                # Call the tool directly
-                result_text = generate_brd(template=template, transcript=transcript, brd_id=brd_id)
-                print(f"[BRD-AGENT] Direct tool call completed", flush=True)
-                
-            except Exception as e:
-                print(f"[BRD-AGENT] Error in direct tool call: {str(e)}", flush=True)
-                import traceback
-                print(traceback.format_exc(), flush=True)
-                result_text = f"Error generating BRD: {str(e)}"
-        # Handle chat/edit requests for existing BRDs
-        elif payload.get('brd_id') and payload.get('brd_id') != 'none':
-            brd_id = payload.get('brd_id')
-            print(f"[BRD-AGENT] BRD ID provided: {brd_id}, using Memory + LLM for intelligent decision making", flush=True)
+        if not session_id:
+            # Create new session
+            session_info = create_analyst_session(project_id)
+            session_id = session_info["session_id"]
+            initial_response = session_info["message"]
             
-            # Get session_id from payload if provided
-            session_id_from_payload = payload.get('session_id')
-            if not session_id_from_payload or session_id_from_payload == 'none':
-                # Generate a session ID based on BRD ID for consistency
-                session_id_from_payload = f"brd-session-{brd_id}"
-                print(f"[BRD-AGENT] No session_id provided, using: {session_id_from_payload}", flush=True)
+            # Add user's first message
+            add_message_to_memory(session_id, "user", user_message)
             
-            # STEP 1: Get conversation history from AgentCore Memory
-            conversation_context = ""
-            try:
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] STEP 1: Retrieving conversation history from AgentCore Memory...", flush=True)
-                print(f"[BRD-AGENT] BRD ID: {brd_id}", flush=True)
-                print(f"[BRD-AGENT] Session ID: {session_id_from_payload}", flush=True)
-                history_result = get_brd_conversation_history(brd_id, session_id_from_payload)
-                if history_result and "Error" not in history_result and "No conversation history" not in history_result:
-                    conversation_context = f"\n\n=== CONVERSATION HISTORY ===\n{history_result}\n=== END HISTORY ===\n"
-                    print(f"[BRD-AGENT] ✅ Retrieved conversation history ({len(history_result)} chars)", flush=True)
-                    # Log update confirmations found in history for debugging
-                    import re
-                    update_matches = re.findall(r"✅ Section ['\"](\d+)\.\s*([^'\"]+)['\"] updated successfully", history_result, re.IGNORECASE)
-                    if update_matches:
-                        print(f"[BRD-AGENT] 📋 Found {len(update_matches)} update confirmation(s) in history:", flush=True)
-                        for section_num, section_title in update_matches:
-                            print(f"[BRD-AGENT]   - Section {section_num}: {section_title.strip()}", flush=True)
-                    else:
-                        print(f"[BRD-AGENT] ⚠️ No update confirmations found in history", flush=True)
-                else:
-                    print(f"[BRD-AGENT] ⚠️ No conversation history available or error occurred", flush=True)
-                print(f"[BRD-AGENT] ========================================", flush=True)
-            except Exception as e:
-                print(f"[BRD-AGENT] ❌ Could not retrieve history: {e}", flush=True)
-                import traceback
-                print(traceback.format_exc(), flush=True)
+            # Get agent
+            agent = _get_agent()
             
-            # STEP 2: Build enhanced message with Memory context for LLM decision making
-            print(f"[BRD-AGENT] ========================================", flush=True)
-            print(f"[BRD-AGENT] STEP 2: Building enhanced message with Memory context for LLM", flush=True)
-            print(f"[BRD-AGENT] User message: {user_message[:200]}...", flush=True)
-            print(f"[BRD-AGENT] ========================================", flush=True)
-            
-            enhanced_message = f"""You are a BRD (Business Requirements Document) assistant. You have access to conversation history and can make intelligent decisions.
+            # Build enhanced prompt with BMad-inspired persona
+            enhanced_prompt = f"""You are Mary, a Strategic Business Analyst and Requirements Expert.
 
-USER'S CURRENT MESSAGE: {user_message}
-{conversation_context}
+PERSONA:
+- You are a senior analyst with deep expertise in market research, competitive analysis, and requirements elicitation
+- You specialize in translating vague needs into actionable specifications
+- You speak with the excitement of a treasure hunter - thrilled by every clue, energized when patterns emerge
+- You structure insights with precision while making analysis feel like discovery
 
-AVAILABLE TOOLS:
-1. get_brd_conversation_history(brd_id, session_id) - Get conversation history (already retrieved above)
-2. chat_with_brd(action, brd_id, session_id, message) - For viewing/updating sections, listing sections
-3. fetch_brd(brd_id) - Get the complete BRD document
-4. generate_brd(template, transcript, brd_id) - Generate a new BRD
+PRINCIPLES:
+- Channel expert business analysis frameworks: Porter's Five Forces, SWOT analysis, root cause analysis, competitive intelligence
+- Every business challenge has root causes waiting to be discovered
+- Ground findings in verifiable evidence
+- Articulate requirements with absolute precision
+- Ensure all stakeholder voices are heard
 
-CRITICAL PARAMETERS:
-- brd_id: "{brd_id}"
-- session_id: "{session_id_from_payload}"
+YOUR ROLE:
+You are conducting a structured interview to gather requirements for a Business Requirements Document (BRD).
 
-DECISION LOGIC:
+You need to understand:
+1. Project purpose and objectives
+2. Business drivers and pain points (use root cause analysis)
+3. Stakeholders and their roles (ensure all voices heard)
+4. Scope (what's in and out)
+5. Functional requirements (with precision)
+6. Non-functional requirements (performance, security, compliance)
+7. Constraints and assumptions
+8. Success criteria and KPIs
 
-1. If user asks "show me updated section" or "show updated section":
-   - FIRST: Analyze conversation history to find the MOST RECENT update confirmation
-   - Look for the LAST (most recent) message containing "✅ Section 'X. Title' updated successfully"
-   - Extract the section number (e.g., "11" from "✅ Section '11. Constraints' updated successfully")
-   - THEN: Call chat_with_brd with action="send_message", brd_id="{brd_id}", session_id="{session_id_from_payload}", message="show me updated section"
-   - The Lambda will handle showing the correct section based on its internal tracking
-   - DO NOT try to answer directly - you need the Lambda to retrieve the actual section content
+CONVERSATION APPROACH:
+- Ask one question at a time
+- Be thorough but conversational
+- Show excitement when you discover important information
+- Use frameworks to dig deeper (e.g., "Let's analyze this using SWOT - what are the strengths and weaknesses?")
+- When you have enough information, use check_requirements_completeness tool, then suggest using generate_brd_from_conversation to create the BRD
 
-2. If user asks "which sections have I updated?" or "what sections i have updated so far?":
-   - Analyze conversation history to find ALL update confirmations
-   - Look for ALL messages containing "✅ Section 'X. Title' updated successfully"
-   - Extract section numbers and titles from ALL such messages
-   - List them in chronological order (oldest to newest)
-   - You can answer this directly from history WITHOUT calling tools
+SESSION ID: {session_id}
 
-3. If user wants to VIEW a section (e.g., "show section 4", "show stakeholders", "list sections"):
-   - Call chat_with_brd with:
-     - action="send_message"
-     - brd_id="{brd_id}"
-     - session_id="{session_id_from_payload}"
-     - message="{user_message}" (exact user message)
+USER'S MESSAGE: {user_message}
 
-3. If user wants to UPDATE a section (e.g., "change X to Y", "update section 4", "change X to Y here"):
-   - Call chat_with_brd with:
-     - action="send_message"
-     - brd_id="{brd_id}"
-     - session_id="{session_id_from_payload}"
-     - message="{user_message}" (exact user message, even with typos)
-
-4. If user wants the FULL BRD document:
-   - Call fetch_brd with brd_id="{brd_id}"
-
-5. If user wants to GENERATE a new BRD:
-   - Call generate_brd with template and transcript
-
-IMPORTANT:
-- Use conversation history to understand context (e.g., "here" refers to last shown section)
-- For questions, try to answer from history first before calling tools
-- Pass user messages exactly as written (don't fix typos - Lambda handles that)
-- Be intelligent: if history shows recent updates, you can answer questions about them directly
-
-Now analyze the user's message and conversation history, then decide what action to take."""
+Respond naturally as Mary, ask follow-up questions, and guide the conversation to gather all necessary requirements."""
             
             try:
-                # STEP 3: Let the Strands agent use LLM + Memory to make intelligent decisions
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] STEP 3: Invoking Strands agent with Memory context for intelligent decision making", flush=True)
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                result = agent(enhanced_message)
+                result = agent(enhanced_prompt)
                 
-                # Extract response from agent result
                 if hasattr(result, 'data'):
                     result_text = str(result.data) if result.data else str(result)
                 elif hasattr(result, 'output'):
                     result_text = str(result.output)
-                elif hasattr(result, 'message'):
-                    result_text = result.message
                 elif isinstance(result, str):
                     result_text = result
                 else:
                     result_text = str(result)
                 
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] STEP 4: Agent LLM response received", flush=True)
-                print(f"[BRD-AGENT] Response length: {len(result_text)} chars", flush=True)
-                print(f"[BRD-AGENT] Response preview: {result_text[:300]}...", flush=True)
-                print(f"[BRD-AGENT] ========================================", flush=True)
+                # Add agent response to memory
+                add_message_to_memory(session_id, "assistant", result_text)
+                
+                return result_text
+                
             except Exception as e:
-                print(f"[BRD-AGENT] Error in agent LLM execution: {e}", flush=True)
-                import traceback
-                print(traceback.format_exc(), flush=True)
-                # Fallback: try direct call if LLM fails
-                try:
-                    print(f"[BRD-AGENT] Falling back to direct chat_with_brd call", flush=True)
-                    result_text = chat_with_brd(
-                        action="send_message",
-                        brd_id=brd_id,
-                        session_id=session_id_from_payload,
-                        message=user_message
-                    )
-                except Exception as fallback_error:
-                    print(f"[BRD-AGENT] Fallback also failed: {fallback_error}", flush=True)
-                    result_text = f"Error processing request: {str(e)}. Please try rephrasing your request."
+                error_msg = f"I apologize, but I encountered an error: {str(e)}"
+                add_message_to_memory(session_id, "assistant", error_msg)
+                return error_msg
+        
         else:
-            # Run the agent with user message for general queries
-            print(f"[BRD-AGENT] Running Strands agent for general query...", flush=True)
+            # Existing session - continue conversation
+            add_message_to_memory(session_id, "user", user_message)
             
-            # Use the synchronous call method (agent is callable)
-            result = agent(user_message)
+            # Get conversation history for context
+            history = get_conversation_history(session_id)
+            history_text = format_conversation_as_transcript(history[-20:])  # Last 20 messages for context
             
-            # Extract response from agent result
-            if hasattr(result, 'data'):
-                result_text = str(result.data) if result.data else str(result)
-            elif hasattr(result, 'output'):
-                result_text = str(result.output)
-            elif hasattr(result, 'message'):
-                result_text = result.message
-            elif isinstance(result, str):
-                result_text = result
-            else:
-                result_text = str(result)
-        
-        print(f"[BRD-AGENT] Response length: {len(result_text)} characters", flush=True)
-        
-        # Try to extract BRD ID from result if present
-        brd_id = payload.get('brd_id')
-        
-        # Build response
-        response = {
-            "result": result_text
-        }
-        
-        if brd_id:
-            response["brd_id"] = brd_id
-        
-        print(f"[BRD-AGENT] Returning response", flush=True)
-        print("=" * 80, flush=True)
-        
-        return response
-        
-    except Exception as e:
-        print("=" * 80, flush=True)
-        print("[BRD-AGENT] ERROR", flush=True)
-        print("=" * 80, flush=True)
-        print(f"[BRD-AGENT] Error: {str(e)}", flush=True)
-        import traceback
-        error_trace = traceback.format_exc()
-        print(error_trace, flush=True)
-        
-        return {
-            "result": f"Error processing request: {str(e)}. Please check CloudWatch logs for details.",
-            "isError": True
-        }
+            # Get agent
+            agent = _get_agent()
+            
+            # Build enhanced prompt with history
+            enhanced_prompt = f"""You are Mary, a Strategic Business Analyst and Requirements Expert.
 
-if __name__ == "__main__":
-    # Run the app locally for testing
-    print("[BRD-AGENT] Starting AgentCore Runtime app locally...", flush=True)
-    print(f"[BRD-AGENT] Lambda Generator: {LAMBDA_GENERATOR}", flush=True)
-    print(f"[BRD-AGENT] Lambda Retriever: {LAMBDA_RETRIEVER}", flush=True)
-    print(f"[BRD-AGENT] Lambda Chat: {LAMBDA_CHAT}", flush=True)
-    print(f"[BRD-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
-    app.run()
+PERSONA:
+- You are a senior analyst with deep expertise in market research, competitive analysis, and requirements elicitation
+- You specialize in translating vague needs into actionable specifications
+- You speak with the excitement of a treasure hunter - thrilled by every clue, energized when patterns emerge
+- You structure insights with precision while making analysis feel like discovery
+
+PRINCIPLES:
+- Channel expert business analysis frameworks: Porter's Five Forces, SWOT analysis, root cause analysis, competitive intelligence
+- Every business challenge has root causes waiting to be discovered
+- Ground findings in verifiable evidence
+- Articulate requirements with absolute precision
+- Ensure all stakeholder voices are heard
+
+CONVERSATION HISTORY:
+{history_text}
+
+SESSION ID: {session_id}
+
+Continue the conversation naturally. Ask follow-up questions based on what you've learned.
+When you have enough information, use check_requirements_completeness to verify, then suggest generating the BRD.
+
+USER'S CURRENT MESSAGE: {user_message}
+
+Respond appropriately as Mary and continue gathering requirements."""
+            
+            try:
+                result = agent(enhanced_prompt)
+                
+                if hasattr(result, 'data'):
+                    result_text = str(result.data) if result.data else str(result)
+                elif hasattr(result, 'output'):
+                    result_text = str(result.output)
+                elif isinstance(result, str):
+                    result_text = result
+                else:
+                    result_text = str(result)
+                
+                # Add agent response to memory
+                add_message_to_memory(session_id, "assistant", result_text)
+                
+                return result_text
+                
+            except Exception as e:
+                error_msg = f"I apologize, but I encountered an error: {str(e)}"
+                add_message_to_memory(session_id, "assistant", error_msg)
+                return error_msg
+    
+    except Exception as e:
+        print(f"[ANALYST-AGENT] Error in invoke: {str(e)}", flush=True)
+        import traceback
+        print(traceback.format_exc(), flush=True)
+        return f"Error: {str(e)}"
+

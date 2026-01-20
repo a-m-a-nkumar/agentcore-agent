@@ -1516,19 +1516,58 @@ async def analyst_chat(
                 # Check top level
                 response_session_id = result_json.get('session_id')
                 
-                # Check if result is a JSON string that contains session_id
-                if not response_session_id and 'result' in result_json:
+                # CRITICAL: Check if result is a JSON string FIRST - this is the most common case
+                # The analyst agent returns: {"result": "{\"result\": \"...\", \"session_id\": \"...\", \"message\": \"...\"}"}
+                print(f"[ANALYST-CHAT] Checking result_json keys: {list(result_json.keys())}")
+                if 'result' in result_json:
                     result_value = result_json.get('result')
+                    print(f"[ANALYST-CHAT] result_value type: {type(result_value)}")
+                    print(f"[ANALYST-CHAT] result_value length: {len(result_value) if isinstance(result_value, str) else 'N/A'}")
+                    print(f"[ANALYST-CHAT] result_value first 200 chars: {result_value[:200] if isinstance(result_value, str) else result_value}")
+                    
                     if isinstance(result_value, str):
-                        # Try to parse it as JSON
+                        # Try to parse it as JSON - this is the agent's JSON response
                         try:
                             parsed_result = json.loads(result_value)
+                            print(f"[ANALYST-CHAT] ✅ Successfully parsed result_value as JSON")
+                            print(f"[ANALYST-CHAT] parsed_result keys: {list(parsed_result.keys()) if isinstance(parsed_result, dict) else 'Not a dict'}")
+                            
                             if isinstance(parsed_result, dict):
-                                response_session_id = parsed_result.get('session_id')
-                                if response_session_id:
-                                    print(f"[ANALYST-CHAT] Found session_id in nested JSON string: {response_session_id}")
-                        except:
-                            pass
+                                # Extract session_id from nested JSON
+                                if not response_session_id:
+                                    response_session_id = parsed_result.get('session_id')
+                                    if response_session_id:
+                                        print(f"[ANALYST-CHAT] ✅ Found session_id in nested JSON string: {response_session_id}")
+                                
+                                # CRITICAL: Extract the actual message text from the nested JSON
+                                # Priority: message > result > text
+                                nested_message = (parsed_result.get('message') or 
+                                                parsed_result.get('result') or 
+                                                parsed_result.get('text'))
+                                print(f"[ANALYST-CHAT] nested_message: {nested_message[:100] if nested_message else 'None'}")
+                                
+                                if nested_message and isinstance(nested_message, str):
+                                    # This is the actual text we want to return
+                                    extracted_text = nested_message
+                                    print(f"[ANALYST-CHAT] ✅ Extracted message from nested JSON result field: {len(extracted_text)} chars")
+                                    print(f"[ANALYST-CHAT] First 100 chars: {extracted_text[:100]}")
+                                else:
+                                    print(f"[ANALYST-CHAT] ⚠️ nested_message is None or not a string. Type: {type(nested_message)}")
+                        except json.JSONDecodeError as e:
+                            # Not JSON, might be plain text - use as-is
+                            print(f"[ANALYST-CHAT] result field is not JSON, using as text: {e}")
+                            if not extracted_text:
+                                extracted_text = result_value
+                        except Exception as e:
+                            print(f"[ANALYST-CHAT] Error parsing result field: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            if not extracted_text:
+                                extracted_text = result_value
+                    else:
+                        print(f"[ANALYST-CHAT] ⚠️ result_value is not a string, it's: {type(result_value)}")
+                else:
+                    print(f"[ANALYST-CHAT] ⚠️ 'result' key not found in result_json")
                 
                 # Handle nested structure: {"result": {"role": "assistant", "content": [{"text": "..."}]}}
                 if 'result' in result_json and isinstance(result_json['result'], dict):
@@ -1568,19 +1607,67 @@ async def analyst_chat(
                         try:
                             parsed = json.loads(result_value)
                             if isinstance(parsed, dict):
-                                extracted_text = parsed.get('message') or parsed.get('result') or result_value
+                                # Extract text from nested JSON structure
+                                extracted_text = parsed.get('message') or parsed.get('result') or parsed.get('text') or result_value
                             else:
                                 extracted_text = result_value
                         except:
+                            # Not JSON, use as-is
                             extracted_text = result_value
                     elif isinstance(result_value, dict) and 'text' in result_value:
                         extracted_text = result_value['text']
                     else:
-                        extracted_text = result_json.get('text') or result_json.get('message')
+                        extracted_text = result_json.get('text') or result_json.get('message') or result_json.get('result')
             
             # Use extracted text or fallback to full response
             final_response = extracted_text or full_response_str
-            print(f"[ANALYST-CHAT] Extracted text length: {len(final_response) if final_response else 0} chars")
+            print(f"[ANALYST-CHAT] After initial extraction - extracted_text: {extracted_text[:100] if extracted_text else 'None'}")
+            print(f"[ANALYST-CHAT] After initial extraction - final_response type: {type(final_response)}, length: {len(final_response) if final_response else 0}")
+            
+            # CRITICAL: If final_response is still a JSON string, parse it and extract the text
+            # This handles cases where the agent returns JSON strings that weren't parsed earlier
+            if final_response and isinstance(final_response, str):
+                final_response_trimmed = final_response.strip()
+                # Check if it looks like a JSON string (starts with { and contains result/message fields)
+                if (final_response_trimmed.startswith('{') and 
+                    ('"result"' in final_response_trimmed or "'result'" in final_response_trimmed or
+                     '"message"' in final_response_trimmed or "'message'" in final_response_trimmed)):
+                    print(f"[ANALYST-CHAT] ⚠️ final_response is still a JSON string, attempting to parse...")
+                    try:
+                        parsed_final = json.loads(final_response_trimmed)
+                        if isinstance(parsed_final, dict):
+                            # Extract the actual message text from the JSON
+                            # Priority: message > result > text
+                            extracted_from_json = (parsed_final.get('message') or 
+                                                  parsed_final.get('result') or 
+                                                  parsed_final.get('text'))
+                            if extracted_from_json and isinstance(extracted_from_json, str):
+                                final_response = extracted_from_json
+                                print(f"[ANALYST-CHAT] ✅ Extracted text from JSON string in final_response: {len(final_response)} chars")
+                                print(f"[ANALYST-CHAT] First 200 chars of extracted text: {final_response[:200]}")
+                            else:
+                                print(f"[ANALYST-CHAT] ⚠️ Could not extract text from parsed JSON. Keys: {list(parsed_final.keys())}")
+                            # Also update session_id if found
+                            if not response_session_id:
+                                response_session_id = parsed_final.get('session_id')
+                    except json.JSONDecodeError as e:
+                        # Not valid JSON, keep as-is
+                        print(f"[ANALYST-CHAT] Could not parse final_response as JSON: {e}")
+                        pass
+                    except Exception as e:
+                        print(f"[ANALYST-CHAT] Error parsing final_response: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        pass
+            
+            # Final validation: ensure final_response is not a JSON string
+            if final_response and isinstance(final_response, str):
+                if final_response.strip().startswith('{') and ('"result"' in final_response or '"message"' in final_response):
+                    print(f"[ANALYST-CHAT] ⚠️ WARNING: final_response is still a JSON string after all parsing attempts!")
+                    print(f"[ANALYST-CHAT] First 300 chars: {final_response[:300]}")
+            
+            print(f"[ANALYST-CHAT] Final response length: {len(final_response) if final_response else 0} chars")
+            print(f"[ANALYST-CHAT] Final response preview: {final_response[:200] if final_response else 'None'}...")
             
             # Try to extract session_id from the extracted text if it's a JSON string
             # The analyst agent returns: {"result": "...", "session_id": "...", "message": "..."}

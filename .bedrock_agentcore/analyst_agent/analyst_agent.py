@@ -56,6 +56,10 @@ def _get_agentcore_memory_client():
     if _agentcore_memory_client is None:
         import boto3
         _agentcore_memory_client = boto3.client('bedrock-agentcore', region_name=AWS_REGION)
+        # Verify it's a boto3 client (should have create_event, list_events, etc.)
+        if not hasattr(_agentcore_memory_client, 'create_event'):
+            print(f"[ANALYST-AGENT] ERROR: Client type is {type(_agentcore_memory_client)}, expected boto3 client", flush=True)
+            print(f"[ANALYST-AGENT] Available methods: {[m for m in dir(_agentcore_memory_client) if not m.startswith('_')][:20]}", flush=True)
     return _agentcore_memory_client
 
 def _get_bedrock_runtime():
@@ -111,17 +115,40 @@ def create_analyst_session(project_id: Optional[str] = None, session_id: Optiona
     
     client = _get_agentcore_memory_client()
     
+    # Note: Sessions in AgentCore Memory are created automatically when you create events
+    # We don't need to explicitly call create_session - it doesn't exist in the boto3 client
+    # Instead, we'll create an initial event which will create the session automatically
+    
     try:
-        # Create memory session (this also creates the actor if it doesn't exist)
-        print(f"[ANALYST-AGENT] Creating session {session_id} with actor {AGENTCORE_ACTOR_ID} in memory {AGENTCORE_MEMORY_ID}", flush=True)
-        response = client.create_session(
-            memoryId=AGENTCORE_MEMORY_ID,
-            sessionId=session_id,
-            actorId=AGENTCORE_ACTOR_ID
-        )
+        # Check if session already exists by trying to list events
+        print(f"[ANALYST-AGENT] Checking if session {session_id} exists with actor {AGENTCORE_ACTOR_ID} in memory {AGENTCORE_MEMORY_ID}", flush=True)
+        try:
+            # Try to list events for this session to see if it exists
+            list_response = client.list_events(
+                memoryId=AGENTCORE_MEMORY_ID,
+                sessionId=session_id,
+                actorId=AGENTCORE_ACTOR_ID,
+                maxResults=1
+            )
+            events = list_response.get('events', [])
+            if events:
+                print(f"[ANALYST-AGENT] ✅ Session {session_id} already exists", flush=True)
+                # Session exists, return it
+                return {
+                    "session_id": session_id,
+                    "project_id": project_id,
+                    "message": "Continuing conversation..."
+                }
+        except Exception as list_err:
+            # If list_events fails, the session doesn't exist yet - that's fine
+            error_str = str(list_err).lower()
+            if "not found" in error_str or "resourcenotfoundexception" in error_str:
+                print(f"[ANALYST-AGENT] Session {session_id} doesn't exist yet, will be created with first event", flush=True)
+            else:
+                print(f"[ANALYST-AGENT] Could not check session existence: {list_err}", flush=True)
         
-        print(f"[ANALYST-AGENT] ✅ Created session: {session_id}", flush=True)
-        print(f"[ANALYST-AGENT] Session response: {response}", flush=True)
+        # Session will be created automatically when we add the first message
+        print(f"[ANALYST-AGENT] Session {session_id} will be created automatically with first event", flush=True)
         
         # Add welcome message
         welcome_msg = """Hello! I'm Mary, your Strategic Business Analyst. I'm here to help you create a comprehensive Business Requirements Document (BRD) through a structured conversation.
@@ -758,11 +785,15 @@ Respond naturally as Mary, ask follow-up questions, and guide the conversation t
             "message": f"Error: {str(e)}"
         })
 
-if __name__ == "__main__":
-    # Run the app locally for testing
-    print("[ANALYST-AGENT] Starting AgentCore Runtime app locally...", flush=True)
-    print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
-    print(f"[ANALYST-AGENT] Lambda Generator: {LAMBDA_GENERATOR}", flush=True)
-    print(f"[ANALYST-AGENT] Memory ID: {AGENTCORE_MEMORY_ID}", flush=True)
-    print(f"[ANALYST-AGENT] Actor ID: {AGENTCORE_ACTOR_ID}", flush=True)
-    app.run()
+# Always run the app when module is loaded (for both direct execution and module import)
+# This ensures the app starts in Docker when run with "python -m analyst_agent"
+print("[ANALYST-AGENT] Initializing AgentCore Runtime app...", flush=True)
+print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
+print(f"[ANALYST-AGENT] Lambda Generator: {LAMBDA_GENERATOR}", flush=True)
+print(f"[ANALYST-AGENT] Memory ID: {AGENTCORE_MEMORY_ID}", flush=True)
+print(f"[ANALYST-AGENT] Actor ID: {AGENTCORE_ACTOR_ID}", flush=True)
+
+# Run the app - this will start the server and health check endpoint
+# When run as module (python -m), this ensures the app starts
+# When run directly (python analyst_agent.py), this also works
+app.run()
