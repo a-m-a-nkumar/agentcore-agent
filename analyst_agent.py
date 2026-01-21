@@ -32,8 +32,20 @@ app = BedrockAgentCoreApp()
 # Configuration
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-LAMBDA_REQUIREMENTS_GATHERING = os.getenv('LAMBDA_REQUIREMENTS_GATHERING', 'requirements_gathering_lambda')
-LAMBDA_BRD_FROM_HISTORY = os.getenv('LAMBDA_BRD_FROM_HISTORY', 'brd_from_history_lambda')
+
+# Lambda Function ARNs (can also use function names, but ARNs are more explicit)
+LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
+    'LAMBDA_REQUIREMENTS_GATHERING_ARN',
+    'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
+)
+LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
+    'LAMBDA_BRD_FROM_HISTORY_ARN',
+    'arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda'
+)
+
+# For backward compatibility, also support function names
+LAMBDA_REQUIREMENTS_GATHERING = os.getenv('LAMBDA_REQUIREMENTS_GATHERING', LAMBDA_REQUIREMENTS_GATHERING_ARN)
+LAMBDA_BRD_FROM_HISTORY = os.getenv('LAMBDA_BRD_FROM_HISTORY', LAMBDA_BRD_FROM_HISTORY_ARN)
 
 # Lazy loading of boto3 Lambda client
 _lambda_client = None
@@ -357,6 +369,6 @@ Please help the user with their BRD requirements gathering or generation request
 if __name__ == "__main__":
     print("[ANALYST-AGENT] Initializing AgentCore Runtime app...", flush=True)
     print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
-    print(f"[ANALYST-AGENT] Lambda Requirements Gathering: {LAMBDA_REQUIREMENTS_GATHERING}", flush=True)
-    print(f"[ANALYST-AGENT] Lambda BRD from History: {LAMBDA_BRD_FROM_HISTORY}", flush=True)
+    print(f"[ANALYST-AGENT] Lambda Requirements Gathering ARN: {LAMBDA_REQUIREMENTS_GATHERING_ARN}", flush=True)
+    print(f"[ANALYST-AGENT] Lambda BRD from History ARN: {LAMBDA_BRD_FROM_HISTORY_ARN}", flush=True)
     app.run()
