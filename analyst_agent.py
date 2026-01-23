@@ -333,12 +333,12 @@ Please help the user with their BRD requirements gathering or generation request
             
             print(f"[ANALYST-AGENT] Agent response generated successfully", flush=True)
             
-            # Return JSON with session_id
-            return json.dumps({
+            # Return dict with session_id (not JSON string - let AgentCore handle serialization)
+            return {
                 "result": result_text,
                 "session_id": session_id,
                 "message": result_text
-            })
+            }
             
         except Exception as e:
             error_msg = f"I apologize, but I encountered an error: {str(e)}"
@@ -346,11 +346,11 @@ Please help the user with their BRD requirements gathering or generation request
             import traceback
             print(traceback.format_exc(), flush=True)
             
-            return json.dumps({
+            return {
                 "result": error_msg,
                 "session_id": session_id,
                 "message": error_msg
-            })
+            }
     
     except Exception as e:
         print(f"[ANALYST-AGENT] Error in invoke: {str(e)}", flush=True)
@@ -358,11 +358,11 @@ Please help the user with their BRD requirements gathering or generation request
         print(traceback.format_exc(), flush=True)
         
         session_id = payload.get("session_id", "unknown")
-        return json.dumps({
+        return {
             "result": f"Error: {str(e)}",
             "session_id": session_id,
             "message": f"Error: {str(e)}"
-        })
+        }
 
 
 # Run the app when module is loaded

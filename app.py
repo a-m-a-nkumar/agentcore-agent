@@ -1498,23 +1498,80 @@ async def analyst_chat(
             content.append(chunk.decode('utf-8'))
             
         full_response_str = ''.join(content)
-        print(f"[ANALYST-CHAT] Raw response: {full_response_str[:500]}")
+        print(f"[ANALYST-CHAT] ========== DEBUG START ==========")
+        print(f"[ANALYST-CHAT] Raw response type: {type(full_response_str)}")
+        print(f"[ANALYST-CHAT] Raw response length: {len(full_response_str)}")
+        print(f"[ANALYST-CHAT] Raw response first 500 chars: {full_response_str[:500]}")
+        print(f"[ANALYST-CHAT] Raw response last 100 chars: {full_response_str[-100:]}")
         
         # Parse the agent response
         try:
             result_json = json.loads(full_response_str)
+            print(f"[ANALYST-CHAT] ✅ Successfully parsed JSON (first parse)")
+            print(f"[ANALYST-CHAT] result_json type: {type(result_json)}")
+            
+            # CRITICAL FIX: Handle double-encoded JSON
+            # If json.loads() returns a string, it means we have double-encoded JSON
+            if isinstance(result_json, str):
+                print(f"[ANALYST-CHAT] ⚠️ First parse returned a string - double-encoded JSON detected!")
+                print(f"[ANALYST-CHAT] Attempting second parse...")
+                try:
+                    result_json = json.loads(result_json)
+                    print(f"[ANALYST-CHAT] ✅ Successfully parsed JSON (second parse)")
+                    print(f"[ANALYST-CHAT] result_json type after second parse: {type(result_json)}")
+                except json.JSONDecodeError as e:
+                    print(f"[ANALYST-CHAT] ❌ Second parse failed: {e}")
+                    # If second parse fails, treat the string as the final response
+                    pass
+            
+            print(f"[ANALYST-CHAT] result_json keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
             
             extracted_text = None
             extracted_brd_id = None
             response_session_id = None
             
             if isinstance(result_json, dict):
+                print(f"[ANALYST-CHAT] result_json IS a dict")
+                print(f"[ANALYST-CHAT] Checking for 'message' field...")
+                if 'message' in result_json:
+                    print(f"[ANALYST-CHAT] 'message' field exists, type: {type(result_json['message'])}")
+                    print(f"[ANALYST-CHAT] 'message' first 100 chars: {str(result_json['message'])[:100]}")
+                print(f"[ANALYST-CHAT] Checking for 'result' field...")
+                if 'result' in result_json:
+                    print(f"[ANALYST-CHAT] 'result' field exists, type: {type(result_json['result'])}")
+                    print(f"[ANALYST-CHAT] 'result' first 100 chars: {str(result_json['result'])[:100]}")
+                print(f"[ANALYST-CHAT] Checking for 'session_id' field...")
+                if 'session_id' in result_json:
+                    print(f"[ANALYST-CHAT] 'session_id' field exists: {result_json['session_id']}")
+                # Extract session_id from top level
+                response_session_id = result_json.get('session_id')
+                
+                # SIMPLIFIED APPROACH (matching BRD agent logic):
+                # Just extract text from message, result, or text fields directly
+                extracted_text = result_json.get('message') or result_json.get('result') or result_json.get('text')
+                
+                if extracted_text and isinstance(extracted_text, str):
+                    print(f"[ANALYST-CHAT] ✅ Extracted text from top-level field: {len(extracted_text)} chars")
+                    print(f"[ANALYST-CHAT] First 100 chars: {extracted_text[:100]}")
+                    
+                    # Early return - we found the text, no need for complex parsing
+                    # Determine final session_id
+                    if not response_session_id or response_session_id == "none":
+                        if runtime_session_id:
+                            response_session_id = runtime_session_id
+                        else:
+                            response_session_id = session_id if session_id and session_id != "none" else str(uuid.uuid4())
+                    
+                    return JSONResponse(content={
+                        "result": extracted_text,
+                        "response": extracted_text,
+                        "session_id": response_session_id
+                    })
+                
+                
                 # FIRST: Try to extract session_id from the response (analyst agent returns it as JSON string)
                 # The analyst agent returns: {"result": "...", "session_id": "...", "message": "..."}
                 # But AgentCore might wrap it, so check multiple levels
-                
-                # Check top level
-                response_session_id = result_json.get('session_id')
                 
                 # CRITICAL: Check if result is a JSON string FIRST - this is the most common case
                 # The analyst agent returns: {"result": "{\"result\": \"...\", \"session_id\": \"...\", \"message\": \"...\"}"}
@@ -2024,20 +2081,29 @@ async def analyst_generate_brd(
         s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
         template_s3_key = "templates/Deluxe_BRD_Template_v2+2.docx"
         
-        # Get Lambda client
-        lambda_client = boto3.client('lambda', region_name=REGION)
-        lambda_function_name = os.getenv("LAMBDA_BRD_GENERATOR", "brd_generator_lambda")
+        # Get Lambda client with increased timeout for long-running BRD generation
+        from botocore.config import Config
+        lambda_config = Config(
+            read_timeout=900,  # 15 minutes - max Lambda execution time
+            connect_timeout=10,
+            retries={'max_attempts': 0}  # Don't retry on timeout
+        )
+        lambda_client = boto3.client('lambda', region_name=REGION, config=lambda_config)
+        # Use lambda_brd_from_history for analyst agent BRD generation
+        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
         
-        # Prepare Lambda payload
+        # Prepare Lambda payload for lambda_brd_from_history
+        # This Lambda expects: conversation_history (list of messages)
         lambda_payload = {
-            "template_s3_bucket": s3_bucket,
-            "template_s3_key": template_s3_key,
-            "transcript": transcript,  # Pass transcript as text (not S3)
-            "brd_id": brd_id
+            "conversation_history": messages,  # Pass messages array directly
+            "brd_id": brd_id,
+            "session_id": session_id
         }
         
         print(f"[ANALYST-GENERATE-BRD] Calling Lambda: {lambda_function_name}")
         print(f"[ANALYST-GENERATE-BRD] BRD ID: {brd_id}")
+        print(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
+        print(f"[ANALYST-GENERATE-BRD] Conversation messages: {len(messages)}")
         
         # Invoke Lambda
         try:
@@ -2330,6 +2396,76 @@ async def download_brd(brd_id: str, current_user: dict = Depends(get_current_use
             status_code=500,
             content={"error": f"Download failed: {str(e)}"}
         )
+
+# -------------------------
+# Analyst History Endpoint
+# -------------------------
+
+@app.get("/analyst-history/{session_id}")
+async def get_analyst_history(session_id: str, current_user: dict = Depends(get_current_user)):
+    """Get conversation history for analyst agent session"""
+    try:
+        print(f"\n[ANALYST-HISTORY] Retrieving history for session: {session_id}")
+        
+        # Get AgentCore Memory client
+        agentcore_client = get_agent_core_client()
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        
+        messages = []
+        
+        try:
+            # List events from AgentCore Memory
+            response = agentcore_client.list_events(
+                memoryId=memory_id,
+                sessionId=session_id,
+                actorId=actor_id,
+                includePayloads=True,
+                maxResults=99
+            )
+            
+            events = response.get("events", [])
+            print(f"[ANALYST-HISTORY] Retrieved {len(events)} events")
+            
+            for event in events:
+                payload_list = event.get("payload", [])
+                for payload_item in payload_list:
+                    conv_data = payload_item.get("conversational")
+                    if not conv_data:
+                        continue
+                    
+                    text_content = conv_data.get("content", {}).get("text")
+                    if not text_content:
+                        continue
+                    
+                    role = conv_data.get("role", "assistant").lower()
+                    messages.append({
+                        "role": role,
+                        "content": text_content,
+                        "isBot": role == "assistant"
+                    })
+            
+            print(f"[ANALYST-HISTORY] Returning {len(messages)} messages")
+            
+            return JSONResponse(content={
+                "messages": messages,
+                "session_id": session_id
+            })
+            
+        except Exception as e:
+            print(f"[ANALYST-HISTORY] Error retrieving history: {e}")
+            # Return empty history instead of error
+            return JSONResponse(content={
+                "messages": [],
+                "session_id": session_id
+            })
+    
+    except Exception as e:
+        print(f"[ANALYST-HISTORY] ERROR: {e}")
+        return JSONResponse(status_code=500, content={
+            "error": str(e),
+            "messages": []
+        })
 
 # -------------------------
 # Access Control Endpoints
