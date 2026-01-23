@@ -54,11 +54,18 @@ _agent_instance = None
 
 
 def _get_lambda_client():
-    """Lazy load Lambda client to avoid initialization timeout"""
+    """Lazy load Lambda client with extended timeout to avoid initialization timeout"""
     global _lambda_client
     if _lambda_client is None:
         import boto3
-        _lambda_client = boto3.client('lambda', region_name=AWS_REGION)
+        from botocore.config import Config
+        # Increase timeout to 15 minutes (900 seconds) - max Lambda execution time
+        config = Config(
+            read_timeout=900,
+            connect_timeout=60,
+            retries={'max_attempts': 0}  # Don't retry on timeout - Lambda is already processing
+        )
+        _lambda_client = boto3.client('lambda', region_name=AWS_REGION, config=config)
     return _lambda_client
 
 
@@ -307,18 +314,61 @@ def invoke(payload):
         else:
             print(f"[ANALYST-AGENT] Using session ID: {session_id}", flush=True)
         
-        # Get the agent instance
-        agent = _get_agent()
+        # Check if this is a BRD generation request
+        is_generate_request = any(keyword in user_message.lower() for keyword in [
+            "generate brd", "create brd", "generate document", "create document",
+            "generate the brd", "create the brd", "make brd", "build brd"
+        ])
         
-        # Build prompt for the agent with session context
-        enhanced_prompt = f"""Session ID: {session_id}
+        # If it's a generate request, use the generate_brd_from_history tool directly
+        if is_generate_request:
+            print(f"[ANALYST-AGENT] Detected BRD generation request, calling generate_brd_from_history tool", flush=True)
+            try:
+                result_text = generate_brd_from_history(session_id=session_id)
+                return json.dumps({
+                    "result": result_text,
+                    "session_id": session_id,
+                    "message": result_text
+                })
+            except Exception as e:
+                error_msg = f"Error generating BRD: {str(e)}"
+                print(f"[ANALYST-AGENT] {error_msg}", flush=True)
+                return json.dumps({
+                    "result": error_msg,
+                    "session_id": session_id,
+                    "message": error_msg
+                })
+        
+        # For all other messages, ALWAYS call gather_requirements to ensure messages are stored
+        print(f"[ANALYST-AGENT] Calling gather_requirements tool to store message and get response", flush=True)
+        try:
+            result_text = gather_requirements(session_id=session_id, user_message=user_message)
+            
+            # Return the response from gather_requirements
+            return {
+                "result": result_text,
+                "session_id": session_id,
+                "message": result_text
+            }
+        except Exception as e:
+            error_msg = f"Error in requirements gathering: {str(e)}"
+            print(f"[ANALYST-AGENT] {error_msg}", flush=True)
+            import traceback
+            print(traceback.format_exc(), flush=True)
+            
+            # Fallback: try using the agent directly if tool call fails
+            print(f"[ANALYST-AGENT] Falling back to direct agent call", flush=True)
+            agent = _get_agent()
+            
+            # Build prompt for the agent with session context
+            enhanced_prompt = f"""Session ID: {session_id}
 
 User's message: {user_message}
 
 Please help the user with their BRD requirements gathering or generation request."""
         
         try:
-            # Invoke the agent
+            # Invoke the agent (fallback only)
             result = agent(enhanced_prompt)
             
             # Extract result text
@@ -365,10 +415,9 @@ Please help the user with their BRD requirements gathering or generation request
         }
 
 
-# Run the app when module is loaded
-if __name__ == "__main__":
-    print("[ANALYST-AGENT] Initializing AgentCore Runtime app...", flush=True)
-    print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
-    print(f"[ANALYST-AGENT] Lambda Requirements Gathering ARN: {LAMBDA_REQUIREMENTS_GATHERING_ARN}", flush=True)
-    print(f"[ANALYST-AGENT] Lambda BRD from History ARN: {LAMBDA_BRD_FROM_HISTORY_ARN}", flush=True)
-    app.run()
+# Run the app when module is loaded (always run, not just when executed directly)
+print("[ANALYST-AGENT] Initializing AgentCore Runtime app...", flush=True)
+print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
+print(f"[ANALYST-AGENT] Lambda Requirements Gathering ARN: {LAMBDA_REQUIREMENTS_GATHERING_ARN}", flush=True)
+print(f"[ANALYST-AGENT] Lambda BRD from History ARN: {LAMBDA_BRD_FROM_HISTORY_ARN}", flush=True)
+app.run()

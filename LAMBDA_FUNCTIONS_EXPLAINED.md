@@ -244,4 +244,3 @@ Both Lambdas only require:
 - **BRD from History Lambda**: Generates BRDs from conversation history stored in AgentCore Memory
 
 Together, these Lambdas enable a complete workflow from requirements gathering conversation to final BRD document, all while maintaining conversation history in AgentCore Memory for future reference and regeneration.
-

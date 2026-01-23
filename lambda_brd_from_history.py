@@ -10,6 +10,7 @@ import uuid
 from typing import List, Dict
 
 import boto3
+from botocore.config import Config
 
 # Configure logging
 logger = logging.getLogger()
@@ -127,7 +128,13 @@ Return only the completed BRD as plain text following the template structure exa
 def _get_bedrock_runtime():
     global _bedrock_runtime
     if _bedrock_runtime is None:
-        _bedrock_runtime = boto3.client('bedrock-runtime', region_name=AWS_REGION)
+        # Configure Bedrock client with extended timeout for long-running generation
+        bedrock_config = Config(
+            read_timeout=600,  # 10 minutes - enough for generating 8192 tokens
+            connect_timeout=10,
+            retries={'max_attempts': 1}  # Don't retry on timeout
+        )
+        _bedrock_runtime = boto3.client('bedrock-runtime', region_name=AWS_REGION, config=bedrock_config)
     return _bedrock_runtime
 
 
