@@ -6,6 +6,7 @@ Conducts conversation using Mary's persona and stores in AgentCore Memory
 import json
 import logging
 import os
+from datetime import datetime
 from typing import List, Dict, Optional
 
 import boto3
@@ -153,16 +154,23 @@ def add_message_to_memory(session_id: str, role: str, content: str):
     """Add a message to AgentCore Memory"""
     client = _get_agentcore_memory_client()
     
+    # Convert role to uppercase to match AgentCore enum: USER, ASSISTANT, TOOL, OTHER
+    role_upper = role.upper()
+    if role_upper not in ['USER', 'ASSISTANT', 'TOOL', 'OTHER']:
+        # Default to USER if role doesn't match expected values
+        role_upper = 'USER' if role.lower() in ['user', 'human'] else 'ASSISTANT'
+    
     try:
-        logger.info(f"Adding {role} message to session {session_id}")
+        logger.info(f"Adding {role_upper} message to session {session_id}")
         response = client.create_event(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID,
+            eventTimestamp=datetime.utcnow(),
             payload=[
                 {
                     "conversational": {
-                        "role": role.lower(),
+                        "role": role_upper,
                         "content": {
                             "text": content
                         }
@@ -170,7 +178,7 @@ def add_message_to_memory(session_id: str, role: str, content: str):
                 }
             ]
         )
-        logger.info(f"Successfully added {role} message to session {session_id}")
+        logger.info(f"Successfully added {role_upper} message to session {session_id}")
     except Exception as e:
         logger.error(f"Error adding message to memory: {e}")
         # Don't raise - allow conversation to continue

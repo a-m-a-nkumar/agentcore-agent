@@ -34,11 +34,18 @@ _agentcore_memory_client = None
 _agent_instance = None
 
 def _get_lambda_client():
-    """Lazy load Lambda client to avoid initialization timeout"""
+    """Lazy load Lambda client with extended timeout to avoid initialization timeout"""
     global _lambda_client
     if _lambda_client is None:
         import boto3
-        _lambda_client = boto3.client('lambda', region_name=AWS_REGION)
+        from botocore.config import Config
+        # Increase timeout to 15 minutes (900 seconds) - max Lambda execution time
+        config = Config(
+            read_timeout=900,
+            connect_timeout=60,
+            retries={'max_attempts': 0}  # Don't retry on timeout - Lambda is already processing
+        )
+        _lambda_client = boto3.client('lambda', region_name=AWS_REGION, config=config)
     return _lambda_client
 
 def _get_agentcore_memory_client():
