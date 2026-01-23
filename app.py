@@ -590,16 +590,19 @@ def render_brd_json_to_docx(brd_data) -> bytes:
             # Add section title as heading (clean markdown)
             section_title = section.get("title", f"Section {idx}")
             section_title = clean_markdown_text(section_title)
-            doc.add_heading(f"{idx}. {section_title}", level=1)
+            doc.add_heading(section_title, level=1)
             
             # Process content blocks
             for block in section.get("content", []):
                 block_type = block.get("type")
                 
                 if block_type == "paragraph":
-                    # Add paragraph text (clean markdown)
+                    # Add paragraph text (clean markdown headers but keep formatting)
                     text = block.get("text", "").strip()
                     if text:
+                        # Clean headers only
+                        text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+                        
                         # Check if paragraph contains markdown table (multi-line)
                         if '\n' in text and '|' in text and text.count('|') >= 2:
                             # Multi-line table in paragraph
@@ -672,7 +675,7 @@ def render_brd_json_to_docx(brd_data) -> bytes:
                                 doc.add_paragraph(cleaned_text)
                 
                 elif block_type == "bullet":
-                    # Add bullet list (clean markdown from items)
+                    # Add bullet list (preserve markdown formatting)
                     items = block.get("items", [])
                     if items:
                         for item in items:
@@ -755,6 +758,7 @@ def render_brd_json_to_docx(brd_data) -> bytes:
                             for col_idx, cell_data in enumerate(row_data):
                                 if col_idx < len(table.rows[row_idx].cells):
                                     cell = table.rows[row_idx].cells[col_idx]
+                                    # Clean markdown from cell text
                                     cell.text = clean_markdown_text(str(cell_data))
                         # Make header row bold
                         if len(table_data) > 0:
@@ -790,9 +794,8 @@ def render_brd_json_to_docx(brd_data) -> bytes:
                         doc.add_heading(cleaned_header, level=level)
                 else:
                     # Regular line
-                    cleaned = clean_markdown_text(line)
-                    if cleaned and not cleaned.startswith('---'):
-                        current_paragraph.append(cleaned)
+                    if line and not line.startswith('---'):
+                        current_paragraph.append(line)
                 i += 1
         
         # Add remaining paragraph
@@ -2194,9 +2197,18 @@ async def download_brd(brd_id: str, current_user: dict = Depends(get_current_use
         
         try:
             # Try to get BRD JSON structure first (preferred for DOCX conversion)
+            # Check both possible naming conventions
             json_key = f"brds/{brd_id}/brd_structure.json"
             try:
-                json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                try:
+                    json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                except ClientError as e:
+                    if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
+                        json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
+                        json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                    else:
+                        raise e
+                
                 # Read with explicit UTF-8 encoding and error handling
                 json_body = json_response['Body'].read()
                 print(f"[DOWNLOAD] Read {len(json_body)} bytes from JSON file")
@@ -2312,7 +2324,15 @@ async def download_brd(brd_id: str, current_user: dict = Depends(get_current_use
                     print(f"[DOWNLOAD] Attempting to fetch BRD JSON structure from S3...")
                     json_key = f"brds/{brd_id}/brd_structure.json"
                     try:
-                        json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                        try:
+                            json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                        except ClientError as e:
+                            if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
+                                json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
+                                json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                            else:
+                                raise e
+                        
                         # Read with explicit UTF-8 encoding and error handling
                         json_body = json_response['Body'].read()
                         try:
