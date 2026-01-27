@@ -2830,6 +2830,8 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
                         "isBot": role == "assistant"
                     })
             
+            messages.reverse()
+            
             print(f"[ANALYST-HISTORY] Returning {len(messages)} messages")
             
             return JSONResponse(content={
