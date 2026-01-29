@@ -12,6 +12,9 @@ from typing import List, Dict
 import boto3
 from botocore.config import Config
 
+# Import prompts from centralized prompts module
+from prompts import get_brd_from_history_prompt
+
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -30,99 +33,6 @@ TEMPERATURE = 0.0
 _bedrock_runtime = None
 _agentcore_memory_client = None
 _s3_client = None
-
-# BRD Generation from Chat History Prompt
-# This prompt instructs Bedrock to generate BRD from conversation history
-BRD_FROM_CHAT_PROMPT = """
-════════════════════════════════════════════════════════════════
-SPECIAL INSTRUCTIONS FOR BRD GENERATION FROM ANALYST CHAT HISTORY
-════════════════════════════════════════════════════════════════
-
-CONTEXT:
-You are generating a Business Requirements Document (BRD) from a requirements discovery conversation.
-The conversation below is NOT a formal meeting transcript - it's a natural dialogue between a Business Analyst and a User.
-
-CRITICAL: You MUST follow the TEMPLATE structure provided below exactly.
-All 16 sections from the template MUST be present in the final BRD.
-
-════════════════════════════════════════════════════════════════
-LABELING REQUIREMENTS (MANDATORY):
-════════════════════════════════════════════════════════════════
-
-You MUST clearly label ALL content in the BRD as one of:
-
-[USER-PROVIDED]
-- Information explicitly stated by the USER in the conversation
-- Example: "[USER-PROVIDED] System must support 10,000 concurrent users"
-
-[AI ASSUMPTION]
-- Information you are inferring based on professional judgment
-- Example: "[AI ASSUMPTION] 24/7 availability required (standard for customer-facing chatbots)"
-
-[PARTIALLY SPECIFIED - USER + AI]
-- User provided partial information, you are expanding it
-- Example: "[PARTIALLY SPECIFIED - USER + AI] User mentioned 'mobile app'; assuming iOS and Android support"
-
-════════════════════════════════════════════════════════════════
-CONFIDENCE LEVELS FOR AI ASSUMPTIONS:
-════════════════════════════════════════════════════════════════
-
-- HIGH CONFIDENCE: Strongly implied by user
-  Example: "[AI ASSUMPTION - HIGH CONFIDENCE] 24/7 availability (user said 'always available')"
-
-- MEDIUM CONFIDENCE: Reasonable inference
-  Example: "[AI ASSUMPTION - MEDIUM CONFIDENCE] Mobile-first design (user discussed mobile app)"
-
-- LOW CONFIDENCE: Standard industry practice
-  Example: "[AI ASSUMPTION - LOW CONFIDENCE] GDPR compliance (standard for customer data)"
-
-- TO BE CONFIRMED: Needs validation
-  Example: "[AI ASSUMPTION - TO BE CONFIRMED] Integration with Salesforce CRM"
-
-════════════════════════════════════════════════════════════════
-CREATING COMPLETE BRD SKELETON:
-════════════════════════════════════════════════════════════════
-
-RULE: NEVER leave any section empty. Every section MUST have content.
-
-For each section:
-1. If user discussed it → Use [USER-PROVIDED]
-2. If user partially discussed it → Use [PARTIALLY SPECIFIED - USER + AI]
-3. If user didn't discuss it → Use [AI ASSUMPTION] with professional defaults
-
-NEVER write: "Not discussed", "Information not available", "TBD"
-ALWAYS provide content with appropriate labels.
-
-════════════════════════════════════════════════════════════════
-INSTRUCTIONS:
-════════════════════════════════════════════════════════════════
-
-1. READ the entire conversation below
-2. IDENTIFY what the USER explicitly said (mark as [USER-PROVIDED])
-3. IDENTIFY what the USER partially mentioned (mark as [PARTIALLY SPECIFIED])
-4. FILL ALL GAPS with professional assumptions (mark as [AI ASSUMPTION])
-5. FOLLOW the template structure exactly (all 16 sections)
-6. USE bullet points, tables, and clear formatting
-7. BE SPECIFIC and actionable in every section
-
-════════════════════════════════════════════════════════════════
-TEMPLATE STRUCTURE TO FOLLOW:
-════════════════════════════════════════════════════════════════
-
-{template}
-
-════════════════════════════════════════════════════════════════
-CONVERSATION HISTORY:
-════════════════════════════════════════════════════════════════
-
-{conversation}
-
-════════════════════════════════════════════════════════════════
-NOW GENERATE THE COMPLETE BRD:
-════════════════════════════════════════════════════════════════
-
-Return only the completed BRD as plain text following the template structure exactly.
-"""
 
 
 def _get_bedrock_runtime():
@@ -255,8 +165,8 @@ def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     """Generate BRD using Bedrock AI"""
     bedrock = _get_bedrock_runtime()
     
-    # Build the full prompt
-    prompt = BRD_FROM_CHAT_PROMPT.format(
+    # Build the full prompt using the centralized prompt function
+    prompt = get_brd_from_history_prompt(
         template=template,
         conversation=conversation
     )
