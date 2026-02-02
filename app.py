@@ -21,6 +21,10 @@ from typing import Optional
 import requests
 from datetime import datetime
 
+# Import API routers
+from projects_api import router as projects_router
+from sessions_api_new import router as sessions_router
+
 load_dotenv()
 
 app = FastAPI()
@@ -70,6 +74,10 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
+# Register API routers
+app.include_router(projects_router)
+app.include_router(sessions_router)
+
 # Add request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
@@ -104,32 +112,37 @@ AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "10eda5db-4715-4e7b-bcd9-32dba353
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "0575746d-c254-4eea-bfc6-10d0979d1e90")
 AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
-# Azure AD JWKS URLs (support both v1.0 and v2.0)
-AZURE_JWKS_URL_V2 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys"
-AZURE_JWKS_URL_V1 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/keys"
-
-# Cache for JWKS clients
-_jwks_client_v2 = None
-_jwks_client_v1 = None
-
-def get_azure_jwks(issuer: str = None):
-    """Get Azure AD JWKS client (cached) - supports both v1.0 and v2.0"""
-    global _jwks_client_v2, _jwks_client_v1
-    
-    # Determine which JWKS to use based on issuer
-    if issuer and "sts.windows.net" in issuer:
-        # v1.0 token - use v1.0 JWKS
-        if _jwks_client_v1 is None:
-            _jwks_client_v1 = PyJWKClient(AZURE_JWKS_URL_V1)
-        return _jwks_client_v1
-    else:
-        # v2.0 token - use v2.0 JWKS
-        if _jwks_client_v2 is None:
-            _jwks_client_v2 = PyJWKClient(AZURE_JWKS_URL_V2)
-        return _jwks_client_v2
+# Import authentication functions
+from auth import (
+    verify_azure_token, 
+    store_user_identity_in_agentcore, 
+    check_brd_access_via_agentcore,
+    grant_brd_access_via_agentcore,
+    revoke_brd_access_via_agentcore
+)
 
 # Setup templates
 templates = Jinja2Templates(directory="templates")
+
+# Exception handler for validation errors
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Log detailed validation errors"""
+    print(f"\n[VALIDATION ERROR] Path: {request.url.path}")
+    print(f"[VALIDATION ERROR] Details: {json.dumps(exc.errors(), indent=2)}")
+    try:
+        body = await request.json()
+        print(f"[VALIDATION ERROR] Body: {json.dumps(body, indent=2)}")
+    except Exception:
+        print(f"[VALIDATION ERROR] Body: <could not parse json>")
+        
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": "Check server logs for details"},
+    )
 
 # Helper function to check AWS credentials
 def check_aws_credentials():
@@ -176,246 +189,7 @@ def get_agentcore_identity_client():
 # Azure AD Token Verification
 # -------------------------
 
-def verify_azure_token(token: str) -> dict:
-    """Verify Azure AD JWT token and return decoded claims"""
-    try:
-        # Decode header to get key ID (kid)
-        import base64
-        header_data = token.split('.')[0]
-        # Add padding if needed
-        header_data += '=' * (4 - len(header_data) % 4)
-        header = json.loads(base64.urlsafe_b64decode(header_data))
-        kid = header.get('kid', '')
-        alg = header.get('alg', 'RS256')
-        
-        print(f"[AUTH] Token header - kid: {kid}, alg: {alg}")
-        
-        # First, decode without verification to check token claims
-        unverified = jwt.decode(token, options={"verify_signature": False})
-        actual_issuer = unverified.get('iss', '')
-        token_audience = unverified.get('aud', '')
-        
-        print(f"[AUTH] Token details - typ: {unverified.get('typ')}, aud: {token_audience}, iss: {actual_issuer}")
-        
-        # For v1.0 tokens (sts.windows.net), try common endpoint first
-        if "sts.windows.net" in actual_issuer:
-            # Try v1.0 JWKS endpoint
-            print(f"[AUTH] Using v1.0 JWKS endpoint")
-            jwks_client = get_azure_jwks(actual_issuer)
-        else:
-            # Try v2.0 JWKS endpoint
-            print(f"[AUTH] Using v2.0 JWKS endpoint")
-            jwks_client = get_azure_jwks(actual_issuer)
-        
-        # Get signing key from JWKS
-        try:
-            print(f"[AUTH] Fetching signing key for kid: {kid}")
-            signing_key = jwks_client.get_signing_key_from_jwt(token)
-            print(f"[AUTH] Signing key retrieved successfully")
-        except Exception as e:
-            print(f"[AUTH] Error getting signing key from primary JWKS: {e}")
-            # Try the other JWKS endpoint
-            if "sts.windows.net" in actual_issuer:
-                print(f"[AUTH] Trying v2.0 JWKS endpoint as fallback")
-                jwks_client = get_azure_jwks("v2.0")
-            else:
-                print(f"[AUTH] Trying v1.0 JWKS endpoint as fallback")
-                jwks_client = get_azure_jwks("v1.0")
-            try:
-                signing_key = jwks_client.get_signing_key_from_jwt(token)
-                print(f"[AUTH] Signing key retrieved from fallback JWKS")
-            except Exception as e2:
-                print(f"[AUTH] Error getting signing key from fallback JWKS: {e2}")
-                # Try common endpoint
-                try:
-                    print(f"[AUTH] Trying common JWKS endpoint")
-                    common_jwks = PyJWKClient(f"https://login.microsoftonline.com/common/discovery/keys")
-                    signing_key = common_jwks.get_signing_key_from_jwt(token)
-                    print(f"[AUTH] Signing key retrieved from common endpoint")
-                except Exception as e3:
-                    print(f"[AUTH] All JWKS endpoints failed: {e3}")
-                    raise e3
-        
-        # For v1.0 tokens (sts.windows.net), issuer format is different
-        if "sts.windows.net" in actual_issuer:
-            # v1.0 token - verify with v1.0 issuer format
-            try:
-                decoded_token = jwt.decode(
-                    token,
-                    signing_key.key,
-                    algorithms=["RS256"],
-                    audience=token_audience,  # Accept the token's audience (Microsoft Graph)
-                    issuer=actual_issuer,
-                    options={"verify_exp": True}
-                )
-                print(f"[AUTH] ✅ v1.0 token verified successfully")
-                return decoded_token
-            except jwt.InvalidAudienceError:
-                # If audience check fails, try without it (token is valid, just wrong audience)
-                print(f"[AUTH] ⚠️ Audience mismatch, verifying signature only")
-                decoded_token = jwt.decode(
-                    token,
-                    signing_key.key,
-                    algorithms=["RS256"],
-                    issuer=actual_issuer,
-                    options={"verify_signature": True, "verify_exp": True, "verify_aud": False}
-                )
-                print(f"[AUTH] ✅ Token verified (signature only)")
-                return decoded_token
-            except Exception as sig_error:
-                print(f"[AUTH] ⚠️ Signature verification failed: {sig_error}")
-                # Try with common endpoint
-                try:
-                    print(f"[AUTH] Trying common JWKS endpoint")
-                    common_jwks = PyJWKClient("https://login.microsoftonline.com/common/discovery/keys")
-                    common_signing_key = common_jwks.get_signing_key_from_jwt(token)
-                    decoded_token = jwt.decode(
-                        token,
-                        common_signing_key.key,
-                        algorithms=["RS256"],
-                        options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False}
-                    )
-                    print(f"[AUTH] ✅ Token verified using common endpoint (signature only)")
-                    return decoded_token
-                except Exception as common_error:
-                    print(f"[AUTH] Common endpoint also failed: {common_error}")
-                    # Last resort: accept token if it's from Azure AD (check issuer only)
-                    if "sts.windows.net" in actual_issuer or "login.microsoftonline.com" in actual_issuer:
-                        print(f"[AUTH] ⚠️ Accepting token based on issuer validation only (signature verification bypassed)")
-                        # Return the unverified token but log a warning
-                        print(f"[AUTH] WARNING: Token signature verification failed, but accepting based on issuer")
-                        return unverified
-                    else:
-                        raise HTTPException(status_code=401, detail=f"Token signature verification failed: {str(sig_error)}")
-        else:
-            # v2.0 token - verify with v2.0 issuer format
-            possible_issuers = [
-                actual_issuer,
-                f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0",
-            ]
-            
-            for issuer in possible_issuers:
-                try:
-                    decoded_token = jwt.decode(
-                        token,
-                        signing_key.key,
-                        algorithms=["RS256"],
-                        audience=AZURE_CLIENT_ID,
-                        issuer=issuer,
-                        options={"verify_exp": True}
-                    )
-                    print(f"[AUTH] ✅ v2.0 token verified successfully")
-                    return decoded_token
-                except (jwt.InvalidAudienceError, jwt.InvalidIssuerError):
-                    continue
-            
-            # Fallback: verify signature only
-            print(f"[AUTH] ⚠️ Standard verification failed, verifying signature only")
-            decoded_token = jwt.decode(
-                token,
-                signing_key.key,
-                algorithms=["RS256"],
-                options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False}
-            )
-            print(f"[AUTH] ✅ Token verified (signature only)")
-            return decoded_token
-            
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token has expired")
-    except jwt.InvalidTokenError as e:
-        print(f"[AUTH] ❌ Invalid token: {str(e)}")
-        raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
-    except Exception as e:
-        print(f"[AUTH] ❌ Token verification failed: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
 
-
-# -------------------------
-# AgentCore Identity Integration
-# -------------------------
-
-def store_user_identity_in_agentcore(user_id: str, email: str, name: str) -> str:
-    """Store user identity in AgentCore Identity and return identity ARN"""
-    try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, return a placeholder ARN
-        # The actual AgentCore Identity API methods need to be verified from documentation
-        
-        identity_name = f"user-{user_id}"
-        placeholder_arn = f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/{identity_name}"
-        
-        print(f"[AUTH] AgentCore Identity API not implemented yet - using placeholder ARN: {placeholder_arn}")
-        print(f"[AUTH] User info - ID: {user_id}, Email: {email}, Name: {name}")
-        
-        # In production, you would:
-        # 1. Call AgentCore Identity API to create/update identity
-        # 2. Store metadata (email, name, has_brd_access, etc.)
-        # 3. Return the actual identity ARN
-        
-        return placeholder_arn
-    except Exception as e:
-        print(f"[AUTH] Error in store_user_identity_in_agentcore: {e}")
-        # Return a placeholder ARN on error
-        return f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/user-{user_id}"
-
-def get_user_identity_arn(user_id: str) -> Optional[str]:
-    """Get user's AgentCore Identity ARN"""
-    try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, return placeholder ARN
-        identity_name = f"user-{user_id}"
-        placeholder_arn = f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/{identity_name}"
-        print(f"[AUTH] AgentCore Identity API not implemented yet - using placeholder ARN")
-        return placeholder_arn
-    except Exception as e:
-        print(f"[AUTH] Error getting identity ARN: {e}")
-        return None
-
-def check_brd_access_via_agentcore(user_id: str) -> bool:
-    """Check if user has BRD access via AgentCore Identity metadata"""
-    try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, default to allowing access since AgentCore Identity API methods are not available
-        # The actual API might be different - check AgentCore Identity documentation
-        
-        # Placeholder: Always allow access for now
-        # In production, you would:
-        # 1. Check if user identity exists in AgentCore Identity
-        # 2. Read metadata to check has_brd_access flag
-        # 3. Return True/False based on metadata
-        
-        print(f"[AUTH] AgentCore Identity API not implemented yet - defaulting to allow access")
-        return True  # Default: allow all authenticated users
-    except Exception as e:
-        print(f"[AUTH] Error in check_brd_access_via_agentcore: {e}")
-        # On error, default to allow (fail open)
-        return True
-
-def grant_brd_access_via_agentcore(user_id: str) -> bool:
-    """Grant BRD access to user via AgentCore Identity"""
-    try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, just log and return True
-        print(f"[AUTH] Granting BRD access to user: {user_id}")
-        print(f"[AUTH] AgentCore Identity API not implemented yet - access granted by default")
-        return True
-    except Exception as e:
-        print(f"[AUTH] Error granting BRD access: {e}")
-        return False
-
-def revoke_brd_access_via_agentcore(user_id: str) -> bool:
-    """Revoke BRD access from user via AgentCore Identity"""
-    try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, just log and return True
-        print(f"[AUTH] Revoking BRD access from user: {user_id}")
-        print(f"[AUTH] AgentCore Identity API not implemented yet - access revoked by default")
-        return True
-    except Exception as e:
-        print(f"[AUTH] Error revoking BRD access: {e}")
-        return False
 
 # -------------------------
 # Authentication Decorator
@@ -1525,26 +1299,15 @@ async def analyst_chat(
             if not project_id or project_id == "none":
                 project_id = None
         
-        # If project_id is provided, generate a deterministic session ID
-        if project_id and project_id != "none":
-            # Create deterministic session ID from project_id + user_id
-            session_key = f"{project_id}:{user_id}"
-            session_hash = hashlib.md5(session_key.encode('utf-8')).hexdigest()
-            # Format as UUID-like string for consistency
-            runtime_session_id = f"{session_hash[:8]}-{session_hash[8:12]}-{session_hash[12:16]}-{session_hash[16:20]}-{session_hash[20:]}"
-            print(f"[ANALYST-CHAT] ✅ Generated project-scoped session ID: {runtime_session_id} (from project: {project_id}, user: {user_id})")
-            
-            # Override the provided session_id with the project-scoped one
-            session_id = runtime_session_id
-        elif session_id == "none" or not session_id:
-            # No project_id provided and no session_id - create a new random session
+        # Validate session_id
+        if not session_id or session_id == "none":
+            # This shouldn't happen with correct frontend, but fallback safety
+            import uuid
             runtime_session_id = str(uuid.uuid4())
-            session_id = runtime_session_id
-            print(f"[ANALYST-CHAT] ⚠️ Creating new random session: {runtime_session_id} (no project_id provided, session_id was: {session_id})")
+            print(f"[ANALYST-CHAT] ⚠️ No session_id provided, created new: {runtime_session_id}")
         else:
-            # Use provided session_id as-is (for backward compatibility or when project_id is not provided)
             runtime_session_id = session_id
-            print(f"[ANALYST-CHAT] ✅ Using provided session ID: {runtime_session_id} (project_id: {project_id})")
+            print(f"[ANALYST-CHAT] ✅ Using provided session ID: {runtime_session_id}")
         
         formatted_message = message.strip()
         
@@ -1943,6 +1706,83 @@ async def analyst_chat(
             "result": f"Error: {error_msg}",
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
+
+@app.get("/analyst-history/{session_id}")
+async def get_analyst_history(
+    session_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get conversation history for an analyst session from AgentCore Memory"""
+    try:
+        print(f"\n[ANALYST-HISTORY] Fetching history for session: {session_id}")
+        print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
+        
+        # Get AgentCore Memory configuration
+        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
+        AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
+        
+        # Get AgentCore client
+        agentcore_client = get_agent_core_client()
+        
+        print(f"[ANALYST-HISTORY] Calling AgentCore Memory...")
+        print(f"[ANALYST-HISTORY] Memory ID: {AGENTCORE_MEMORY_ID}")
+        print(f"[ANALYST-HISTORY] Session ID: {session_id}")
+        print(f"[ANALYST-HISTORY] Actor ID: {AGENTCORE_ACTOR_ID}")
+        
+        # Fetch events from AgentCore Memory
+        response = agentcore_client.list_events(
+            memoryId=AGENTCORE_MEMORY_ID,
+            sessionId=session_id,
+            actorId=AGENTCORE_ACTOR_ID,
+            includePayloads=True,
+            maxResults=99
+        )
+        
+        events = response.get("events", [])
+        print(f"[ANALYST-HISTORY] Retrieved {len(events)} events from AgentCore Memory")
+        
+        # Parse events into messages
+        messages = []
+        for event in events:
+            payload_list = event.get("payload", [])
+            for payload_item in payload_list:
+                conv_data = payload_item.get("conversational")
+                if not conv_data:
+                    continue
+                
+                text_content = conv_data.get("content", {}).get("text")
+                if not text_content:
+                    continue
+                
+                role = conv_data.get("role", "assistant").lower()
+                messages.append({
+                    'content': text_content,
+                    'isBot': role == 'assistant',
+                    'timestamp': ''  # Frontend will generate timestamp
+                })
+        
+        # Reverse messages to show in chronological order (oldest first)
+        messages.reverse()
+        
+        print(f"[ANALYST-HISTORY] ✅ Parsed {len(messages)} messages")
+        
+        return JSONResponse(content={
+            'messages': messages,
+            'session_id': session_id,
+            'count': len(messages)
+        })
+            
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[ANALYST-HISTORY] ERROR: {error_msg}")
+        import traceback
+        traceback.print_exc()
+        
+        return JSONResponse(status_code=500, content={
+            'error': error_msg,
+            'messages': []
+        })
+
 
 @app.post("/analyst-generate-brd")
 async def analyst_generate_brd(
@@ -2691,7 +2531,7 @@ async def download_brd(
         
         # Get the BRD TXT file from S3
         try:
-            head_response = s3_client.head_object(Bucket=bucket_name, Key=key)
+            head_response = s3_client.head_object(Bucket=bucket_name, Key=s3_key_txt)
             print(f"[DOWNLOAD] ✅ File exists in S3! Size: {head_response.get('ContentLength', 0)} bytes")
         except ClientError as head_err:
             head_error_code = head_err.response.get('Error', {}).get('Code', 'Unknown')
@@ -2715,6 +2555,13 @@ async def download_brd(
                 json_body = json_response['Body'].read()
                 print(f"[DOWNLOAD] Read {len(json_body)} bytes from JSON file")
                 
+                # Parse JSON
+                try:
+                    brd_data = json.loads(json_body)
+                except json.JSONDecodeError as je:
+                    print(f"[DOWNLOAD] ⚠️ Error parsing BRD JSON: {je}")
+                    raise je
+
                 # Convert JSON to DOCX
                 docx_bytes = render_brd_json_to_docx(brd_data)
                 
@@ -2733,7 +2580,7 @@ async def download_brd(
                 if json_error_code == 'NoSuchKey':
                     print(f"[DOWNLOAD] ⚠️  BRD JSON not found, trying text file...")
                     # Fallback to text file and convert to DOCX
-                    response = s3_client.get_object(Bucket=bucket_name, Key=key)
+                    response = s3_client.get_object(Bucket=bucket_name, Key=s3_key_txt)
                     # Read with explicit UTF-8 encoding and error handling
                     text_body = response['Body'].read()
                     print(f"[DOWNLOAD] Read {len(text_body)} bytes from text file")
@@ -2802,7 +2649,7 @@ async def download_brd(
                 )
             
             if error_code == 'NoSuchKey':
-                print(f"[DOWNLOAD] ❌ BRD text file not found in S3: {key}")
+                print(f"[DOWNLOAD] ❌ BRD text file not found in S3: {s3_key_txt}")
                 # Try to get BRD JSON structure and render it to text
                 try:
                     print(f"[DOWNLOAD] Attempting to fetch BRD JSON structure from S3...")
@@ -2836,7 +2683,7 @@ async def download_brd(
                         try:
                             s3_client.put_object(
                                 Bucket=bucket_name,
-                                Key=key,
+                                Key=s3_key_txt,
                                 Body=brd_text.encode("utf-8"),
                                 ContentType="text/plain"
                             )
@@ -2889,7 +2736,7 @@ async def download_brd(
             traceback.print_exc()
             return JSONResponse(status_code=500, content={
                 "error": "Failed to retrieve BRD",
-                "message": f"Error accessing S3: {str(s3_error)}"
+                "message": f"Error accessing S3: {str(e)}"
             })
             
     except Exception as e:
