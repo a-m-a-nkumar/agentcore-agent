@@ -7,8 +7,10 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 import logging
+import traceback
+import time
 
-# Import database helper functions
+# Import database helper functions - assuming app run from root
 from db_helper import (
     create_project,
     get_user_projects,
@@ -18,7 +20,7 @@ from db_helper import (
     create_or_update_user
 )
 
-# Import authentication from auth.py
+# Import authentication from auth.py - assuming app run from root
 from auth import verify_azure_token
 
 logger = logging.getLogger(__name__)
@@ -183,6 +185,9 @@ async def update_project_by_id(
             jira_project_key=project_data.jira_project_key,
             confluence_space_key=project_data.confluence_space_key
         )
+
+        if not updated_project:
+             raise HTTPException(status_code=404, detail="Project not found or update failed")
         
         # Convert timestamps
         updated_project['created_at'] = int(updated_project['created_at'].timestamp() * 1000)
@@ -192,8 +197,9 @@ async def update_project_by_id(
     except HTTPException:
         raise
     except Exception as e:
+        traceback.print_exc()
         logger.error(f"Error updating project: {e}")
-        raise HTTPException(status_code=500, detail="Failed to update project")
+        raise HTTPException(status_code=500, detail=f"Failed to update project: {str(e)}")
 
 
 @router.delete("/{project_id}", status_code=204)
@@ -215,11 +221,21 @@ async def delete_project_by_id(
             raise HTTPException(status_code=403, detail="Not authorized to delete this project")
         
         # Delete project
-        delete_project(project_id, hard_delete=hard_delete)
+        start_time = time.time()
+        logger.info(f"[PERF] Starting delete for project: {project_id}")
         
+        result = delete_project(project_id, hard_delete=hard_delete)
+        
+        duration = (time.time() - start_time) * 1000
+        logger.info(f"[PERF] Delete for project {project_id} took {duration:.2f}ms")
+        
+        if not result:
+             raise HTTPException(status_code=404, detail="Project not found or delete failed")
+
         return None  # 204 No Content
     except HTTPException:
         raise
     except Exception as e:
+        traceback.print_exc()
         logger.error(f"Error deleting project: {e}")
-        raise HTTPException(status_code=500, detail="Failed to delete project")
+        raise HTTPException(status_code=500, detail=f"Failed to delete project: {str(e)}")

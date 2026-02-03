@@ -19,8 +19,9 @@ from db_helper import (
     get_project
 )
 
-# Import authentication from projects_api
-from projects_api import get_current_user
+# Import authentication from projects router
+# Changed from 'projects_api' to '.projects' as they are in the same package
+from .projects import get_current_user
 
 logger = logging.getLogger(__name__)
 

@@ -7,6 +7,8 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
 import logging
+import time
+from psycopg2 import pool
 from datetime import datetime
 from typing import List, Dict, Optional, Any
 
@@ -15,23 +17,46 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+# Global pool variable
+_db_pool = None
+
+def get_db_pool():
+    """Get or initialize the connection pool"""
+    global _db_pool
+    if _db_pool is None:
+        try:
+            _db_pool = pool.ThreadedConnectionPool(
+                1, 20,
+                host=os.getenv("DATABASE_HOST"),
+                port=os.getenv("DATABASE_PORT", "5432"),
+                database=os.getenv("DATABASE_NAME"),
+                user=os.getenv("DATABASE_USER"),
+                password=os.getenv("DATABASE_PASSWORD"),
+            )
+            logger.info("Database connection pool initialized")
+        except Exception as e:
+            logger.error(f"Failed to initialize database pool: {e}")
+            raise
+    return _db_pool
+
 def get_db_connection():
     """
-    Create and return a database connection
-    Uses environment variables for credentials
+    Get a connection from the pool
     """
+    start_time = time.time()
     try:
-        conn = psycopg2.connect(
-            host=os.getenv("DATABASE_HOST"),
-            port=os.getenv("DATABASE_PORT", "5432"),
-            database=os.getenv("DATABASE_NAME"),
-            user=os.getenv("DATABASE_USER"),
-            password=os.getenv("DATABASE_PASSWORD"),
-        )
+        conn = get_db_pool().getconn()
+        duration = (time.time() - start_time) * 1000
+        logger.info(f"[DB_PERF] Borrowed connection from pool in {duration:.2f}ms")
         return conn
     except Exception as e:
-        logger.error(f"Database connection failed: {e}")
+        logger.error(f"Failed to get connection from pool: {e}")
         raise
+
+def release_db_connection(conn):
+    """Return a connection to the pool"""
+    if _db_pool and conn:
+        _db_pool.putconn(conn)
 
 
 # ============================================
@@ -73,7 +98,7 @@ def create_or_update_user(user_id: str, email: str, name: str = None) -> Dict[st
         logger.error(f"Error creating/updating user: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def get_user(user_id: str) -> Optional[Dict[str, Any]]:
@@ -85,7 +110,7 @@ def get_user(user_id: str) -> Optional[Dict[str, Any]]:
             user = cursor.fetchone()
             return dict(user) if user else None
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 # ============================================
@@ -136,7 +161,7 @@ def create_project(
         logger.error(f"Error creating project: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def get_user_projects(user_id: str, include_deleted: bool = False) -> List[Dict[str, Any]]:
@@ -176,7 +201,7 @@ def get_user_projects(user_id: str, include_deleted: bool = False) -> List[Dict[
             
             return projects
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def get_project(project_id: str) -> Optional[Dict[str, Any]]:
@@ -197,7 +222,7 @@ def get_project(project_id: str) -> Optional[Dict[str, Any]]:
             
             return project
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def update_project(
@@ -240,17 +265,23 @@ def update_project(
             """
             
             cursor.execute(query, params)
-            project = dict(cursor.fetchone())
-            conn.commit()
+            row = cursor.fetchone()
             
-            logger.info(f"Project updated: {project_id}")
-            return project
+            if row:
+                project = dict(row)
+                conn.commit()
+                logger.info(f"Project updated: {project_id}")
+                return project
+            else:
+                conn.rollback()
+                logger.warning(f"Update returned no rows for {project_id}")
+                return None
     except Exception as e:
         conn.rollback()
         logger.error(f"Error updating project: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def delete_project(project_id: str, hard_delete: bool = False) -> bool:
@@ -276,15 +307,27 @@ def delete_project(project_id: str, hard_delete: bool = False) -> bool:
                     WHERE id = %s
                 """, (project_id,))
             
+            
+            rows_affected = cursor.rowcount
+            
+            # Measure commit time
+            commit_start = time.time()
             conn.commit()
-            logger.info(f"Project {'hard' if hard_delete else 'soft'} deleted: {project_id}")
-            return True
+            commit_duration = (time.time() - commit_start) * 1000
+            logger.info(f"[DB_PERF] DB commit for delete took {commit_duration:.2f}ms")
+            
+            if rows_affected > 0:
+                logger.info(f"Project {'hard' if hard_delete else 'soft'} deleted: {project_id}")
+                return True
+            else:
+                logger.warning(f"Delete returned no rows for {project_id}")
+                return False
     except Exception as e:
         conn.rollback()
         logger.error(f"Error deleting project: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 # ============================================
@@ -332,7 +375,7 @@ def create_session(
         logger.error(f"Error creating session: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def get_project_sessions(
@@ -381,7 +424,7 @@ def get_project_sessions(
             
             return sessions
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def get_session(session_id: str) -> Optional[Dict[str, Any]]:
@@ -402,7 +445,7 @@ def get_session(session_id: str) -> Optional[Dict[str, Any]]:
             
             return session
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def update_session(
@@ -466,7 +509,7 @@ def update_session(
         logger.error(f"Error updating session: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def increment_message_count(session_id: str) -> int:
@@ -489,7 +532,7 @@ def increment_message_count(session_id: str) -> int:
         logger.error(f"Error incrementing message count: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)
 
 
 def delete_session(session_id: str, hard_delete: bool = False) -> bool:
@@ -523,4 +566,4 @@ def delete_session(session_id: str, hard_delete: bool = False) -> bool:
         logger.error(f"Error deleting session: {e}")
         raise
     finally:
-        conn.close()
+        release_db_connection(conn)

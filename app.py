@@ -22,8 +22,8 @@ import requests
 from datetime import datetime
 
 # Import API routers
-from projects_api import router as projects_router
-from sessions_api_new import router as sessions_router
+from routers.projects import router as projects_router
+from routers.sessions import router as sessions_router
 
 load_dotenv()
 
