@@ -205,11 +205,11 @@ async def update_project_by_id(
 @router.delete("/{project_id}", status_code=204)
 async def delete_project_by_id(
     project_id: str,
-    hard_delete: bool = False,
+    hard_delete: bool = True,
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Delete a project (soft delete by default)
+    Delete a project (hard delete by default)
     """
     try:
         # Verify project exists and user owns it

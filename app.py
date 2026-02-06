@@ -24,6 +24,7 @@ from datetime import datetime
 # Import API routers
 from routers.projects import router as projects_router
 from routers.sessions import router as sessions_router
+from routers.integrations import router as integrations_router
 
 load_dotenv()
 
@@ -77,6 +78,7 @@ app.add_middleware(
 # Register API routers
 app.include_router(projects_router)
 app.include_router(sessions_router)
+app.include_router(integrations_router)
 
 # Add request logging middleware
 @app.middleware("http")
