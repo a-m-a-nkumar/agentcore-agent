@@ -12,7 +12,7 @@ import json
 import os
 import re
 import logging
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import boto3
 from botocore.config import Config
@@ -820,6 +820,163 @@ def invoke_claude_for_chat(prompt: str, conversation_history: List[Dict] = None)
     except Exception as e:
         logger.error(f"Bedrock invocation failed: {e}")
         raise
+
+
+def _build_section_list_for_prompt(brd_data: Dict) -> str:
+    """Build a numbered list of section titles for the LLM prompt."""
+    sections = brd_data.get("sections", [])
+    lines = []
+    for i, sec in enumerate(sections, 1):
+        title = sec.get("title", "Untitled")
+        lines.append(f"  {i}. {title}")
+    return "\n".join(lines) if lines else "(no sections)"
+
+
+def _parse_user_intent_with_llm(
+    user_message: str,
+    conversation_history: List[Dict],
+    brd_data: Dict,
+    message_context: str = "",
+) -> Dict[str, Any]:
+    """
+    Use LLM to parse user intent, target section, and update instruction in one call.
+    Replaces brittle pattern matching with intelligent understanding.
+
+    Returns:
+        {
+            "intent": "show" | "list" | "update" | "generic",
+            "section_number": int or None,
+            "section_title": str or None,
+            "update_instruction": str or None
+        }
+    """
+    section_list = _build_section_list_for_prompt(brd_data)
+    history_text = _render_history_as_text(conversation_history[-15:] if conversation_history else [])
+
+    prompt = f"""You are a BRD (Business Requirements Document) assistant. Parse the user's message to determine their intent and extract structured information.
+
+STRICT FLOW - Follow these steps in order:
+
+## STEP 1: INTENT
+Determine the user's intent. Must be EXACTLY one of:
+- "show" - User wants to VIEW/display a section (e.g., "show section 4", "show me stakeholders", "display section 5")
+- "list" - User wants to see all section names/titles
+- "update" - User wants to MODIFY/EDIT/CHANGE content in the BRD (e.g., "remove last two rows", "change X to Y", "transfer items from in scope to out of scope", "add Z to section 4")
+- "generic" - General question, greeting, or unclear (e.g., "what sections did I update?", "hello", "help")
+
+IMPORTANT for "update" intent:
+- "remove last two rows" = update (removing rows from a table)
+- "transfer last 3 points of in scope to out of scope" = update (moving content between In Scope and Out of Scope)
+- "change X to Y" = update
+- "add Z" = update
+- "delete the last two entries" = update
+- Typos like "roes" instead of "rows" = still update intent
+
+## STEP 2: SECTION (only if intent is "update" or "show")
+Identify which section the user is referring to. Use:
+1. Explicit section in message: "section 4", "section 5", "stakeholders", "scope"
+2. Chat history: What section did the user LAST view? Look for "show section N" or assistant messages displaying "## N. SectionTitle"
+3. Section content in message: If message contains "SECTION 4: Stakeholders" or "## 5. Scope", that's the section
+4. Keywords: "in scope", "out of scope" = Scope section; "stakeholders" = Stakeholders section
+
+Return section_number (1-based integer) or section_title (e.g., "Stakeholders", "Scope") or "all" if editing entire document.
+If intent is "show" and user said "show section 5", return section_number: 5.
+If intent is "update" and message contains "SECTION 5: Scope" with "transfer last 3 points...", return section_number: 5.
+
+BRD sections (for reference):
+{section_list}
+
+## STEP 3: UPDATE INSTRUCTION (only if intent is "update")
+Extract the EXACT instruction for what to change. Be precise:
+- "remove last two rows" -> "Remove the last two rows from the table"
+- "transfer last 3 points of in scope to out of scope" -> "Move the last 3 items from In Scope to Out of Scope"
+- "change Sarah to Aman" -> "Replace all occurrences of Sarah with Aman"
+- "add security requirements" -> "Add security requirements to the section"
+
+Preserve the user's meaning even with typos. "roes" = "rows".
+
+---
+USER MESSAGE:
+{user_message}
+
+---
+CONVERSATION HISTORY (most recent last):
+{history_text}
+
+---
+CURRENT MESSAGE CONTEXT (if user is viewing a section, this may be included):
+{message_context[:2000] if message_context else "(none)"}
+
+---
+Respond with ONLY valid JSON in this exact format (no markdown, no explanation):
+{{"intent": "show" | "list" | "update" | "generic", "section_number": <int or null>, "section_title": "<string or null>", "update_instruction": "<string or null>"}}
+
+Rules:
+- section_number: integer 1-based, or null if not applicable
+- section_title: use when section_number unclear but title is (e.g., "Scope", "Stakeholders"), or null
+- update_instruction: only when intent is "update", otherwise null
+- For "show entire brd" or "show full document", use intent "show" and section_number null, section_title "all"
+"""
+
+    raw_response = invoke_claude_for_chat(prompt, [])
+    logger.info(f"LLM parse response (first 500 chars): {raw_response[:500]}")
+
+    # Extract JSON from response (handle markdown code blocks and nested braces)
+    json_str = None
+    code_block_match = re.search(r"```(?:json)?\s*(\{)", raw_response)
+    if code_block_match:
+        brace_start = code_block_match.start(1)
+        depth = 0
+        for i in range(brace_start, len(raw_response)):
+            if raw_response[i] == "{":
+                depth += 1
+            elif raw_response[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    json_str = raw_response[brace_start : i + 1]
+                    break
+    if not json_str:
+        # Find balanced braces (update_instruction may contain text with braces)
+        brace_start = raw_response.find("{")
+        if brace_start != -1:
+            depth = 0
+            for i in range(brace_start, len(raw_response)):
+                if raw_response[i] == "{":
+                    depth += 1
+                elif raw_response[i] == "}":
+                    depth -= 1
+                    if depth == 0:
+                        json_str = raw_response[brace_start : i + 1]
+                        break
+
+    if not json_str:
+        logger.warning("Could not extract JSON from LLM parse response")
+        return {"intent": "generic", "section_number": None, "section_title": None, "update_instruction": None}
+
+    try:
+        parsed = json.loads(json_str)
+        intent = (parsed.get("intent") or "generic").lower()
+        section_number = parsed.get("section_number")
+        section_title = parsed.get("section_title")
+        update_instruction = parsed.get("update_instruction")
+
+        if section_number is not None and not isinstance(section_number, int):
+            try:
+                section_number = int(section_number)
+            except (ValueError, TypeError):
+                section_number = None
+
+        logger.info(f"Parsed intent={intent}, section_number={section_number}, section_title={section_title}, update_instruction={update_instruction[:80] if update_instruction else None}...")
+        return {
+            "intent": intent if intent in ("show", "list", "update", "generic") else "generic",
+            "section_number": section_number,
+            "section_title": section_title,
+            "update_instruction": update_instruction,
+        }
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON parse error in LLM response: {e}")
+        return {"intent": "generic", "section_number": None, "section_title": None, "update_instruction": None}
+
 
 # -------------------------
 # Chat Commands
@@ -1849,8 +2006,14 @@ def lambda_handler(event, context):
             
             if not use_command or not command or (command and not use_command):
                 # Parse message directly (either no command or command was invalid)
-                if user_message_clean.lower() == "list":
+                # FAST PATH: list, show entire, show section - keep existing behavior
+                if user_message_clean.lower().strip() == "list":
                     assistant_response = handle_list_sections(brd_data)
+
+                elif re.search(r'show\s+(?:entire|full)\s+(?:brd|document)?', user_message_clean, re.IGNORECASE):
+                    # View entire BRD - return full document content
+                    full_brd_text = render_brd_to_text(brd_data)
+                    assistant_response = f"## Full BRD Document\n\n{full_brd_text}\n\n---\nYou can now make edits to any section. Specify which section and what to change (e.g., 'in section 5, transfer last 3 points from in scope to out of scope')."
 
                 elif user_message_clean.lower().startswith("show ") or ("show" in user_message_clean.lower() and ("section" in user_message_clean.lower() or any(word in user_message_clean.lower() for word in ["assumptions", "constraints", "stakeholders", "scope", "purpose", "updated"]))):
                     # Handle "show 4", "show section 3", "show me section 3", "show assumptions", "show me constraints", "show me updated section"
@@ -2002,8 +2165,49 @@ def lambda_handler(event, context):
                     logger.info(f"Detected question, routing to Claude: {user_message_clean[:100]}")
                     # Fall through to general question handling below
                     pass
-                elif not assistant_response and any(word in user_message_clean.lower() for word in ['update', 'modify', 'edit', 'change', 'replace']):
-                    # Handle various natural language update patterns
+                elif not assistant_response:
+                    # LLM-based intent/section/update extraction - replaces brittle pattern matching
+                    # Handles: "remove last two rows", "transfer last 3 points to out of scope", typos, etc.
+                    message_context = user_message_clean[:2000] if ("SECTION" in user_message_clean or "##" in user_message_clean) else ""
+                    parsed = _parse_user_intent_with_llm(user_message_clean, history, brd_data, message_context)
+
+                    if parsed["intent"] == "update" and parsed["update_instruction"]:
+                        section_num = parsed["section_number"]
+                        if not section_num and parsed["section_title"]:
+                            section_num = _find_section_by_title_or_number(brd_data, parsed["section_title"])
+                        if section_num:
+                            logger.info(f"LLM parsed update: section={section_num}, instruction={parsed['update_instruction'][:80]}...")
+                            result = handle_update_section(brd_data, section_num, parsed["update_instruction"], history)
+                            assistant_response = result["message"]
+                            if result["success"]:
+                                updated_brd = result["updated_brd"]
+                                try:
+                                    save_brd_to_s3(brd_id, updated_brd)
+                                    save_brd_text_to_s3(brd_id, updated_brd)
+                                except Exception as s3_err:
+                                    logger.error(f"Failed to save BRD: {s3_err}")
+                                    assistant_response = f"Error saving: {str(s3_err)}"
+                                else:
+                                    last_updated_section = section_num
+                                    sections_list = brd_data.get("sections", [])
+                                    has_doc_title = sections_list and ("ai-powered" in (sections_list[0].get("title", "") or "").lower() or "brd" in (sections_list[0].get("title", "") or "").lower())
+                                    idx = section_num if has_doc_title else section_num - 1
+                                    sec_title = sections_list[idx].get("title", "Untitled") if idx < len(sections_list) else "Untitled"
+                                    if "✅" not in assistant_response:
+                                        assistant_response = f"✅ Section '{section_num}. {sec_title}' updated successfully\n\n{assistant_response}"
+                                    brd_updated = True
+                        else:
+                            assistant_response = "Could not determine which section to update. Please specify the section number or name (e.g., 'in section 5' or 'in the Scope section')."
+
+                    elif parsed["intent"] == "show" and (parsed["section_number"] or parsed["section_title"]):
+                        section_num = parsed["section_number"]
+                        if not section_num and parsed["section_title"] and parsed["section_title"].lower() != "all":
+                            section_num = _find_section_by_title_or_number(brd_data, parsed["section_title"])
+                        if section_num:
+                            assistant_response = handle_show_section(brd_data, section_num)
+
+                if not assistant_response and any(word in user_message_clean.lower() for word in ['update', 'modify', 'edit', 'change', 'replace']):
+                    # Fallback: Handle various natural language update patterns (if LLM didn't parse)
                     section_num = None
                     section_title = None
                     instruction = None

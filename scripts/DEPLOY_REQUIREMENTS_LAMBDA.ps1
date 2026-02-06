@@ -33,13 +33,22 @@ New-Item -ItemType Directory -Path $PACKAGE_DIR | Out-Null
 Write-Host "  [OK] Package directory created" -ForegroundColor Green
 Write-Host ""
 
-# Step 3: Copy Lambda function
-Write-Host "[3/6] Copying Lambda function..." -ForegroundColor Yellow
+# Step 3: Copy Lambda function and dependencies
+Write-Host "[3/6] Copying Lambda function and dependencies..." -ForegroundColor Yellow
 if (Test-Path "lambda_requirements_gathering.py") {
     Copy-Item "lambda_requirements_gathering.py" "$PACKAGE_DIR\lambda_requirements_gathering.py" -Force
     Write-Host "  [OK] Copied lambda_requirements_gathering.py" -ForegroundColor Green
 } else {
     Write-Host "  [ERROR] lambda_requirements_gathering.py not found!" -ForegroundColor Red
+    exit 1
+}
+
+# Copy prompts directory
+if (Test-Path "prompts") {
+    Copy-Item -Path "prompts" -Destination "$PACKAGE_DIR\prompts" -Recurse -Force
+    Write-Host "  [OK] Copied prompts directory" -ForegroundColor Green
+} else {
+    Write-Host "  [ERROR] prompts directory not found!" -ForegroundColor Red
     exit 1
 }
 Write-Host ""
