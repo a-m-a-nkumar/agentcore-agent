@@ -567,3 +567,52 @@ def delete_session(session_id: str, hard_delete: bool = False) -> bool:
         raise
     finally:
         release_db_connection(conn)
+
+
+# ============================================
+# Atlassian Integration Functions
+# ============================================
+
+def update_user_atlassian_credentials(
+    user_id: str,
+    domain: str,
+    email: str,
+    api_token: str
+) -> bool:
+    """Update user's Atlassian credentials"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users 
+                SET atlassian_domain = %s,
+                    atlassian_email = %s,
+                    atlassian_api_token = %s,
+                    atlassian_linked_at = NOW()
+                WHERE id = %s
+            """, (domain, email, api_token, user_id))
+            conn.commit()
+            logger.info(f"Updated Atlassian credentials for user: {user_id}")
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating Atlassian credentials: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_atlassian_credentials(user_id: str) -> Optional[Dict[str, Any]]:
+    """Get user's Atlassian credentials"""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT atlassian_domain, atlassian_email, atlassian_api_token, atlassian_linked_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
