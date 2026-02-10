@@ -25,6 +25,9 @@ from datetime import datetime
 from routers.projects import router as projects_router
 from routers.sessions import router as sessions_router
 from routers.integrations import router as integrations_router
+from routers.sync import router as sync_router
+from routers.search import router as search_router
+from routers.orchestration import router as orchestration_router
 
 load_dotenv()
 
@@ -79,6 +82,9 @@ app.add_middleware(
 app.include_router(projects_router)
 app.include_router(sessions_router)
 app.include_router(integrations_router)
+app.include_router(sync_router)
+app.include_router(search_router)
+app.include_router(orchestration_router)
 
 # Add request logging middleware
 @app.middleware("http")
@@ -100,7 +106,7 @@ async def log_requests(request: Request, call_next):
 
 # Configuration
 # Update this with your actual Agent ARN
-AGENT_ARN = "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK"
+AGENT_ARN = os.getenv("AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK")
 ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/Analyst_agent-kCoE8v38c0")
 REGION = os.getenv("AWS_REGION", "us-east-1")
 

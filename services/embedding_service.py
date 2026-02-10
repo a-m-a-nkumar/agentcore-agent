@@ -1,0 +1,114 @@
+"""
+Embedding Service - Generate and store vector embeddings using AWS Bedrock Titan
+"""
+
+import boto3
+import json
+import re
+from typing import List, Dict
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class EmbeddingService:
+    def __init__(self):
+        self.bedrock_runtime = boto3.client(
+            'bedrock-runtime',
+            region_name=os.getenv('AWS_REGION', 'us-east-1'),
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            aws_session_token=os.getenv('AWS_SESSION_TOKEN')
+        )
+        self.embedding_model_id = "amazon.titan-embed-text-v1"
+        self.chunk_size = 500  # words per chunk
+    
+    def chunk_text(self, text: str, chunk_size: int = None) -> List[str]:
+        """
+        Split text into chunks of approximately chunk_size words
+        
+        Args:
+            text: Text to chunk
+            chunk_size: Number of words per chunk (default: 500)
+            
+        Returns:
+            List of text chunks
+        """
+        if chunk_size is None:
+            chunk_size = self.chunk_size
+        
+        # Clean text
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        if not text:
+            return []
+        
+        # Split into words
+        words = text.split()
+        
+        # Create chunks
+        chunks = []
+        for i in range(0, len(words), chunk_size):
+            chunk = ' '.join(words[i:i + chunk_size])
+            chunks.append(chunk)
+        
+        return chunks
+    
+    def generate_embedding(self, text: str) -> List[float]:
+        """
+        Generate embedding vector for text using AWS Bedrock Titan
+        
+        Args:
+            text: Text to embed
+            
+        Returns:
+            1536-dimensional embedding vector
+        """
+        try:
+            # Prepare request
+            body = json.dumps({
+                "inputText": text
+            })
+            
+            # Call Bedrock
+            response = self.bedrock_runtime.invoke_model(
+                modelId=self.embedding_model_id,
+                body=body,
+                contentType='application/json',
+                accept='application/json'
+            )
+            
+            # Parse response
+            response_body = json.loads(response['body'].read())
+            embedding = response_body.get('embedding')
+            
+            if not embedding:
+                raise ValueError("No embedding returned from Bedrock")
+            
+            return embedding
+            
+        except Exception as e:
+            print(f"Error generating embedding: {e}")
+            raise
+    
+    def generate_embeddings_for_chunks(self, chunks: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for multiple chunks
+        
+        Args:
+            chunks: List of text chunks
+            
+        Returns:
+            List of embedding vectors
+        """
+        embeddings = []
+        for i, chunk in enumerate(chunks):
+            print(f"  Generating embedding {i+1}/{len(chunks)}...")
+            embedding = self.generate_embedding(chunk)
+            embeddings.append(embedding)
+        
+        return embeddings
+
+
+# Singleton instance
+embedding_service = EmbeddingService()

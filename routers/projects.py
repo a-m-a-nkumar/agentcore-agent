@@ -3,7 +3,7 @@ FastAPI Router for Project Management
 Handles all project-related API endpoints
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 import logging
@@ -106,10 +106,12 @@ async def get_projects(current_user: dict = Depends(get_current_user)):
 @router.post("/", response_model=ProjectResponse, status_code=201)
 async def create_new_project(
     project_data: ProjectCreate,
+    background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
     """
     Create a new project
+    Triggers initial sync if Jira or Confluence keys are provided
     """
     try:
         user_id = current_user["id"]
@@ -122,6 +124,17 @@ async def create_new_project(
             jira_project_key=project_data.jira_project_key,
             confluence_space_key=project_data.confluence_space_key
         )
+        
+        # Trigger initial sync in background if Jira or Confluence is configured
+        if project_data.jira_project_key or project_data.confluence_space_key:
+            from services.sync_service import sync_project
+            background_tasks.add_task(
+                sync_project,
+                project_id=project_data.project_id,
+                user_id=user_id,
+                sync_type='initial'
+            )
+            logger.info(f"Initial sync triggered for project {project_data.project_id}")
         
         # Convert timestamps to milliseconds
         project['created_at'] = int(project['created_at'].timestamp() * 1000)

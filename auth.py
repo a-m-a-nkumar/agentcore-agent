@@ -144,14 +144,9 @@ def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     
     try:
         # Decode header to get key ID (kid)
-        import base64
-        header_data = token.split('.')[0]
-        # Add padding if needed
-        header_data += '=' * (4 - len(header_data) % 4)
         try:
-            header_bytes = base64.urlsafe_b64decode(header_data)
-            header = json.loads(header_bytes)
-        except (binascii.Error, json.JSONDecodeError, UnicodeDecodeError) as e:
+            header = jwt.get_unverified_header(token)
+        except Exception as e:
             # print(f"[AUTH] Token decoding failed: {e}")
             raise HTTPException(status_code=401, detail="Invalid token format")
             
