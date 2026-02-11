@@ -369,3 +369,49 @@ def get_surrounding_chunks(
         }
     finally:
         release_db_connection(conn)
+
+
+def get_surrounding_chunks_batch(
+    project_id: str,
+    chunk_identifiers: List[Dict[str, Any]],
+    window: int = 1
+) -> Dict[str, Dict[str, Optional[str]]]:
+    """
+    Get surrounding chunks for multiple chunks using a single DB connection
+    
+    Args:
+        project_id: Project ID
+        chunk_identifiers: List of dicts with 'source_id' and 'chunk_index'
+        window: Number of chunks before/after to retrieve
+    
+    Returns:
+        Dict keyed by f"{source_id}_{chunk_index}" containing 'before' and 'after'
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        results = {}
+        
+        # Helper to get chunk
+        def get_chunk(sid, cidx):
+            cursor.execute("""
+                SELECT content_chunk FROM document_embeddings
+                WHERE project_id = %s AND source_id = %s AND chunk_index = %s
+            """, (project_id, sid, cidx))
+            row = cursor.fetchone()
+            return row['content_chunk'] if row else None
+
+        for item in chunk_identifiers:
+            source_id = item['source_id']
+            chunk_index = item['chunk_index']
+            key = f"{source_id}_{chunk_index}"
+            
+            results[key] = {
+                'before': get_chunk(source_id, chunk_index - window),
+                'after': get_chunk(source_id, chunk_index + window)
+            }
+            
+        cursor.close()
+        return results
+    finally:
+        release_db_connection(conn)

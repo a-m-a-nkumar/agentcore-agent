@@ -7,7 +7,7 @@ import json
 import boto3
 from typing import List, Dict, Optional
 from services.embedding_service import embedding_service
-from db_helper_vector import search_embeddings, get_surrounding_chunks
+from db_helper_vector import search_embeddings, get_surrounding_chunks_batch
 import os
 import logging
 
@@ -69,17 +69,27 @@ class RAGService:
             context_chunks = []
             sources = []
             
+            # Batch retrieve surrounding chunks
+            surrounding_map = {}
+            if include_context and results:
+                logger.info("Batch retrieving surrounding chunks...")
+                chunk_identifiers = [
+                    {'source_id': r['source_id'], 'chunk_index': r['chunk_index']} 
+                    for r in results
+                ]
+                surrounding_map = get_surrounding_chunks_batch(
+                    project_id=project_id,
+                    chunk_identifiers=chunk_identifiers,
+                    window=1
+                )
+            
             for result in results:
                 chunk_content = result['content_chunk']
                 
                 # Get surrounding chunks if requested
                 if include_context:
-                    surrounding = get_surrounding_chunks(
-                        project_id=project_id,
-                        source_id=result['source_id'],
-                        chunk_index=result['chunk_index'],
-                        window=1
-                    )
+                    key = f"{result['source_id']}_{result['chunk_index']}"
+                    surrounding = surrounding_map.get(key, {})
                     
                     # Build full context: before + current + after
                     full_context = ""
