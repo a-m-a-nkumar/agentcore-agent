@@ -88,6 +88,7 @@ def get_all_confluence_pages(project_id: str) -> List[Dict]:
         release_db_connection(conn)
 
 
+
 # ============================================
 # Jira Issues Functions
 # ============================================
@@ -186,6 +187,7 @@ def get_jira_issue(project_id: str, issue_key: str) -> Optional[Dict]:
         release_db_connection(conn)
 
 
+
 def get_all_jira_issues(project_id: str) -> List[Dict]:
     """Get all Jira issues for a project"""
     conn = get_db_connection()
@@ -203,6 +205,7 @@ def get_all_jira_issues(project_id: str) -> List[Dict]:
         return [dict(row) for row in results]
     finally:
         release_db_connection(conn)
+
 
 
 # ============================================
@@ -377,7 +380,7 @@ def get_surrounding_chunks_batch(
     window: int = 1
 ) -> Dict[str, Dict[str, Optional[str]]]:
     """
-    Get surrounding chunks for multiple chunks using a single DB connection
+    Get surrounding chunks for multiple chunks using a single DB connection and query
     
     Args:
         project_id: Project ID
@@ -387,30 +390,70 @@ def get_surrounding_chunks_batch(
     Returns:
         Dict keyed by f"{source_id}_{chunk_index}" containing 'before' and 'after'
     """
+    if not chunk_identifiers:
+        return {}
+    
     conn = get_db_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        results = {}
         
-        # Helper to get chunk
-        def get_chunk(sid, cidx):
-            cursor.execute("""
-                SELECT content_chunk FROM document_embeddings
-                WHERE project_id = %s AND source_id = %s AND chunk_index = %s
-            """, (project_id, sid, cidx))
-            row = cursor.fetchone()
-            return row['content_chunk'] if row else None
-
+        # Build a list of all (source_id, chunk_index) tuples we need to fetch
+        # For each chunk, we need: chunk-1 (before) and chunk+1 (after)
+        fetch_list = []
         for item in chunk_identifiers:
             source_id = item['source_id']
             chunk_index = item['chunk_index']
-            key = f"{source_id}_{chunk_index}"
+            # Add before chunk
+            fetch_list.append((source_id, chunk_index - window))
+            # Add after chunk
+            fetch_list.append((source_id, chunk_index + window))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_fetch_list = []
+        for sid, cidx in fetch_list:
+            key = (sid, cidx)
+            if key not in seen:
+                seen.add(key)
+                unique_fetch_list.append(key)
+        
+        # Single batch query using VALUES and IN clause
+        # Build the query dynamically
+        if not unique_fetch_list:
+            return {}
+        
+        # Use psycopg2's execute_values for efficient batch query
+        from psycopg2.extras import execute_values
+        
+        query = """
+            SELECT source_id, chunk_index, content_chunk
+            FROM document_embeddings
+            WHERE project_id = %s
+            AND (source_id, chunk_index) IN %s
+        """
+        
+        # Execute batch query
+        cursor.execute(query, (project_id, tuple(unique_fetch_list)))
+        rows = cursor.fetchall()
+        
+        # Build a lookup map: (source_id, chunk_index) -> content_chunk
+        chunk_map = {}
+        for row in rows:
+            key = (row['source_id'], row['chunk_index'])
+            chunk_map[key] = row['content_chunk']
+        
+        # Build results for each original chunk
+        results = {}
+        for item in chunk_identifiers:
+            source_id = item['source_id']
+            chunk_index = item['chunk_index']
+            result_key = f"{source_id}_{chunk_index}"
             
-            results[key] = {
-                'before': get_chunk(source_id, chunk_index - window),
-                'after': get_chunk(source_id, chunk_index + window)
+            results[result_key] = {
+                'before': chunk_map.get((source_id, chunk_index - window)),
+                'after': chunk_map.get((source_id, chunk_index + window))
             }
-            
+        
         cursor.close()
         return results
     finally:

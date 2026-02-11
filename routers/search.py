@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
 from services.embedding_service import embedding_service
-from db_helper_vector import search_embeddings, get_surrounding_chunks
+from db_helper_vector import search_embeddings
 from auth import verify_azure_token
 import logging
 
@@ -90,19 +90,36 @@ async def semantic_search(
             source_type=search_request.source_type
         )
         
+        # Batch fetch surrounding chunks if needed (single DB connection!)
+        surrounding_chunks_map = {}
+        if search_request.include_context and results:
+            # Prepare batch identifiers for all results
+            chunk_identifiers = [
+                {
+                    'source_id': result['source_id'],
+                    'chunk_index': result['chunk_index']
+                }
+                for result in results
+                if result['chunk_index'] >= 0  # Include all chunks, batch function handles edge cases
+            ]
+            
+            if chunk_identifiers:
+                from db_helper_vector import get_surrounding_chunks_batch
+                surrounding_chunks_map = get_surrounding_chunks_batch(
+                    project_id=search_request.project_id,
+                    chunk_identifiers=chunk_identifiers,
+                    window=1
+                )
+        
         # Format results
         search_results = []
         for result in results:
             content = result['content_chunk']
             
             # Include surrounding chunks if requested
-            if search_request.include_context and result['chunk_index'] > 0:
-                surrounding = get_surrounding_chunks(
-                    project_id=search_request.project_id,
-                    source_id=result['source_id'],
-                    chunk_index=result['chunk_index'],
-                    window=1
-                )
+            if search_request.include_context:
+                key = f"{result['source_id']}_{result['chunk_index']}"
+                surrounding = surrounding_chunks_map.get(key, {})
                 
                 # Combine chunks
                 parts = []
