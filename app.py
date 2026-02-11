@@ -26,7 +26,7 @@ from routers.projects import router as projects_router
 from routers.sessions import router as sessions_router
 from routers.integrations import router as integrations_router
 from routers.sync import router as sync_router
-from routers.search import router as search_router
+
 from routers.orchestration import router as orchestration_router
 
 load_dotenv()
@@ -83,7 +83,6 @@ app.include_router(projects_router)
 app.include_router(sessions_router)
 app.include_router(integrations_router)
 app.include_router(sync_router)
-app.include_router(search_router)
 app.include_router(orchestration_router)
 
 # Add request logging middleware

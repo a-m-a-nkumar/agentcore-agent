@@ -6,8 +6,7 @@ Orchestrates vector search, context building, and LLM responses
 import json
 import boto3
 from typing import List, Dict, Optional
-from services.embedding_service import embedding_service
-from db_helper_vector import search_embeddings, get_surrounding_chunks_batch
+from services.search_service import search_service
 import os
 import logging
 
@@ -45,17 +44,14 @@ class RAGService:
             Streaming response chunks and sources
         """
         try:
-            # Step 1: Generate embedding for query
-            logger.info(f"Generating embedding for query: {user_query[:50]}...")
-            query_embedding = embedding_service.generate_embedding(user_query)
-            
-            # Step 2: Search vector database
-            logger.info(f"Searching vector DB for top {max_chunks} chunks...")
-            results = search_embeddings(
+            # Step 1 & 2: Use centralized search service (eliminates duplication)
+            logger.info(f"Querying search service for: {user_query[:50]}...")
+            results = search_service.semantic_search(
                 project_id=project_id,
-                query_embedding=query_embedding,
+                query=user_query,
                 limit=max_chunks,
-                source_type=source_filter
+                source_type=source_filter,
+                include_context=include_context
             )
             
             if not results:
@@ -65,47 +61,16 @@ class RAGService:
                 }
                 return
             
-            # Step 3: Build context with chunk ±1
+            # Step 3: Format results for LLM context
             context_chunks = []
             sources = []
             
-            # Batch retrieve surrounding chunks
-            surrounding_map = {}
-            if include_context and results:
-                logger.info("Batch retrieving surrounding chunks...")
-                chunk_identifiers = [
-                    {'source_id': r['source_id'], 'chunk_index': r['chunk_index']} 
-                    for r in results
-                ]
-                surrounding_map = get_surrounding_chunks_batch(
-                    project_id=project_id,
-                    chunk_identifiers=chunk_identifiers,
-                    window=1
-                )
-            
             for result in results:
-                chunk_content = result['content_chunk']
-                
-                # Get surrounding chunks if requested
-                if include_context:
-                    key = f"{result['source_id']}_{result['chunk_index']}"
-                    surrounding = surrounding_map.get(key, {})
-                    
-                    # Build full context: before + current + after
-                    full_context = ""
-                    if surrounding.get('before'):
-                        full_context += surrounding['before'] + "\n\n"
-                    full_context += chunk_content
-                    if surrounding.get('after'):
-                        full_context += "\n\n" + surrounding['after']
-                    
-                    chunk_content = full_context
-                
-                # Add to context
+                # Add to context (search_service already handled chunk expansion)
                 source_type = result['source_type'].capitalize()
                 context_chunks.append({
                     'source': f"[{source_type}] {result['title']}",
-                    'content': chunk_content,
+                    'content': result['content'],  # Already includes surrounding chunks if requested
                     'url': result.get('url', '')
                 })
                 
