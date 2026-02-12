@@ -76,7 +76,7 @@ try {
 Write-Host ""
 
 # Step 3: Deploy to Lambda
-Write-Host "[3/3] Deploying to AWS Lambda..." -ForegroundColor Yellow
+Write-Host "[3/4] Deploying to AWS Lambda..." -ForegroundColor Yellow
 Write-Host ""
 
 try {
@@ -102,6 +102,20 @@ try {
 } catch {
     Write-Host "  [ERROR] Failed to deploy: $_" -ForegroundColor Red
     exit 1
+}
+Write-Host ""
+
+# Step 4: Update Lambda environment from .env
+Write-Host "[4/4] Updating Lambda environment from .env..." -ForegroundColor Yellow
+if (Test-Path ".env") {
+    python scripts/update_lambda_env.py 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] Environment variables updated from .env" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Could not update env (run scripts/UPDATE_LAMBDA_ENV.ps1 manually)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  [SKIP] No .env file found" -ForegroundColor Gray
 }
 Write-Host ""
 

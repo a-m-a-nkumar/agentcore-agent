@@ -6,8 +6,8 @@ Orchestrates vector search, context building, and LLM responses
 import json
 import boto3
 from typing import List, Dict, Optional
-from services.embedding_service import embedding_service
-from db_helper_vector import search_embeddings, get_surrounding_chunks
+from services.search_service import search_service
+from langfuse_client import get_langfuse
 import os
 import logging
 
@@ -44,19 +44,22 @@ class RAGService:
         Yields:
             Streaming response chunks and sources
         """
+        langfuse = get_langfuse()
         try:
-            # Step 1: Generate embedding for query
-            logger.info(f"Generating embedding for query: {user_query[:50]}...")
-            query_embedding = embedding_service.generate_embedding(user_query)
-            
-            # Step 2: Search vector database
-            logger.info(f"Searching vector DB for top {max_chunks} chunks...")
-            results = search_embeddings(
-                project_id=project_id,
-                query_embedding=query_embedding,
-                limit=max_chunks,
-                source_type=source_filter
-            )
+            # Step 1 & 2: Use centralized search service (eliminates duplication and uses batch operations)
+            logger.info(f"Querying search service for: {user_query[:50]}...")
+            with langfuse.start_as_current_observation(
+                as_type="span",
+                name="rag.search",
+                metadata={"query_length": len(user_query), "project_id": project_id, "max_chunks": max_chunks, "source_filter": source_filter or ""},
+            ):
+                results = search_service.semantic_search(
+                    project_id=project_id,
+                    query=user_query,
+                    limit=max_chunks,
+                    source_type=source_filter,
+                    include_context=include_context
+                )
             
             if not results:
                 yield {
@@ -65,37 +68,16 @@ class RAGService:
                 }
                 return
             
-            # Step 3: Build context with chunk ±1
+            # Step 3: Format results for LLM context
             context_chunks = []
             sources = []
             
             for result in results:
-                chunk_content = result['content_chunk']
-                
-                # Get surrounding chunks if requested
-                if include_context:
-                    surrounding = get_surrounding_chunks(
-                        project_id=project_id,
-                        source_id=result['source_id'],
-                        chunk_index=result['chunk_index'],
-                        window=1
-                    )
-                    
-                    # Build full context: before + current + after
-                    full_context = ""
-                    if surrounding.get('before'):
-                        full_context += surrounding['before'] + "\n\n"
-                    full_context += chunk_content
-                    if surrounding.get('after'):
-                        full_context += "\n\n" + surrounding['after']
-                    
-                    chunk_content = full_context
-                
-                # Add to context
+                # Add to context (search_service already handled chunk expansion with batch operations)
                 source_type = result['source_type'].capitalize()
                 context_chunks.append({
                     'source': f"[{source_type}] {result['title']}",
-                    'content': chunk_content,
+                    'content': result['content'],  # Already includes surrounding chunks if requested
                     'url': result.get('url', '')
                 })
                 
@@ -117,10 +99,21 @@ class RAGService:
             # Step 4: Build prompt
             prompt = self._build_rag_prompt(user_query, context_chunks)
             
-            # Step 5: Stream LLM response
+            # Step 5: Stream LLM response (with Langfuse generation span)
             logger.info("Streaming LLM response...")
-            async for chunk in self._stream_claude_response(prompt):
-                yield chunk
+            accumulated_output: List[str] = []
+            with langfuse.start_as_current_observation(
+                as_type="generation",
+                name="rag.llm",
+                model=self.model_id,
+                input=prompt,
+                metadata={"project_id": project_id},
+            ) as gen_obs:
+                async for chunk in self._stream_claude_response(prompt):
+                    if chunk.get("type") == "chunk":
+                        accumulated_output.append(chunk.get("content", ""))
+                    yield chunk
+                gen_obs.update(output="".join(accumulated_output))
             
             # Step 6: Send sources
             yield {
@@ -179,8 +172,9 @@ Answer:"""
                         "content": prompt
                     }
                 ],
-                "temperature": 0.7,
-                "top_p": 0.9
+                # For Claude 3.5 Sonnet on Bedrock, only one of temperature or top_p
+                # may be specified. We use temperature for balanced creativity.
+                "temperature": 0.7
             }
             
             # Invoke model with streaming

@@ -20,6 +20,8 @@ logger.setLevel(logging.INFO)
 
 # Configuration
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
+BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
 AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
@@ -173,7 +175,7 @@ def lambda_handler(event, context):
         history = get_conversation_history(session_id, MAX_HISTORY_MESSAGES)
         conversation_context = build_conversation_context(history)
         
-        # Build full prompt using the centralized prompt function
+        # Build full prompt using the centralized prompt function (model needs full context)
         full_prompt = get_requirements_gathering_prompt(
             conversation_context=conversation_context,
             user_message=user_message
@@ -181,21 +183,44 @@ def lambda_handler(event, context):
         
         logger.info(f"Calling Bedrock with prompt length: {len(full_prompt)} chars")
         
+        # Build user message content: full prompt for the model, but guardContent so the
+        # guardrail only evaluates the user's actual input (avoids prompt-attack false positives
+        # on our instruction block).
+        user_content = [
+            {"text": full_prompt},
+            {"guardContent": {"text": {"text": user_message}}},
+        ]
+        
         # Call Bedrock to generate response
         bedrock = _get_bedrock_runtime()
-        response = bedrock.converse(
-            modelId=BEDROCK_MODEL_ID,
-            messages=[
+        converse_kwargs = {
+            "modelId": BEDROCK_MODEL_ID,
+            "messages": [
                 {
                     "role": "user",
-                    "content": [{"text": full_prompt}]
+                    "content": user_content
                 }
             ],
-            inferenceConfig={
+            "inferenceConfig": {
                 "maxTokens": MAX_TOKENS,
                 "temperature": TEMPERATURE
             }
-        )
+        }
+        if BEDROCK_GUARDRAIL_ARN:
+            converse_kwargs["guardrailConfig"] = {
+                "guardrailIdentifier": BEDROCK_GUARDRAIL_ARN,
+                "guardrailVersion": BEDROCK_GUARDRAIL_VERSION,
+                "trace": "enabled",
+            }
+            logger.info(f"Guardrail enabled: ARN={BEDROCK_GUARDRAIL_ARN}, version={BEDROCK_GUARDRAIL_VERSION}")
+        else:
+            logger.warning("BEDROCK_GUARDRAIL_ARN not set - guardrail disabled")
+        response = bedrock.converse(**converse_kwargs)
+        
+        # Log guardrail intervention if present
+        stop_reason = response.get("stopReason", "")
+        if stop_reason == "guardrail_intervened":
+            logger.info("Guardrail intervened - blocked content replaced with guardrail message")
         
         # Extract response
         output = response.get("output", {})

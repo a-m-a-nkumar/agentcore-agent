@@ -20,6 +20,8 @@ LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'brd_generator_lambda')
 LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', 'brd_retriever_lambda')
 LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', 'brd_chat_lambda')
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
+BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 
 # AgentCore Memory configuration
@@ -256,6 +258,13 @@ def chat_with_brd(
     Returns:
         Chat response message with the result of the operation
     """
+    # LOG exactly what message is being sent to Lambda
+    print(f"[BRD-AGENT] 📨 chat_with_brd called with:", flush=True)
+    print(f"[BRD-AGENT]   action={action}", flush=True)
+    print(f"[BRD-AGENT]   brd_id={brd_id}", flush=True)
+    print(f"[BRD-AGENT]   session_id={session_id}", flush=True)
+    print(f"[BRD-AGENT]   message (first 300 chars)={message[:300] if message else 'None'}", flush=True)
+    
     payload = {
         'action': action,
         'brd_id': brd_id
@@ -374,8 +383,13 @@ def _get_agent(fresh=False):
     # For chat requests, always create a fresh agent to avoid tool block conflicts
     if fresh or _agent_instance is None:
         try:
-            # Initialize Bedrock model
-            model = BedrockModel(model_id=BEDROCK_MODEL_ID)
+            # Initialize Bedrock model with guardrail
+            model_kwargs = {"model_id": BEDROCK_MODEL_ID}
+            if BEDROCK_GUARDRAIL_ARN:
+                model_kwargs["guardrail_id"] = BEDROCK_GUARDRAIL_ARN
+                model_kwargs["guardrail_version"] = BEDROCK_GUARDRAIL_VERSION
+                model_kwargs["guardrail_trace"] = "enabled"
+            model = BedrockModel(**model_kwargs)
             
             # Create list of tools
             tools = [generate_brd, fetch_brd, chat_with_brd, get_brd_conversation_history]
@@ -465,149 +479,106 @@ def invoke(payload):
         # Handle chat/edit requests for existing BRDs
         elif payload.get('brd_id') and payload.get('brd_id') != 'none':
             brd_id = payload.get('brd_id')
-            print(f"[BRD-AGENT] BRD ID provided: {brd_id}, using Memory + LLM for intelligent decision making", flush=True)
+            print(f"[BRD-AGENT] BRD ID provided: {brd_id}", flush=True)
             
             # Get session_id from payload if provided
             session_id_from_payload = payload.get('session_id')
             if not session_id_from_payload or session_id_from_payload == 'none':
-                # Generate a session ID based on BRD ID for consistency
                 session_id_from_payload = f"brd-session-{brd_id}"
                 print(f"[BRD-AGENT] No session_id provided, using: {session_id_from_payload}", flush=True)
             
-            # STEP 1: Get conversation history from AgentCore Memory
-            conversation_context = ""
-            try:
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] STEP 1: Retrieving conversation history from AgentCore Memory...", flush=True)
-                print(f"[BRD-AGENT] BRD ID: {brd_id}", flush=True)
-                print(f"[BRD-AGENT] Session ID: {session_id_from_payload}", flush=True)
-                history_result = get_brd_conversation_history(brd_id, session_id_from_payload)
-                if history_result and "Error" not in history_result and "No conversation history" not in history_result:
-                    conversation_context = f"\n\n=== CONVERSATION HISTORY ===\n{history_result}\n=== END HISTORY ===\n"
-                    print(f"[BRD-AGENT] ✅ Retrieved conversation history ({len(history_result)} chars)", flush=True)
-                    # Log update confirmations found in history for debugging
-                    import re
-                    update_matches = re.findall(r"✅ Section ['\"](\d+)\.\s*([^'\"]+)['\"] updated successfully", history_result, re.IGNORECASE)
-                    if update_matches:
-                        print(f"[BRD-AGENT] 📋 Found {len(update_matches)} update confirmation(s) in history:", flush=True)
-                        for section_num, section_title in update_matches:
-                            print(f"[BRD-AGENT]   - Section {section_num}: {section_title.strip()}", flush=True)
-                    else:
-                        print(f"[BRD-AGENT] ⚠️ No update confirmations found in history", flush=True)
-                else:
-                    print(f"[BRD-AGENT] ⚠️ No conversation history available or error occurred", flush=True)
-                print(f"[BRD-AGENT] ========================================", flush=True)
-            except Exception as e:
-                print(f"[BRD-AGENT] ❌ Could not retrieve history: {e}", flush=True)
-                import traceback
-                print(traceback.format_exc(), flush=True)
+            # DIRECT PATH: For straightforward commands (update, show, list), bypass the Strands Agent LLM
+            # and call chat_with_brd directly. This prevents the Agent LLM from reformulating the message.
+            # The Lambda has its own LLM parsing logic that handles intent detection, section resolution, etc.
+            is_direct_command = any(keyword in user_message.lower() for keyword in [
+                'change', 'update', 'modify', 'edit', 'replace', 'remove', 'add', 'delete',
+                'show', 'list', 'summarize', 'transfer',
+                'everywhere', 'all sections', 'entire document'
+            ])
             
-            # STEP 2: Build enhanced message with Memory context for LLM decision making
-            print(f"[BRD-AGENT] ========================================", flush=True)
-            print(f"[BRD-AGENT] STEP 2: Building enhanced message with Memory context for LLM", flush=True)
-            print(f"[BRD-AGENT] User message: {user_message[:200]}...", flush=True)
-            print(f"[BRD-AGENT] ========================================", flush=True)
-            
-            enhanced_message = f"""You are a BRD (Business Requirements Document) assistant. You have access to conversation history and can make intelligent decisions.
-
-USER'S CURRENT MESSAGE: {user_message}
-{conversation_context}
-
-AVAILABLE TOOLS:
-1. get_brd_conversation_history(brd_id, session_id) - Get conversation history (already retrieved above)
-2. chat_with_brd(action, brd_id, session_id, message) - For viewing/updating sections, listing sections
-3. fetch_brd(brd_id) - Get the complete BRD document
-4. generate_brd(template, transcript, brd_id) - Generate a new BRD
-
-CRITICAL PARAMETERS:
-- brd_id: "{brd_id}"
-- session_id: "{session_id_from_payload}"
-
-DECISION LOGIC:
-
-1. If user asks "show me updated section" or "show updated section":
-   - FIRST: Analyze conversation history to find the MOST RECENT update confirmation
-   - Look for the LAST (most recent) message containing "✅ Section 'X. Title' updated successfully"
-   - Extract the section number (e.g., "11" from "✅ Section '11. Constraints' updated successfully")
-   - THEN: Call chat_with_brd with action="send_message", brd_id="{brd_id}", session_id="{session_id_from_payload}", message="show me updated section"
-   - The Lambda will handle showing the correct section based on its internal tracking
-   - DO NOT try to answer directly - you need the Lambda to retrieve the actual section content
-
-2. If user asks "which sections have I updated?" or "what sections i have updated so far?":
-   - Analyze conversation history to find ALL update confirmations
-   - Look for ALL messages containing "✅ Section 'X. Title' updated successfully"
-   - Extract section numbers and titles from ALL such messages
-   - List them in chronological order (oldest to newest)
-   - You can answer this directly from history WITHOUT calling tools
-
-3. If user wants to VIEW a section (e.g., "show section 4", "show stakeholders", "list sections"):
-   - Call chat_with_brd with:
-     - action="send_message"
-     - brd_id="{brd_id}"
-     - session_id="{session_id_from_payload}"
-     - message="{user_message}" (exact user message)
-
-3. If user wants to UPDATE a section (e.g., "change X to Y", "update section 4", "change X to Y here"):
-   - Call chat_with_brd with:
-     - action="send_message"
-     - brd_id="{brd_id}"
-     - session_id="{session_id_from_payload}"
-     - message="{user_message}" (exact user message, even with typos)
-
-4. If user wants the FULL BRD document:
-   - Call fetch_brd with brd_id="{brd_id}"
-
-5. If user wants to GENERATE a new BRD:
-   - Call generate_brd with template and transcript
-
-IMPORTANT:
-- Use conversation history to understand context (e.g., "here" refers to last shown section)
-- For questions, try to answer from history first before calling tools
-- Pass user messages exactly as written (don't fix typos - Lambda handles that)
-- Be intelligent: if history shows recent updates, you can answer questions about them directly
-
-Now analyze the user's message and conversation history, then decide what action to take."""
-            
-            try:
-                # STEP 3: Let the Strands agent use LLM + Memory to make intelligent decisions
+            if is_direct_command:
+                # DIRECT PATH: Send user's exact message to Lambda without Agent LLM interference
                 print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] STEP 3: Invoking Strands agent with Memory context for intelligent decision making", flush=True)
+                print(f"[BRD-AGENT] DIRECT PATH: Bypassing Strands Agent LLM for command: {user_message[:200]}", flush=True)
                 print(f"[BRD-AGENT] ========================================", flush=True)
-                result = agent(enhanced_message)
                 
-                # Extract response from agent result
-                if hasattr(result, 'data'):
-                    result_text = str(result.data) if result.data else str(result)
-                elif hasattr(result, 'output'):
-                    result_text = str(result.output)
-                elif hasattr(result, 'message'):
-                    result_text = result.message
-                elif isinstance(result, str):
-                    result_text = result
-                else:
-                    result_text = str(result)
-                
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] STEP 4: Agent LLM response received", flush=True)
-                print(f"[BRD-AGENT] Response length: {len(result_text)} chars", flush=True)
-                print(f"[BRD-AGENT] Response preview: {result_text[:300]}...", flush=True)
-                print(f"[BRD-AGENT] ========================================", flush=True)
-            except Exception as e:
-                print(f"[BRD-AGENT] Error in agent LLM execution: {e}", flush=True)
-                import traceback
-                print(traceback.format_exc(), flush=True)
-                # Fallback: try direct call if LLM fails
                 try:
-                    print(f"[BRD-AGENT] Falling back to direct chat_with_brd call", flush=True)
                     result_text = chat_with_brd(
                         action="send_message",
                         brd_id=brd_id,
                         session_id=session_id_from_payload,
                         message=user_message
                     )
-                except Exception as fallback_error:
-                    print(f"[BRD-AGENT] Fallback also failed: {fallback_error}", flush=True)
+                    print(f"[BRD-AGENT] DIRECT PATH result: {str(result_text)[:300]}", flush=True)
+                except Exception as e:
+                    print(f"[BRD-AGENT] DIRECT PATH error: {e}", flush=True)
+                    import traceback
+                    print(traceback.format_exc(), flush=True)
                     result_text = f"Error processing request: {str(e)}. Please try rephrasing your request."
+            else:
+                # AGENT PATH: For complex queries, questions about history, etc.
+                # Use the Strands Agent LLM for intelligent decision making
+                print(f"[BRD-AGENT] AGENT PATH: Using Strands Agent for: {user_message[:200]}", flush=True)
+                
+                # Retrieve conversation history from AgentCore Memory
+                conversation_context = ""
+                try:
+                    history_result = get_brd_conversation_history(brd_id, session_id_from_payload)
+                    if history_result and "Error" not in history_result and "No conversation history" not in history_result:
+                        conversation_context = f"\n\n=== CONVERSATION HISTORY ===\n{history_result}\n=== END HISTORY ===\n"
+                        print(f"[BRD-AGENT] ✅ Retrieved conversation history ({len(history_result)} chars)", flush=True)
+                    else:
+                        print(f"[BRD-AGENT] ⚠️ No conversation history available", flush=True)
+                except Exception as e:
+                    print(f"[BRD-AGENT] ❌ Could not retrieve history: {e}", flush=True)
+                
+                enhanced_message = f"""You are a BRD (Business Requirements Document) assistant.
+
+USER'S CURRENT MESSAGE: {user_message}
+{conversation_context}
+
+CRITICAL PARAMETERS:
+- brd_id: "{brd_id}"
+- session_id: "{session_id_from_payload}"
+
+DECISION LOGIC:
+1. If user asks about update history ("which sections updated?", "what changes?"):
+   - Analyze conversation history and answer directly
+2. If user asks "show me updated section" or similar:
+   - Call chat_with_brd(action="send_message", brd_id="{brd_id}", session_id="{session_id_from_payload}", message="show me updated section")
+3. For ANY other request (view, update, list, questions about BRD):
+   - Call chat_with_brd(action="send_message", brd_id="{brd_id}", session_id="{session_id_from_payload}", message="{user_message}")
+   - CRITICAL: Pass the user's EXACT message. Do NOT rewrite, summarize, or modify it.
+4. For full BRD document: Call fetch_brd(brd_id="{brd_id}")
+
+Now analyze and take action."""
+                
+                try:
+                    result = agent(enhanced_message)
+                    if hasattr(result, 'data'):
+                        result_text = str(result.data) if result.data else str(result)
+                    elif hasattr(result, 'output'):
+                        result_text = str(result.output)
+                    elif hasattr(result, 'message'):
+                        result_text = result.message
+                    elif isinstance(result, str):
+                        result_text = result
+                    else:
+                        result_text = str(result)
+                    
+                    print(f"[BRD-AGENT] AGENT PATH result: {result_text[:300]}", flush=True)
+                except Exception as e:
+                    print(f"[BRD-AGENT] AGENT PATH error, falling back to direct: {e}", flush=True)
+                    try:
+                        result_text = chat_with_brd(
+                            action="send_message",
+                            brd_id=brd_id,
+                            session_id=session_id_from_payload,
+                            message=user_message
+                        )
+                    except Exception as fallback_error:
+                        print(f"[BRD-AGENT] Fallback also failed: {fallback_error}", flush=True)
+                        result_text = f"Error processing request: {str(e)}. Please try rephrasing your request."
         else:
             # Run the agent with user message for general queries
             print(f"[BRD-AGENT] Running Strands agent for general query...", flush=True)

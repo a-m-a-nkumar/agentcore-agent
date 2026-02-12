@@ -119,6 +119,23 @@ try {
     Write-Host "  [INFO] Backup saved in: $backupDir" -ForegroundColor Gray
 }
 
+# Update AgentCore env from .env (guardrails for Bedrock calls)
+Write-Host ""
+Write-Host "[6/6] Updating AgentCore runtime environment from .env..." -ForegroundColor Yellow
+$rootDir = Split-Path -Parent $ScriptDir
+if (Test-Path "$rootDir\.env") {
+    Push-Location $rootDir
+    python scripts/update_agentcore_env.py 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] Agent env vars updated (BEDROCK_GUARDRAIL_ARN, etc.)" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Could not update agent env - continuing" -ForegroundColor Yellow
+    }
+    Pop-Location
+} else {
+    Write-Host "  [WARN] No .env file - agents will use existing env vars" -ForegroundColor Yellow
+}
+
 Write-Host ""
 Write-Host "=====================================" -ForegroundColor Cyan
 Write-Host "Deployment Complete! ✅" -ForegroundColor Green

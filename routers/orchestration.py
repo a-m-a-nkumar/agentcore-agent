@@ -9,6 +9,7 @@ from typing import Optional
 from services.rag_service import rag_service
 from auth import verify_azure_token
 from db_helper import create_or_update_user
+from langfuse_client import get_langfuse
 import logging
 import json
 
@@ -71,28 +72,55 @@ async def query_documentation(
     - Source citations
     - Completion signal
     """
+    langfuse = get_langfuse()
+    trace_metadata = {
+        "project_id": request.project_id,
+        "max_chunks": request.max_chunks,
+        "source_filter": request.source_filter or "",
+        "user_query_preview": (request.query[:200] + "..." if len(request.query) > 200 else request.query),
+    }
+    user_id = str(current_user.get("id") or current_user.get("user_id") or current_user.get("email") or "")
+
     try:
         async def generate_sse():
             """Generate Server-Sent Events stream"""
+            root_span = None
             try:
-                async for event in rag_service.query_with_rag(
-                    project_id=request.project_id,
-                    user_query=request.query,
-                    max_chunks=request.max_chunks,
-                    source_filter=request.source_filter,
-                    include_context=request.include_context
-                ):
-                    # Send event as SSE
-                    yield f"data: {json.dumps(event)}\n\n"
-            
+                trace_meta = {**trace_metadata}
+                if user_id:
+                    trace_meta["user_id"] = user_id
+                with langfuse.start_as_current_observation(
+                    as_type="span",
+                    name="rag.query",
+                    input={"query_preview": trace_metadata["user_query_preview"], "project_id": request.project_id},
+                    metadata=trace_meta,
+                ) as root_span:
+                    async for event in rag_service.query_with_rag(
+                        project_id=request.project_id,
+                        user_query=request.query,
+                        max_chunks=request.max_chunks,
+                        source_filter=request.source_filter,
+                        include_context=request.include_context
+                    ):
+                        yield f"data: {json.dumps(event)}\n\n"
             except Exception as e:
                 logger.error(f"Error in SSE stream: {e}")
+                if root_span is not None:
+                    try:
+                        root_span.update(metadata={"error": str(e)})
+                    except Exception:
+                        pass
                 error_event = {
                     'type': 'error',
                     'message': str(e)
                 }
                 yield f"data: {json.dumps(error_event)}\n\n"
-        
+            finally:
+                try:
+                    langfuse.flush()
+                except Exception:
+                    pass
+
         return StreamingResponse(
             generate_sse(),
             media_type="text/event-stream",
@@ -102,7 +130,6 @@ async def query_documentation(
                 "X-Accel-Buffering": "no"  # Disable nginx buffering
             }
         )
-    
     except Exception as e:
         logger.error(f"Error processing query: {e}")
         raise HTTPException(status_code=500, detail=str(e))

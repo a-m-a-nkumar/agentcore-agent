@@ -14,24 +14,19 @@ Write-Host "  - API: invoke_model() -> converse()" -ForegroundColor Gray
 Write-Host "  - Model: Inference Profile ($MODEL_ID)" -ForegroundColor Gray
 Write-Host ""
 
-# Step 1: Update environment variables
-Write-Host "[1/3] Updating Lambda environment variables..." -ForegroundColor Yellow
+# Step 1: Update environment variables from .env
+Write-Host "[1/3] Updating Lambda environment variables from .env..." -ForegroundColor Yellow
 Write-Host ""
 
-$lambdas = @("brd_generator_lambda", "brd_chat_lambda")
-
-foreach ($func in $lambdas) {
-    Write-Host "  Updating $func..." -ForegroundColor Gray
-    try {
-        aws lambda update-function-configuration `
-            --function-name $func `
-            --environment "Variables={BEDROCK_MODEL_ID=$MODEL_ID}" `
-            --region $REGION `
-            --output json | Out-Null
-        Write-Host "  [OK] $func" -ForegroundColor Green
-    } catch {
-        Write-Host "  [WARN] $func - $_" -ForegroundColor Yellow
+if (Test-Path ".env") {
+    python scripts/update_lambda_env.py 2>&1
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] Environment variables updated from .env" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Could not update env - continuing with deployment" -ForegroundColor Yellow
     }
+} else {
+    Write-Host "  [WARN] No .env file - Lambdas will use existing env vars" -ForegroundColor Yellow
 }
 Write-Host ""
 

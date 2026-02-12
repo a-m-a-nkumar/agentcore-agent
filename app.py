@@ -26,7 +26,6 @@ from routers.projects import router as projects_router
 from routers.sessions import router as sessions_router
 from routers.integrations import router as integrations_router
 from routers.sync import router as sync_router
-from routers.search import router as search_router
 from routers.orchestration import router as orchestration_router
 
 load_dotenv()
@@ -83,7 +82,6 @@ app.include_router(projects_router)
 app.include_router(sessions_router)
 app.include_router(integrations_router)
 app.include_router(sync_router)
-app.include_router(search_router)
 app.include_router(orchestration_router)
 
 # Add request logging middleware
@@ -104,8 +102,7 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Configuration
-# Update this with your actual Agent ARN
+# Configuration (from .env)
 AGENT_ARN = os.getenv("AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK")
 ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/Analyst_agent-kCoE8v38c0")
 REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -265,7 +262,8 @@ async def get_current_user(request: Request) -> dict:
     }
 
 def render_brd_json_to_text(brd_data: dict) -> str:
-    """Render structured BRD JSON into readable plain text (matches lambda_brd_chat.py format)"""
+    """Render structured BRD JSON into readable plain text (matches lambda_brd_chat.py format).
+    Skips # In Scope and # Out of Scope as separate sections - they are subsections of Scope."""
     # Check if BRD uses sections format (newer format)
     if "sections" in brd_data:
         sections = brd_data.get("sections", [])
@@ -273,13 +271,47 @@ def render_brd_json_to_text(brd_data: dict) -> str:
         lines.append("Business Requirements Document (BRD)")
         lines.append("")
 
-        for idx, section in enumerate(sections, start=1):
-            title = section.get("title", f"Section {idx}")
-            lines.append(f"{idx}. {title}")
+        has_doc_title = False
+        start_idx = 0
+        if sections:
+            first_title = (sections[0].get("title", "") or "").lower()
+            if "ai-powered" in first_title or "brd" in first_title or (
+                len(first_title) < 30 and not re.match(r'^\d+\.', first_title)
+            ):
+                has_doc_title = True
+                start_idx = 1
+                lines.append(sections[0].get("title", ""))
+                lines.append("")
+
+        section_counter = 1
+        idx = start_idx
+        while idx < len(sections):
+            section = sections[idx]
+            title = section.get("title", f"Section {section_counter}")
+            title_lower = (title or "").lower().strip()
+            if title.strip().startswith("#") and ("in scope" in title_lower or "out of scope" in title_lower):
+                idx += 1
+                continue
+            title_clean = re.sub(r'^\d+\.\s*', '', title).strip()
+            lines.append(f"{section_counter}. {title_clean}")
             lines.append("")
 
-            for block in section.get("content", []):
-                block_type = block.get("type")
+            content_blocks = list(section.get("content", []))
+            if "scope" in title_lower and (not content_blocks or len(content_blocks) == 0):
+                for i in (1, 2):
+                    sub_idx = idx + i
+                    if sub_idx < len(sections):
+                        sub = sections[sub_idx]
+                        sub_title = (sub.get("title", "") or "").lower()
+                        if "# in scope" in sub_title:
+                            content_blocks.append({"type": "paragraph", "text": "### In Scope"})
+                            content_blocks.extend(sub.get("content", []))
+                        elif "# out of scope" in sub_title:
+                            content_blocks.append({"type": "paragraph", "text": "### Out of Scope"})
+                            content_blocks.extend(sub.get("content", []))
+
+            for block in content_blocks:
+                block_type = block.get("type") if isinstance(block, dict) else None
                 if block_type == "paragraph":
                     lines.append(block.get("text", "").strip())
                     lines.append("")
@@ -297,6 +329,8 @@ def render_brd_json_to_text(brd_data: dict) -> str:
                         for row in rows[1:]:
                             lines.append(" | ".join(str(col) for col in row))
                     lines.append("")
+            section_counter += 1
+            idx += 1
         return "\n".join(line.rstrip() for line in lines).rstrip() + "\n"
     
     # Fallback: Try to render as plain text if it's already text
@@ -2875,6 +2909,165 @@ async def revoke_brd_access(
     """Revoke BRD access from a user"""
     success = revoke_brd_access_via_agentcore(target_user_id)
     return JSONResponse(content={"success": success, "user_id": target_user_id})
+
+
+# -------------------------
+# BRD Read APIs (S3-backed)
+# -------------------------
+
+def _load_brd_structure_from_s3(brd_id: str) -> dict:
+    """Load the latest BRD structure JSON from S3."""
+    s3_client = get_s3_client()
+    bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+    key = f"brds/{brd_id}/brd_structure.json"
+    try:
+        response = s3_client.get_object(Bucket=bucket_name, Key=key)
+        body = response["Body"].read()
+        return json.loads(body)
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "Unknown")
+        raise HTTPException(status_code=404, detail=f"BRD structure not found in S3 ({code}): {key}")
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=500, detail=f"BRD structure JSON is invalid: {str(e)}")
+
+
+def _is_doc_title_section(title: str) -> bool:
+    t = (title or "").strip().lower()
+    if not t:
+        return False
+    # Match lambda behavior: doc title often looks like "AI-Powered..." or similar and not "1. ..."
+    if "ai-powered" in t or "brd" in t:
+        return True
+    if len(t) < 30 and not re.match(r"^\d+\.", t):
+        return True
+    return False
+
+
+def _iter_user_sections(brd_data: dict):
+    """Yield (user_section_number, array_index, title, section_dict) for user-visible sections."""
+    sections = brd_data.get("sections", []) if isinstance(brd_data, dict) else []
+    if not sections:
+        return
+
+    start_idx = 0
+    if sections and _is_doc_title_section(sections[0].get("title", "")):
+        start_idx = 1
+
+    user_num = 1
+    for idx in range(start_idx, len(sections)):
+        sec = sections[idx]
+        title = (sec.get("title", "") or "").strip()
+        title_lower = title.lower()
+
+        # Skip Scope subsections - same rule as lambda
+        if title.startswith("#") and ("in scope" in title_lower or "out of scope" in title_lower):
+            continue
+
+        yield user_num, idx, title, sec
+        user_num += 1
+
+
+def _get_user_section_by_number(brd_data: dict, section_number: int) -> dict:
+    for user_num, idx, title, sec in _iter_user_sections(brd_data) or []:
+        if user_num == section_number:
+            return {"array_index": idx, "title": title, "section": sec}
+    raise HTTPException(status_code=404, detail=f"Section {section_number} not found")
+
+
+def _render_section_to_markdown(section_number: int, title: str, section: dict, brd_data: dict) -> str:
+    sections = brd_data.get("sections", [])
+    content_blocks = list(section.get("content", []) or [])
+
+    # Scope (section 5): merge content from "# In Scope" and "# Out of Scope" if main section is empty
+    if (not content_blocks or len(content_blocks) == 0) and "scope" in (title or "").lower():
+        merged = []
+        # Find the array index of the scope section and look ahead for subsections
+        scope_idx = None
+        for user_num, idx, t, _sec in _iter_user_sections(brd_data) or []:
+            if user_num == section_number:
+                scope_idx = idx
+                break
+        if scope_idx is not None:
+            for i in (1, 2):
+                sub_idx = scope_idx + i
+                if sub_idx < len(sections):
+                    sub = sections[sub_idx]
+                    sub_title = (sub.get("title", "") or "").lower()
+                    if "# in scope" in sub_title:
+                        merged.append({"type": "paragraph", "text": "### In Scope"})
+                        merged.extend(sub.get("content", []) or [])
+                    elif "# out of scope" in sub_title:
+                        merged.append({"type": "paragraph", "text": "### Out of Scope"})
+                        merged.extend(sub.get("content", []) or [])
+        if merged:
+            content_blocks = merged
+
+    title_clean = re.sub(r"^\d+\.\s*", "", title or "").strip() or "Untitled"
+    md = f"## {section_number}. {title_clean}\n\n"
+
+    for block in content_blocks:
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "paragraph":
+            md += (block.get("text", "") or "") + "\n\n"
+        elif block_type == "bullet":
+            for item in block.get("items", []) or []:
+                md += f"- {item}\n"
+            md += "\n"
+        elif block_type == "table":
+            rows = block.get("rows", []) or []
+            for row in rows:
+                md += "| " + " | ".join(str(cell) for cell in row) + " |\n"
+            md += "\n"
+
+    return md.strip() + "\n"
+
+
+@app.get("/api/brd/{brd_id}/structure")
+async def api_get_brd_structure(
+    brd_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the latest structured BRD JSON from S3 (source of truth for sections)."""
+    brd_data = _load_brd_structure_from_s3(brd_id)
+    return JSONResponse(content={"brd_id": brd_id, "brd": brd_data})
+
+
+@app.get("/api/brd/{brd_id}/sections")
+async def api_list_brd_sections(
+    brd_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return user-visible section numbers + titles (use this to build tabs)."""
+    brd_data = _load_brd_structure_from_s3(brd_id)
+    sections = [{"number": n, "title": re.sub(r"^\\d+\\.\\s*", "", t).strip() or t} for n, _idx, t, _sec in (_iter_user_sections(brd_data) or [])]
+    return JSONResponse(content={"brd_id": brd_id, "sections": sections})
+
+
+@app.get("/api/brd/{brd_id}/section/{section_number}")
+async def api_get_brd_section(
+    brd_id: str,
+    section_number: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return the latest version of a single section from S3.
+
+    This is the safest way to power section-tabs: it always reads the newest `brd_structure.json`.
+    """
+    brd_data = _load_brd_structure_from_s3(brd_id)
+    found = _get_user_section_by_number(brd_data, section_number)
+    title = found["title"]
+    section = found["section"]
+    markdown = _render_section_to_markdown(section_number, title, section, brd_data)
+    return JSONResponse(content={
+        "brd_id": brd_id,
+        "section_number": section_number,
+        "title": title,
+        "section": section,
+        "markdown": markdown,
+    })
 
 if __name__ == "__main__":
     import uvicorn

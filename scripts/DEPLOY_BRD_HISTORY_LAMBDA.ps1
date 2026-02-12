@@ -86,7 +86,7 @@ if ($LASTEXITCODE -eq 0) {
 Write-Host ""
 
 # Step 6: Deploy to AWS Lambda
-Write-Host "[6/6] Deploying to AWS Lambda..." -ForegroundColor Yellow
+Write-Host "[6/7] Deploying to AWS Lambda..." -ForegroundColor Yellow
 
 if ($updateMode) {
     # Update existing function
@@ -109,6 +109,20 @@ if ($updateMode) {
     Write-Host "    --zip-file fileb://$ZIP_FILE \" -ForegroundColor Cyan
     Write-Host "    --timeout 300 \" -ForegroundColor Cyan
     Write-Host "    --memory-size 512" -ForegroundColor Cyan
+}
+
+# Step 7: Update Lambda environment from .env
+Write-Host ""
+Write-Host "[7/7] Updating Lambda environment from .env..." -ForegroundColor Yellow
+if (Test-Path ".env") {
+    python scripts/update_lambda_env.py 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] Environment variables updated from .env" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Could not update env (run scripts/UPDATE_LAMBDA_ENV.ps1 manually)" -ForegroundColor Yellow
+    }
+} else {
+    Write-Host "  [SKIP] No .env file found" -ForegroundColor Gray
 }
 
 Write-Host ""

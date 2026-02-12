@@ -28,7 +28,8 @@ try {
     $identity = aws sts get-caller-identity --region $REGION 2>&1 | ConvertFrom-Json
     Write-Host "  [OK] AWS Account: $($identity.Account)" -ForegroundColor Green
     Write-Host "  [OK] User ARN: $($identity.Arn)" -ForegroundColor Green
-} catch {
+}
+catch {
     Write-Host "  [ERROR] AWS credentials not configured!" -ForegroundColor Red
     Write-Host "  Please run: aws configure" -ForegroundColor Yellow
     exit 1
@@ -39,7 +40,12 @@ Write-Host ""
 Write-Host "[2/3] Packaging brd_chat_lambda..." -ForegroundColor Yellow
 Write-Host ""
 
+
 try {
+    # Step 2a: Sync latest code
+    Write-Host "  Syncing latest lambda_brd_chat.py to package directory..." -ForegroundColor Gray
+    Copy-Item "lambda_brd_chat.py" "lambda_chat_package\lambda_brd_chat.py" -Force
+    
     # Remove old zip if exists
     if (Test-Path "lambda_chat_package.zip") {
         Remove-Item "lambda_chat_package.zip" -Force
@@ -56,14 +62,15 @@ try {
         exit 1
     }
     
-} catch {
+}
+catch {
     Write-Host "  [ERROR] Failed to create package: $_" -ForegroundColor Red
     exit 1
 }
 Write-Host ""
 
 # Step 3: Deploy to Lambda
-Write-Host "[3/3] Deploying to AWS Lambda..." -ForegroundColor Yellow
+Write-Host "[3/4] Deploying to AWS Lambda..." -ForegroundColor Yellow
 Write-Host ""
 
 try {
@@ -81,14 +88,32 @@ try {
         Write-Host "  Function: $($lambdaInfo.FunctionName)" -ForegroundColor Gray
         Write-Host "  Version: $($lambdaInfo.Version)" -ForegroundColor Gray
         Write-Host "  Last Modified: $($lambdaInfo.LastModified)" -ForegroundColor Gray
-    } else {
+    }
+    else {
         Write-Host "  [ERROR] Deployment failed!" -ForegroundColor Red
         Write-Host $result -ForegroundColor Red
         exit 1
     }
-} catch {
+}
+catch {
     Write-Host "  [ERROR] Failed to deploy: $_" -ForegroundColor Red
     exit 1
+}
+Write-Host ""
+
+# Step 4: Update Lambda environment from .env
+Write-Host "[4/4] Updating Lambda environment from .env..." -ForegroundColor Yellow
+if (Test-Path ".env") {
+    python scripts/update_lambda_env.py 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  [OK] Environment variables updated from .env" -ForegroundColor Green
+    }
+    else {
+        Write-Host "  [WARN] Could not update env (run scripts/UPDATE_LAMBDA_ENV.ps1 manually)" -ForegroundColor Yellow
+    }
+}
+else {
+    Write-Host "  [SKIP] No .env file found" -ForegroundColor Gray
 }
 Write-Host ""
 

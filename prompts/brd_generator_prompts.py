@@ -107,19 +107,23 @@ class PromptConfig:
     CHARS_PER_TOKEN = 4
     
     # Maximum input tokens (instructions + template + transcript)
-    MAX_INPUT_TOKENS = 2000
+    # With Claude Sonnet 4.5 (200K context), we start truncating once the
+    # combined instructions + template + transcripts exceed ~75K tokens.
+    # This still leaves plenty of room for model output and safety margin.
+    MAX_INPUT_TOKENS = 75_000
     
     # Safety margin for token calculations
-    SAFETY_MARGIN_TOKENS = 200
+    SAFETY_MARGIN_TOKENS = 500
     
     # Reserved tokens for template
-    RESERVED_TEMPLATE_TOKENS = 600
+    RESERVED_TEMPLATE_TOKENS = 1000
     
     # Minimum tokens for transcript
     MIN_TRANSCRIPT_TOKENS = 500
     
-    # Total context window for Llama 3.1 8B
-    TOTAL_CONTEXT_TOKENS = 8192
+    # Total context window for Claude Sonnet 4.5 on Bedrock (approximate)
+    # Model supports up to 200K tokens (input + output)
+    TOTAL_CONTEXT_TOKENS = 200_000
     
     @classmethod
     def estimate_tokens(cls, text: str) -> int:

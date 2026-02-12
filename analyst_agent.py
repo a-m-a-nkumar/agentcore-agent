@@ -31,6 +31,8 @@ app = BedrockAgentCoreApp()
 
 # Configuration
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
+BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 
 # Lambda Function ARNs (can also use function names, but ARNs are more explicit)
@@ -233,8 +235,13 @@ def _get_agent(fresh=False):
     
     if fresh or _agent_instance is None:
         try:
-            # Initialize Bedrock model
-            model = BedrockModel(model_id=BEDROCK_MODEL_ID)
+            # Initialize Bedrock model with guardrail
+            model_kwargs = {"model_id": BEDROCK_MODEL_ID}
+            if BEDROCK_GUARDRAIL_ARN:
+                model_kwargs["guardrail_id"] = BEDROCK_GUARDRAIL_ARN
+                model_kwargs["guardrail_version"] = BEDROCK_GUARDRAIL_VERSION
+                model_kwargs["guardrail_trace"] = "enabled"
+            model = BedrockModel(**model_kwargs)
             
             # System prompt for the agent
             system_prompt = """You are Mary, a Strategic Business Analyst and Requirements Expert.

@@ -26,6 +26,8 @@ logger.setLevel(logging.INFO)
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
 BEDROCK_MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4000"))
+BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
+BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
 AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "testgatewayfbdd062d-e2eo4q0y09")
 AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
@@ -121,20 +123,16 @@ def create_memory_session(brd_id: str, template: str, transcript: str) -> Dict:
 
     client = _get_agentcore_memory_client()
     session_id = f"brd-session-{brd_id}"
-    metadata = _build_metadata(brd_id, template, transcript)
-    system_message = (
-        f"Starting BRD editing session for BRD ID: {brd_id}. "
-        "Template and transcript snippets are attached in metadata."
-    )
+    system_message = f"Starting BRD editing session for BRD ID: {brd_id}."
 
     try:
+        # AgentCore create_event accepts only: memoryId, actorId, sessionId, eventTimestamp, payload, branch, clientToken (no metadata)
         params = {
             "memoryId": AGENTCORE_MEMORY_ID,
             "actorId": AGENTCORE_ACTOR_ID,
             "sessionId": session_id,
             "eventTimestamp": datetime.utcnow(),
             "payload": _build_conversational_payload("system", system_message),
-            "metadata": metadata,
             "clientToken": str(uuid.uuid4()),
         }
 
@@ -207,9 +205,17 @@ def get_session_history(session_id: str, max_messages: int = 50) -> List[Dict]:
         )
 
         # Extract messages from events
+        # list_events may return in undefined order - sort by eventTimestamp (oldest first)
+        # so that "reversed()" gives newest first when finding last-updated section
         events = response.get("events", [])
+        def _event_ts_key(e):
+            ts = e.get("eventTimestamp")
+            if ts is None:
+                return ""
+            return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+        events_sorted = sorted(events, key=_event_ts_key)
         messages = []
-        for event in events:
+        for event in events_sorted:
             payload_list = event.get("payload", [])
             for payload_item in payload_list:
                 conv_data = payload_item.get("conversational")
@@ -275,8 +281,74 @@ def get_brd_from_s3(brd_id: str) -> Optional[Dict]:
             return backfill_brd_structure(brd_id)
         raise
 
+def _normalize_brd_sections(brd_data: Dict) -> Dict:
+    """
+    Normalize BRD structure: merge "# In Scope" and "# Out of Scope" into the Scope section
+    and remove them as separate sections. Prevents duplicate/incorrect JSON structure.
+    """
+    sections = brd_data.get("sections", [])
+    if not sections:
+        return brd_data
+
+    # Find Scope section index and collect subsections to merge
+    # Check subsections first to avoid misclassifying "# In Scope" / "# Out of Scope" as main Scope
+    scope_idx = None
+    in_scope_idx = None
+    out_scope_idx = None
+    for idx, sec in enumerate(sections):
+        title = (sec.get("title", "") or "").strip().lower()
+        if "# in scope" in title or title == "in scope":
+            in_scope_idx = idx
+        elif "# out of scope" in title or title == "out of scope":
+            out_scope_idx = idx
+        elif ("scope" in title or title.endswith(" scope")) and not title.startswith("#"):
+            scope_idx = idx
+
+    if scope_idx is None or (in_scope_idx is None and out_scope_idx is None):
+        return brd_data
+
+    scope_section = dict(sections[scope_idx])
+    content = list(scope_section.get("content", []))
+
+    # If Scope already has In Scope/Out of Scope content blocks, don't duplicate from subsections
+    has_in_scope_block = any(
+        b.get("type") == "paragraph" and "in scope" in (b.get("text", "") or "").lower()
+        for b in content
+    )
+    has_out_scope_block = any(
+        b.get("type") == "paragraph" and "out of scope" in (b.get("text", "") or "").lower()
+        for b in content
+    )
+
+    # Merge from subsections only if Scope lacks them
+    if not has_in_scope_block and in_scope_idx is not None:
+        sub_content = sections[in_scope_idx].get("content", [])
+        if sub_content:
+            content.append({"type": "paragraph", "text": "### In Scope"})
+            content.extend(sub_content)
+    if not has_out_scope_block and out_scope_idx is not None:
+        sub_content = sections[out_scope_idx].get("content", [])
+        if sub_content:
+            content.append({"type": "paragraph", "text": "### Out of Scope"})
+            content.extend(sub_content)
+
+    scope_section["content"] = content
+    new_sections = []
+    skip_indices = {i for i in [in_scope_idx, out_scope_idx] if i is not None}
+    for idx, sec in enumerate(sections):
+        if idx in skip_indices:
+            continue
+        if idx == scope_idx:
+            new_sections.append(scope_section)
+        else:
+            new_sections.append(sec)
+
+    return dict(brd_data, sections=new_sections)
+
+
 def save_brd_to_s3(brd_id: str, brd_data: Dict) -> str:
-    """Save BRD JSON to S3"""
+    """Save BRD JSON to S3. Normalizes structure (merges Scope subsections) before saving."""
+    brd_data = _normalize_brd_sections(brd_data)
     s3_client = _get_s3_client()
     key = f"brds/{brd_id}/brd_structure.json"
 
@@ -315,10 +387,18 @@ def render_brd_to_text(brd_data: Dict) -> str:
         lines.append("")
 
     # Render actual sections (skip document title if present)
+    # CRITICAL: Skip "# In Scope" and "# Out of Scope" as separate sections - merge into Scope (section 5)
     section_counter = 1
-    for idx in range(start_idx, len(sections)):
+    idx = start_idx
+    while idx < len(sections):
         section = sections[idx]
         title = section.get("title", f"Section {section_counter}")
+        title_lower = title.lower().strip()
+        
+        # Skip subsections - they are merged into Scope, not rendered as separate sections
+        if title.strip().startswith("#") and ("in scope" in title_lower or "out of scope" in title_lower):
+            idx += 1
+            continue
         
         # Remove any existing number prefix from title to avoid double numbering
         title_clean = re.sub(r'^\d+\.\s*', '', title).strip()
@@ -326,10 +406,24 @@ def render_brd_to_text(brd_data: Dict) -> str:
         # Add section number prefix
         lines.append(f"{section_counter}. {title_clean}")
         lines.append("")
-        section_counter += 1
 
-        for block in section.get("content", []):
-            block_type = block.get("type")
+        # For Scope section: merge content from # In Scope and # Out of Scope if they follow
+        content_blocks = list(section.get("content", []))
+        if "scope" in title_lower and (not content_blocks or len(content_blocks) == 0):
+            for i in (1, 2):
+                sub_idx = idx + i
+                if sub_idx < len(sections):
+                    sub = sections[sub_idx]
+                    sub_title = (sub.get("title", "") or "").lower()
+                    if "# in scope" in sub_title:
+                        content_blocks.append({"type": "paragraph", "text": "### In Scope"})
+                        content_blocks.extend(sub.get("content", []))
+                    elif "# out of scope" in sub_title:
+                        content_blocks.append({"type": "paragraph", "text": "### Out of Scope"})
+                        content_blocks.extend(sub.get("content", []))
+
+        for block in content_blocks:
+            block_type = block.get("type") if isinstance(block, dict) else None
             if block_type == "paragraph":
                 lines.append(block.get("text", "").strip())
                 lines.append("")
@@ -347,6 +441,8 @@ def render_brd_to_text(brd_data: Dict) -> str:
                     for row in rows[1:]:
                         lines.append(" | ".join(str(col) for col in row))
                     lines.append("")
+        section_counter += 1
+        idx += 1
     rendered = "\n".join(line.rstrip() for line in lines).rstrip() + "\n"
     return rendered
 
@@ -720,7 +816,11 @@ def _render_history_as_text(conversation_history: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-def invoke_claude_for_chat(prompt: str, conversation_history: List[Dict] = None) -> str:
+def invoke_claude_for_chat(
+    prompt: str,
+    conversation_history: List[Dict] = None,
+    guard_content_text: Optional[str] = None,
+) -> str:
     """
     Invoke Bedrock model with conversation context.
 
@@ -728,6 +828,9 @@ def invoke_claude_for_chat(prompt: str, conversation_history: List[Dict] = None)
     
     IMPORTANT: For converse() API, we use a single user message with history as text
     to avoid toolUse/toolResult validation errors.
+    When guard_content_text is provided and a guardrail is configured, only that text
+    is sent to the guardrail (guardContent) so the guardrail evaluates the user's
+    actual message instead of the full prompt (avoids false positives on long prompts).
     """
     client = _get_bedrock_client()
     model_id = BEDROCK_MODEL_ID or ""
@@ -747,17 +850,26 @@ def invoke_claude_for_chat(prompt: str, conversation_history: List[Dict] = None)
             # Use converse() API with a SINGLE user message containing the full conversation
             # This avoids toolUse/toolResult validation errors completely
             logger.info("Using converse() API for Anthropic model (single message with text history)")
-            response = client.converse(
-                modelId=model_id,
-                messages=[{
+            content_blocks = [{"text": full_prompt}]
+            if BEDROCK_GUARDRAIL_ARN and guard_content_text is not None:
+                content_blocks.append({"guardContent": {"text": {"text": guard_content_text}}})
+            converse_kwargs = {
+                "modelId": model_id,
+                "messages": [{
                     "role": "user",
-                    "content": [{"text": full_prompt}]
+                    "content": content_blocks
                 }],
-                inferenceConfig={
+                "inferenceConfig": {
                     "maxTokens": BEDROCK_MAX_TOKENS,
                     "temperature": 0
                 }
-            )
+            }
+            if BEDROCK_GUARDRAIL_ARN:
+                converse_kwargs["guardrailConfig"] = {
+                    "guardrailIdentifier": BEDROCK_GUARDRAIL_ARN,
+                    "guardrailVersion": BEDROCK_GUARDRAIL_VERSION,
+                }
+            response = client.converse(**converse_kwargs)
             
             # Extract text from converse() response format
             output = response.get("output", {})
@@ -832,11 +944,187 @@ def _build_section_list_for_prompt(brd_data: Dict) -> str:
     return "\n".join(lines) if lines else "(no sections)"
 
 
+def _render_section_content_with_numbering(section: Dict) -> str:
+    """
+    Render section content with EXPLICIT item numbering.
+    This helps the LLM accurately identify positions like '5th point', '7th item' etc.
+    
+    Example output:
+    BULLET LIST (13 items total):
+      [1] Enterprise clients have stable internet connectivity...
+      [2] Customers will adopt AI-powered support...
+      [3] Sufficient training data available...
+      ...
+    """
+    content_blocks = section.get("content", [])
+    if not content_blocks:
+        return "(empty section)"
+    
+    lines = []
+    global_item_counter = 1
+    
+    for block in content_blocks:
+        block_type = block.get("type", "unknown")
+        
+        if block_type == "paragraph":
+            text = block.get("text", "").strip()
+            if text:
+                lines.append(f"PARAGRAPH: {text[:200]}{'...' if len(text) > 200 else ''}")
+        
+        elif block_type == "bullet":
+            items = block.get("items", [])
+            lines.append(f"BULLET LIST ({len(items)} items total):")
+            for item in items:
+                # Use explicit [ITEM N] numbering so LLM knows exactly which position each item is
+                # Global counter ensures unique IDs across multiple lists in the same section
+                item_preview = item[:150] if len(item) > 150 else item
+                lines.append(f"  [ITEM {global_item_counter}] {item_preview}{'...' if len(item) > 150 else ''}")
+                global_item_counter += 1
+        
+        elif block_type == "table":
+            rows = block.get("rows", [])
+            lines.append(f"TABLE ({len(rows)} rows total, including header):")
+            lines.append(f"  [HEADER] {' | '.join(str(cell) for cell in rows[0][:5]) if rows else '(empty)'}")
+            
+            data_row_counter = 1
+            for row in rows[1:]:
+                # Check if this is a separator row (no alphanumeric chars in any cell)
+                row_str = "".join(str(cell) for cell in row)
+                is_separator = not any(c.isalnum() for c in row_str)
+                
+                row_preview = ' | '.join(str(cell)[:30] for cell in row[:5])
+                
+                if is_separator:
+                    lines.append(f"  [SEPARATOR] {row_preview}")
+                else:
+                    lines.append(f"  [ROW {data_row_counter}] {row_preview}")
+                    data_row_counter += 1
+    
+    return "\n".join(lines) if lines else "(no content)"
+
+
+def get_brd_update_prompt(user_instruction: str, conversation_history: List[Dict], section_list: str, section_number: int, section_title: str, current_section_content_numbered: str, section_json: Optional[Dict] = None) -> str:
+    """Construct the prompt for updating a BRD section. section_json is the section dict to edit (included so Claude sees the actual table/content)."""
+    
+    # Clean title
+    section_title_clean = re.sub(r'^\d+\.\s*', '', section_title).strip()
+    
+    # Embed actual section JSON so Claude has the table/content to edit (fixes "I don't see the table")
+    full_section_json_block = ""
+    if section_json is not None:
+        full_section_json_block = json.dumps(section_json, indent=2)
+    else:
+        full_section_json_block = "(section data not provided)"
+    
+    prompt = f"""You are a documentation assistant. You MUST update BRD section #{section_number} based on the user's instruction.
+
+<critical_instruction>
+You MUST interpret the user's instruction LITERALLY and PRECISELY. 
+Your goal is to modify ONLY the specific items requested and PRESERVE everything else exactly as is.
+
+CRITICAL RULE - UNIQUE ITEM NUMBERING:
+The <current_section_content_numbered> section uses GLOBAL unique identifiers:
+- [ITEM N] for bullet points (unique across ALL lists in this section)
+- [ROW N] for table rows
+
+ALWAYS use these unique identifiers to locate items.
+Example: If you see [ITEM 1]...[ITEM 5] in List A, and [ITEM 6]...[ITEM 8] in List B.
+"Delete 1st item of List B" means DELETE [ITEM 6].
+
+CRITICAL RULE - CONTENT IDENTIFICATION PRIORITY:
+When the instruction identifies items by their content (e.g., "remove Enterprise Clients", "change Role of Sarah"), 
+you MUST match that specific content.
+
+STALE REFERENCE HANDLING (Double Deletion Prevention):
+If the instruction mentions specific item names or content (e.g., "remove Enterprise Clients"), 
+but those specific items do NOT appear in the numbered view below:
+1. STOP. Do NOT apply the operation to different items even if they are at the same position.
+2. Assume the action has already been taken (stale instruction).
+3. Return the section UNCHANGED or with only valid updates applied.
+
+QUANTITY SAFEGUARD:
+If the instruction specifies a quantity (e.g. "remove 2 rows"), you MUST NOT remove more than that quantity.
+If removing "last 2 rows" would result in removing 4 rows (e.g. because of ambiguity or previous deletions), STOP and remove only the last 2 VISIBLE rows.
+
+ONLY use positional references (e.g., "remove last 2 rows") if the instruction is purely positional 
+AND DOES NOT mention specific content that is missing.
+</critical_instruction>
+
+<examples>
+CORRECT literal interpretation:
+- "remove 4th point" = remove [ITEM 4].
+- "delete the last 2 rows" = delete the last 2 data rows ([ROW N]).
+- "Move 3rd item to second list" = Take [ITEM 3], remove from List A, add to List B.
+
+CORRECT handling of stale references (PREVENT DOUBLE DELETION):
+- Instruction: "Remove last 2 rows (Enterprise Clients and Legal Team)"
+- Numbered view shows: [ROW 1] Sarah, [ROW 2] Michael, ... [ROW 6] Robert
+- "Enterprise Clients" is MISSING.
+- ACTION: DO NOTHING. The target items are already gone. Do NOT remove Emma and Robert.
+
+WRONG handling (DATA LOSS):
+- Instruction: "Remove last 2 rows (Enterprise Clients and Legal Team)"
+- Numbered view shows: [ROW 1] Sarah ... [ROW 6] Robert
+- WRONG Action: Removing Emma and Robert because they are now the "last 2". 
+- CONSEQUENCE: Accidental data loss of valid rows.
+</examples>
+
+<section_context>
+You are updating Section #{section_number} titled "{section_title_clean}".
+Make edits ONLY in this section.
+</section_context>
+
+<current_section_content_numbered>
+{current_section_content_numbered}
+</current_section_content_numbered>
+
+<full_section_json>
+THIS IS THE STARTING POINT. EDIT THIS JSON:
+{full_section_json_block}
+</full_section_json>
+
+<user_instruction>
+{user_instruction}
+</user_instruction>
+
+<task>
+1. READ the numbered content view above - Use [ITEM N] and [ROW N] to identify targets.
+2. CHECK if the instruction names specific items. VERIFY if they exist.
+3. IF missing and specific -> STOP (Stale/Idempotent).
+4. IF present or purely positional -> APPLY change.
+5. Apply valid changes and COPY all other items EXACTLY as they are.
+6. Return the fully reconstructed section JSON.
+</task>
+
+<response_format>
+Respond ONLY with JSON in this exact structure:
+{{
+    "title": "{section_title_clean}",
+    "content": [
+        {{ "type": "paragraph", "text": "..." }},
+        {{ "type": "bullet", "items": ["item1","item2"] }},
+        {{ "type": "table", "rows": [["col1","col2"],["v1","v2"]] }}
+    ]
+}}
+</response_format>
+
+<verification_checklist>
+- [ ] I used [ITEM N] / [ROW N] to uniquely identify targets.
+- [ ] I matched specific content names if provided in the instruction.
+- [ ] I avoided deleting wrong items if the named targets were missing.
+- [ ] I preserved all other items exactly.
+- [ ] The title is exactly "{section_title_clean}".
+</verification_checklist>
+"""
+    return prompt
+
+
 def _parse_user_intent_with_llm(
     user_message: str,
     conversation_history: List[Dict],
     brd_data: Dict,
     message_context: str = "",
+    user_viewing_section: Optional[int] = None,
 ) -> Dict[str, Any]:
     """
     Use LLM to parse user intent, target section, and update instruction in one call.
@@ -852,73 +1140,90 @@ def _parse_user_intent_with_llm(
     """
     section_list = _build_section_list_for_prompt(brd_data)
     history_text = _render_history_as_text(conversation_history[-15:] if conversation_history else [])
+    full_brd_text = render_brd_to_text(brd_data)[:12000]  # Full BRD for context (truncate if very long)
+
+    viewing_section_note = ""
+    if user_viewing_section is not None:
+        arr_idx = _user_section_to_array_index(brd_data, user_viewing_section)
+        if arr_idx is not None:
+            sec = brd_data.get("sections", [])[arr_idx]
+            sec_title = sec.get("title", "Untitled")
+            viewing_section_note = f"""
+CRITICAL - USER IS CURRENTLY VIEWING SECTION {user_viewing_section} ("{sec_title}"):
+When the user says "this", "it", "the above", "summarize this", "edit this", etc., they are referring to Section {user_viewing_section} ("{sec_title}").
+DEFAULT to section_number: {user_viewing_section} for update intents UNLESS the user explicitly says "everywhere", "all sections", or names a DIFFERENT section.
+"""
 
     prompt = f"""You are a BRD (Business Requirements Document) assistant. Parse the user's message to determine their intent and extract structured information.
 
-STRICT FLOW - Follow these steps in order:
+=== STRICT RULES (MUST FOLLOW) ===
+1. Make edits ONLY in the section the user is asking about. Never edit a different section.
+2. If the user has NOT mentioned a section name or number, use the chat history to determine which section was LAST SEEN or LAST MENTIONED. The user refers to "this" = the section they are currently viewing.
+3. Before returning any update intent, you MUST identify the correct section name/number. Never guess or use the wrong section.
+4. You are receiving the ENTIRE BRD below. Unless the user explicitly selected "view entire BRD" and is viewing the full document, you MUST identify the specific section the user is referring to for any edit.
+5. Understand the chat history deeply: what section did the assistant LAST display? That is the section for "this", "it", "summarize this", etc.
+{viewing_section_note}
 
 ## STEP 1: INTENT
 Determine the user's intent. Must be EXACTLY one of:
-- "show" - User wants to VIEW/display a section (e.g., "show section 4", "show me stakeholders", "display section 5")
+- "show" - User wants to VIEW/display a section
 - "list" - User wants to see all section names/titles
-- "update" - User wants to MODIFY/EDIT/CHANGE content in the BRD (e.g., "remove last two rows", "change X to Y", "transfer items from in scope to out of scope", "add Z to section 4")
-- "generic" - General question, greeting, or unclear (e.g., "what sections did I update?", "hello", "help")
+- "update" - User wants to MODIFY/EDIT/CHANGE content (e.g., "remove last two rows", "summarize this to 5 points", "change X to Y")
+- "generic" - General question, greeting, or unclear
 
-IMPORTANT for "update" intent:
-- "remove last two rows" = update (removing rows from a table)
-- "transfer last 3 points of in scope to out of scope" = update (moving content between In Scope and Out of Scope)
-- "change X to Y" = update
-- "add Z" = update
-- "delete the last two entries" = update
-- Typos like "roes" instead of "rows" = still update intent
+## STEP 2: SECTION (REQUIRED for "update" or "show")
+CRITICAL - EVERYWHERE/ALL TAKES PRECEDENCE:
+- If the user's message contains "everywhere", "entire document", "whole document", "all sections", or "across all" -> you MUST return section_title: "all" and section_number: null. Ignore SECTION N in message context for scope.
+- When MESSAGE CONTEXT contains "USER REQUEST:", the text after "USER REQUEST:" is the actual instruction. If that instruction contains "everywhere" or "entire document" or "all sections", return section_title: "all" and section_number: null.
+- If the conversation history shows the assistant last replied with "## Full BRD Document" (user just viewed entire BRD), and the user now asks for a change/replace, treat as entire document: section_title: "all", section_number: null.
 
-## STEP 2: SECTION (only if intent is "update" or "show")
-Identify which section the user is referring to. Use:
-1. Explicit section in message: "section 4", "section 5", "stakeholders", "scope"
-2. Chat history: What section did the user LAST view? Look for "show section N" or assistant messages displaying "## N. SectionTitle"
-3. Section content in message: If message contains "SECTION 4: Stakeholders" or "## 5. Scope", that's the section
-4. Keywords: "in scope", "out of scope" = Scope section; "stakeholders" = Stakeholders section
+Then, for single-section targeting, priority order:
+1. USER_VIEWING_SECTION above (if provided) - USE THIS when user says "this", "it", "summarize this" and did NOT say "everywhere"/"entire"
+2. Explicit in message: "section 4", "section 5", "stakeholders", "assumptions"
+3. Message context: "SECTION 10: Assumptions" or "## 10. Assumptions" in the message = section 10 (only if user did not say everywhere/entire)
+4. Chat history: What section did the assistant LAST display? (Look for "## N. SectionTitle") That is the section the user is viewing.
 
-Return section_number (1-based integer) or section_title (e.g., "Stakeholders", "Scope") or "all" if editing entire document.
-If intent is "show" and user said "show section 5", return section_number: 5.
-If intent is "update" and message contains "SECTION 5: Scope" with "transfer last 3 points...", return section_number: 5.
+Return section_number (1-based integer) or section_title. For "change X to Y everywhere" -> section_title: "all". For "summarize this", "edit this", "remove rows from this" -> use the LAST DISPLAYED section.
 
 BRD sections (for reference):
 {section_list}
 
 ## STEP 3: UPDATE INSTRUCTION (only if intent is "update")
-Extract the EXACT instruction for what to change. Be precise:
-- "remove last two rows" -> "Remove the last two rows from the table"
-- "transfer last 3 points of in scope to out of scope" -> "Move the last 3 items from In Scope to Out of Scope"
-- "change Sarah to Aman" -> "Replace all occurrences of Sarah with Aman"
-- "add security requirements" -> "Add security requirements to the section"
+Extract the EXACT instruction. "summarize this to 5 points" -> "Summarize the content to 5 bullet points"
 
-Preserve the user's meaning even with typos. "roes" = "rows".
+CRITICAL - HANDLING RELATIVE/POSITIONAL COMMANDS:
+If the user uses relative commands like "remove last 2 rows" or "change 3rd bullet":
+1. TRY to resolve them to specific item names based on the content you see in the BRD, IF UNAMBIGUOUS.
+   (e.g., "Remove last 2 rows" -> "Remove last 2 rows (Enterprise Clients, Legal Team)")
+   
+2. DETECT RETRY/DUPLICATE COMMANDS:
+   If the user repeats a command (e.g., "remove last 2 rows") immediately after the assistant confirmed it was done:
+   - This fails if treated blindly (it would remove the NEXT 2 rows).
+   - Generate a SAFE instruction like: "Ensure the previously targeted rows are removed (idempotent check)".
+   - Or if names are known from history: "Ensure Enterprise Clients and Legal Team are removed."
+
+---
+FULL BRD (for context - you are receiving the entire document):
+{full_brd_text[:8000]}
 
 ---
 USER MESSAGE:
 {user_message}
 
 ---
-CONVERSATION HISTORY (most recent last):
+CONVERSATION HISTORY (most recent last - understand DEEPLY which section was last shown):
 {history_text}
 
 ---
-CURRENT MESSAGE CONTEXT (if user is viewing a section, this may be included):
+MESSAGE CONTEXT (may contain SECTION N: Title showing what user is viewing):
 {message_context[:2000] if message_context else "(none)"}
 
 ---
-Respond with ONLY valid JSON in this exact format (no markdown, no explanation):
+Respond with ONLY valid JSON (no markdown):
 {{"intent": "show" | "list" | "update" | "generic", "section_number": <int or null>, "section_title": "<string or null>", "update_instruction": "<string or null>"}}
-
-Rules:
-- section_number: integer 1-based, or null if not applicable
-- section_title: use when section_number unclear but title is (e.g., "Scope", "Stakeholders"), or null
-- update_instruction: only when intent is "update", otherwise null
-- For "show entire brd" or "show full document", use intent "show" and section_number null, section_title "all"
 """
 
-    raw_response = invoke_claude_for_chat(prompt, [])
+    raw_response = invoke_claude_for_chat(prompt, [], guard_content_text=user_message)
     logger.info(f"LLM parse response (first 500 chars): {raw_response[:500]}")
 
     # Extract JSON from response (handle markdown code blocks and nested braces)
@@ -982,6 +1287,110 @@ Rules:
 # Chat Commands
 # -------------------------
 
+# Canonical BRD section titles (user section number -> expected title keywords)
+_CANONICAL_SECTION_TITLES = {
+    1: "document overview",
+    2: "purpose",
+    3: "background",
+    4: "stakeholders",
+    5: "scope",
+    6: "business objectives",
+    7: "functional requirements",
+    8: "non-functional requirements",
+    9: "user stories",
+    10: "assumptions",
+    11: "constraints",
+    12: "acceptance criteria",
+    13: "timeline",
+    14: "risks",
+    15: "approval",
+    16: "glossary",
+}
+
+
+def _user_section_to_array_index(brd_data: Dict, user_section_num: int) -> Optional[int]:
+    """
+    Map user's section number (1-16) to the array index in brd_data['sections'].
+    User expects: section 10 = "10. Assumptions" (section with that number in title).
+    Handles BRD structure with doc title + 16 sections + subsections (# In Scope, # Out of Scope).
+    """
+    sections = brd_data.get("sections", [])
+    if not sections:
+        return None
+
+    # First try: find section whose title starts with "N." (e.g. "10. Assumptions")
+    prefix = f"{user_section_num}."
+    for idx, sec in enumerate(sections):
+        title = (sec.get("title", "") or "").strip()
+        if title.startswith(prefix) or title == str(user_section_num):
+            logger.info(f"   📋 User section {user_section_num} -> array index {idx} (title: '{title}')")
+            return idx
+
+    # Second try: match by canonical title (handles sections that lost number prefix after updates)
+    # e.g. "Assumptions" at index 12 should map to user section 10
+    expected_keywords = _CANONICAL_SECTION_TITLES.get(user_section_num, "")
+    if expected_keywords:
+        for idx, sec in enumerate(sections):
+            title = (sec.get("title", "") or "").strip().lower()
+            title_clean = re.sub(r'^\d+\.\s*', '', title).strip()
+            if expected_keywords in title or expected_keywords in title_clean:
+                # Skip subsections (# In Scope, # Out of Scope) - they're not main sections
+                if title.startswith("#"):
+                    continue
+                logger.info(f"   📋 User section {user_section_num} -> array index {idx} (canonical title match: '{sec.get('title','')}')")
+                return idx
+
+    # Third try: positional fallback (only when structure is simple, no subsections)
+    has_doc_title = False
+    if sections:
+        first_title = (sections[0].get("title", "") or "").lower()
+        if ("ai-powered" in first_title or "brd" in first_title or
+            (len(first_title) < 30 and not re.match(r'^\d+\.', first_title))):
+            has_doc_title = True
+
+    if has_doc_title:
+        if 1 <= user_section_num < len(sections):
+            return user_section_num
+    else:
+        if 1 <= user_section_num <= len(sections):
+            return user_section_num - 1
+    return None
+
+
+def _array_index_to_user_section(brd_data: Dict, array_index: int) -> Optional[int]:
+    """Map array index back to user-visible section number (1-16)."""
+    sections = brd_data.get("sections", [])
+    if array_index < 0 or array_index >= len(sections):
+        return None
+    title = (sections[array_index].get("title", "") or "").strip()
+    num_match = re.match(r'^(\d+)\.', title)
+    if num_match:
+        return int(num_match.group(1))
+    has_doc_title = sections and (
+        "ai-powered" in (sections[0].get("title", "") or "").lower() or
+        "brd" in (sections[0].get("title", "") or "").lower()
+    )
+    return array_index if has_doc_title else array_index + 1
+
+
+def _get_max_user_section(brd_data: Dict) -> int:
+    """Return the maximum valid user section number (typically 16)."""
+    sections = brd_data.get("sections", [])
+    max_num = 0
+    for sec in sections:
+        title = (sec.get("title", "") or "").strip()
+        m = re.match(r'^(\d+)\.', title)
+        if m:
+            max_num = max(max_num, int(m.group(1)))
+    has_doc_title = sections and (
+        "ai-powered" in (sections[0].get("title", "") or "").lower() or
+        "brd" in (sections[0].get("title", "") or "").lower()
+    )
+    if max_num == 0 and sections:
+        max_num = len(sections) - 1 if has_doc_title else len(sections)
+    return max(max_num, 16)
+
+
 def _find_section_by_title_or_number(brd_data: Dict, section_identifier: str) -> Optional[int]:
     """
     Find section number by title or number.
@@ -1025,19 +1434,22 @@ def _find_section_by_title_or_number(brd_data: Dict, section_identifier: str) ->
         if idx == 0 and has_doc_title:
             continue
         
-        # CRITICAL: Return value depends on whether document title exists
-        # If document title exists: array index 11 = section 11 (return 11)
-        # If no document title: array index 10 = section 11 (return 11)
-        # Since we're already skipping document title (start_idx = 1), we need to adjust
-        if has_doc_title:
-            # With document title: array index 11 = section 11
-            # So return idx (which is already the array index)
-            section_num = idx
+        # Prefer canonical section number from title (e.g. "10. Assumptions" -> 10)
+        # CRITICAL: Use number from title when present; otherwise use canonical mapping by title
+        num_match = re.match(r'^(\d+)\.', title)
+        if num_match:
+            section_num = int(num_match.group(1))
         else:
-            # Without document title: array index 10 = section 11
-            # So return idx + 1
-            section_num = idx + 1
-        
+            # Section has no number prefix - use canonical mapping (e.g. "Assumptions" -> 10)
+            title_clean = re.sub(r'^\d+\.\s*', '', title).strip()
+            section_num = None
+            for user_num, keywords in _CANONICAL_SECTION_TITLES.items():
+                if keywords in title_clean or title_clean in keywords:
+                    section_num = user_num
+                    break
+            if section_num is None:
+                section_num = idx if has_doc_title else idx + 1
+
         # Exact match
         if title == section_identifier_lower:
             logger.info(f"   📋 Exact title match: '{title}' at array index {idx}, returning section number {section_num}")
@@ -1066,57 +1478,71 @@ def _find_section_by_title_or_number(brd_data: Dict, section_identifier: str) ->
     return None
 
 def handle_list_sections(brd_data: Dict) -> str:
-    """List all BRD sections"""
+    """List BRD sections. Shows canonical section numbers (1-16) and skips doc title / subsections."""
     sections = brd_data.get("sections", [])
-
     if not sections:
         return "No sections found in BRD."
 
-    result = "**BRD Sections:**\n\n"
-    for i, section in enumerate(sections, 1):
-        result += f"{i}. {section.get('title', 'Untitled')}\n"
+    has_doc_title = False
+    if sections:
+        first = (sections[0].get("title", "") or "").lower()
+        if "ai-powered" in first or "brd" in first or (len(first) < 30 and not re.match(r'^\d+\.', first)):
+            has_doc_title = True
 
+    result = "**BRD Sections:**\n\n"
+    user_num = 1
+    for idx in range(1 if has_doc_title else 0, len(sections)):
+        section = sections[idx]
+        title = (section.get("title", "") or "").strip()
+        if title.startswith("#") and ("in scope" in title.lower() or "out of scope" in title.lower()):
+            continue
+        num_match = re.match(r'^(\d+)\.', title)
+        display_num = int(num_match.group(1)) if num_match else user_num
+        title_clean = re.sub(r'^\d+\.\s*', '', title).strip()
+        result += f"{display_num}. {title_clean}\n"
+        user_num = display_num + 1 if num_match else user_num + 1
     return result
 
 def handle_show_section(brd_data: Dict, section_number: int) -> str:
-    """Show content of a specific section"""
+    """Show content of a specific section. section_number is user-visible (1-16)."""
     sections = brd_data.get("sections", [])
+    max_section = _get_max_user_section(brd_data)
 
-    # Check if first section is document title (common pattern)
-    has_doc_title = False
-    if sections:
-        first_title = sections[0].get("title", "").lower()
-        if ("ai-powered" in first_title or "brd" in first_title or 
-            (len(first_title) < 30 and not re.match(r'^\d+\.', first_title))):
-            has_doc_title = True
-    
-    # Calculate array index based on whether document title exists
-    if has_doc_title:
-        # With document title: section 11 = array index 11
-        array_index = section_number
-        max_section = len(sections) - 1  # Exclude document title from count
-    else:
-        # Without document title: section 11 = array index 10
-        array_index = section_number - 1
-        max_section = len(sections)
-    
     if section_number < 1 or section_number > max_section:
         return f"Invalid section number. Please choose 1-{max_section}"
+
+    # Resolve user section number to array index (handles "section 10" = "10. Assumptions")
+    array_index = _user_section_to_array_index(brd_data, section_number)
+    if array_index is None:
+        return f"Section {section_number} not found. Please choose 1-{max_section}"
 
     section = sections[array_index]
     title = section.get("title", "Untitled")
     content_blocks = section.get("content", [])
 
+    # Scope (section 5): merge content from "# In Scope" and "# Out of Scope" if main section is empty
+    if (not content_blocks or len(content_blocks) == 0) and "scope" in title.lower():
+        merged = []
+        for i in (1, 2):
+            idx = array_index + i
+            if idx < len(sections):
+                sub = sections[idx]
+                sub_title = (sub.get("title", "") or "").lower()
+                if "# in scope" in sub_title:
+                    merged.append({"type": "paragraph", "text": "### In Scope"})
+                    merged.extend(sub.get("content", []))
+                elif "# out of scope" in sub_title:
+                    merged.append({"type": "paragraph", "text": "### Out of Scope"})
+                    merged.extend(sub.get("content", []))
+        if merged:
+            content_blocks = merged
+
     # CRITICAL: Ensure consistent section numbering in display
-    # Remove any existing number prefix from title (e.g., "5. Scope" -> "Scope")
-    # Then add the correct section number based on the actual position
     title_clean = re.sub(r'^\d+\.\s*', '', title).strip()
-    # Always display with the correct section number: "## 5. Scope"
-    # IMPORTANT: Include section number at the start for context tracking
     result = f"## {section_number}. {title_clean}\n\n"
 
-    for block in content_blocks:
-        block_type = block.get("type")
+    for block in (content_blocks or []):
+        block_type = block.get("type") if isinstance(block, dict) else None
         if block_type == "paragraph":
             result += block.get("text", "") + "\n\n"
         elif block_type == "bullet":
@@ -1132,59 +1558,62 @@ def handle_show_section(brd_data: Dict, section_number: int) -> str:
     return result
 
 def handle_update_section(brd_data: Dict, section_number: int, user_instruction: str, conversation_history: List[Dict]) -> Dict:
-    """Update a BRD section based on user instruction"""
+    """Update a BRD section based on user instruction. section_number is user-visible (1-16)."""
     logger.info("=" * 80)
     logger.info("🔍 [STEP 5] HANDLE_UPDATE_SECTION CALLED")
     logger.info(f"   section_number: {section_number} (type: {type(section_number)})")
     logger.info(f"   user_instruction: '{user_instruction}'")
     logger.info("=" * 80)
-    
+
     sections = brd_data.get("sections", [])
-    logger.info(f"   Total sections in BRD: {len(sections)}")
-    
-    # Check if first section is document title (common pattern)
-    has_doc_title = False
-    if sections:
-        first_title = sections[0].get("title", "").lower()
-        if ("ai-powered" in first_title or "brd" in first_title or 
-            (len(first_title) < 30 and not re.match(r'^\d+\.', first_title))):
-            has_doc_title = True
-            logger.info(f"   📋 Document title detected at index 0: '{sections[0].get('title', '')}'")
-    
-    # Log ALL section titles with their indices
+    max_section = _get_max_user_section(brd_data)
+    logger.info(f"   Total sections in BRD: {len(sections)}, max user section: {max_section}")
+
+    if section_number < 1 or section_number > max_section:
+        logger.error(f"   ❌ Invalid section number: {section_number} (must be 1-{max_section})")
+        return {
+            "success": False,
+            "message": f"Invalid section number. Please choose 1-{max_section}"
+        }
+
+    array_index = _user_section_to_array_index(brd_data, section_number)
+    if array_index is None:
+        logger.error(f"   ❌ Could not resolve section {section_number} to array index")
+        return {
+            "success": False,
+            "message": f"Section {section_number} not found. Please choose 1-{max_section}"
+        }
+
     logger.info("   📋 ALL SECTIONS IN BRD:")
     for idx, sec in enumerate(sections):
         title = sec.get('title', 'Untitled')
-        is_doc_title = (idx == 0 and has_doc_title)
-        logger.info(f"      [{idx+1}] (index {idx}){' [DOC TITLE]' if is_doc_title else ''}: '{title}'")
-    
-    # Adjust section number if document title exists
-    # User says "section 11", but if doc title exists, it's at index 11 (not 10)
-    if has_doc_title:
-        array_index = section_number  # User's section 11 = array index 11
-        if array_index < 1 or array_index >= len(sections):
-            logger.error(f"   ❌ Invalid section number: {section_number} (must be 1-{len(sections) - 1})")
-            return {
-                "success": False,
-                "message": f"Invalid section number. Please choose 1-{len(sections) - 1}"
-            }
-    else:
-        array_index = section_number - 1
-        if section_number < 1 or section_number > len(sections):
-            logger.error(f"   ❌ Invalid section number: {section_number} (must be 1-{len(sections)})")
-            return {
-                "success": False,
-                "message": f"Invalid section number. Please choose 1-{len(sections)}"
-            }
-
+        logger.info(f"      [{idx+1}] (index {idx}): '{title}'")
     logger.info(f"   🔎 Retrieving section at array index {array_index} (user's section number {section_number})")
-    section = sections[array_index]
+    section = dict(sections[array_index])  # Copy to avoid mutating
     actual_title = section.get("title", "Untitled")
     logger.info(f"   ✅ Retrieved section title: '{actual_title}'")
-    logger.info(f"   📄 Section content preview (first 300 chars): {str(section.get('content', []))[:300]}")
-    
-    # Log first few content blocks
+
+    # Scope (section 5): merge content from "# In Scope" and "# Out of Scope" if main section is empty
     content_blocks = section.get("content", [])
+    if (not content_blocks or len(content_blocks) == 0) and "scope" in actual_title.lower():
+        merged = []
+        for i in (1, 2):
+            idx = array_index + i
+            if idx < len(sections):
+                sub = sections[idx]
+                sub_title = (sub.get("title", "") or "").lower()
+                if "# in scope" in sub_title:
+                    merged.append({"type": "paragraph", "text": "### In Scope"})
+                    merged.extend(sub.get("content", []))
+                elif "# out of scope" in sub_title:
+                    merged.append({"type": "paragraph", "text": "### Out of Scope"})
+                    merged.extend(sub.get("content", []))
+        if merged:
+            section = dict(section, content=merged)
+            content_blocks = merged
+            logger.info(f"   📄 Merged Scope content from In/Out of Scope subsections ({len(merged)} blocks)")
+
+    logger.info(f"   📄 Section content preview (first 300 chars): {str(section.get('content', []))[:300]}")
     logger.info(f"   📄 Number of content blocks: {len(content_blocks)}")
     for i, block in enumerate(content_blocks[:3]):
         block_type = block.get("type", "unknown")
@@ -1288,67 +1717,43 @@ Important:
         logger.info(f"   User Instruction: '{user_instruction}'")
         logger.info("=" * 80)
         
-        prompt = f"""You are a documentation assistant. You MUST update BRD section #{section_number} based on the user's instruction.
 
-CRITICAL INFORMATION:
-- Section Number: {section_number} (this is the EXACT section number in the BRD structure, at array index {section_number - 1})
-- Section Title: "{section_title_clean}"
-- Section Content Preview: {section_content_text[:300]}
+        # NOTE: We rely entirely on the LLM to interpret the user's instruction precisely.
+        # The prompt below emphasizes LITERAL interpretation to prevent over-application.
 
-YOU ARE UPDATING SECTION #{section_number} TITLED "{section_title_clean}".
-DO NOT update any other section. IGNORE any section numbers mentioned in conversation history.
-
-FULL SECTION #{section_number} DATA:
-{json.dumps(section, indent=2)}
-
-USER INSTRUCTION:
-{user_instruction}
-
-Your task:
-1. Find the content in section #{section_number} (titled "{section_title_clean}")
-2. Apply the user's instruction: "{user_instruction}"
-3. Return ONLY the updated section #{section_number}
-
-Respond ONLY with JSON in this exact structure:
-{{
-    "title": "{section_title_clean}",
-    "content": [
-        {{ "type": "paragraph", "text": "..." }},
-        {{ "type": "bullet", "items": ["item1","item2"] }},
-        {{ "type": "table", "rows": [["col1","col2"],["v1","v2"]] }}
-    ]
-}}
-
-CRITICAL REQUIREMENTS:
-1. The "title" field MUST be exactly "{section_title_clean}" (no number prefix, no variations)
-2. Only modify the CONTENT array - find the text/items/rows that match the user's instruction and update them
-3. If user says "change X to Y", search for X in the content of section #{section_number} and replace ALL occurrences with Y
-4. Do NOT change the section title
-5. Do NOT modify any other section
-6. Return the complete section with all content blocks (not just the changed parts)
-
-VERIFICATION CHECKLIST:
-- [ ] Title is exactly "{section_title_clean}"
-- [ ] I am updating section #{section_number} only
-- [ ] I found and updated the content matching "{user_instruction}"
-- [ ] I did NOT change any other section"""
+        # Use centralized prompt builder which handles global item numbering and stale reference checks
+        section_list_str = _build_section_list_for_prompt(brd_data)
+        current_section_content_numbered = _render_section_content_with_numbering(section)
+        
+        prompt = get_brd_update_prompt(
+            user_instruction,
+            [], # conversation_history - intentionally empty for update to avoid confusion
+            section_list_str,
+            section_number,
+            section_title_from_data,
+            current_section_content_numbered,
+            section_json=section,
+        )
 
     try:
         # CRITICAL: Do NOT send conversation history to Claude when updating sections
         # Conversation history can confuse Claude about which section to update
         # Only send the prompt with the section data
         logger.info("=" * 80)
-        logger.info("🔍 [STEP 7] INVOKING CLAUDE")
+        logger.info("🔍 [STEP 7] INVOKING CLAUDE WITH XML PROMPT")
         logger.info(f"   Section Number: {section_number}")
         logger.info(f"   Section Title (clean): '{section_title_clean}'")
         logger.info(f"   User Instruction: '{user_instruction}'")
-        logger.info(f"   Prompt length: {len(prompt)} characters")
-        logger.info(f"   Prompt preview (first 800 chars):")
-        logger.info(f"   {prompt[:800]}...")
+        
+        # LOG THE FULL PROMPT FOR DEBUGGING
+        logger.info(f"   📝 FULL PROMPT SENT TO LLM:\n{prompt}")
+        
         logger.info(f"   NOT sending conversation history to Claude (to avoid confusion)")
         logger.info("=" * 80)
         
-        raw_response = invoke_claude_for_chat(prompt, [])  # Empty history to avoid confusion
+        # Invoke Claude with the prompt; guardrail only sees user_instruction to avoid false positives
+        raw_response = invoke_claude_for_chat(prompt, [], guard_content_text=user_instruction)
+
         
         logger.info("=" * 80)
         logger.info("🔍 [STEP 8] CLAUDE RESPONSE RECEIVED")
@@ -1441,11 +1846,7 @@ VERIFICATION CHECKLIST:
         
         # Ensure the title doesn't have a section number prefix (we'll add it when displaying)
         updated_section["title"] = expected_title_clean  # Use the expected title to ensure consistency
-        
-        # CRITICAL: Use the correct array_index that was calculated earlier (accounts for document title)
-        # array_index was calculated based on has_doc_title:
-        # - With doc title: array_index = section_number (section 11 = index 11)
-        # - Without doc title: array_index = section_number - 1 (section 11 = index 10)
+
         logger.info(f"   🔧 Updating section at array index {array_index} (user's section {section_number})")
         sections[array_index] = updated_section
         brd_data["sections"] = sections
@@ -1572,7 +1973,9 @@ def lambda_handler(event, context):
             # Strip [BRD_ID: ...] prefix from message if present
             import re
             user_message_clean = re.sub(r'\[BRD_ID:\s*[^\]]+\]\s*', '', user_message, count=1).strip()
-            
+            # Preserve full message for LLM context (contains SECTION N: Title when user is viewing a section)
+            full_message_for_llm_context = user_message_clean
+
             # Add user message to memory (use cleaned version for display)
             add_message_to_memory(session_id, "user", user_message_clean)
 
@@ -1656,56 +2059,51 @@ def lambda_handler(event, context):
                         line = line.strip()
                         if line and not line.startswith(('##', '**', '|', '-', '---', 'SECTION', 'IMPORTANT')):
                             # This might be the actual request
-                            if any(word in line.lower() for word in ['change', 'update', 'modify', 'edit', 'replace', 'show', 'list']):
+                            if any(word in line.lower() for word in ['change', 'update', 'modify', 'edit', 'replace', 'show', 'list', 'summarize', 'remove', 'add', 'transfer', 'delete']):
                                 user_actual_request = line
                                 logger.info(f"Extracted user request from last meaningful line: {user_actual_request[:100]}")
                                 break
                 
                 # Look for patterns like "SECTION 4:", "SECTION 4: Stakeholders", "4. Stakeholders", etc.
-                section_match = re.search(r'(?:SECTION\s+)?(\d+)[:\.]\s*([^\r\n]+)?', user_message_clean, re.IGNORECASE)
+                section_match = re.search(r'(?:SECTION\s+)?(\d{1,2})[:\.]\s*([^\r\n]+)?', user_message_clean, re.IGNORECASE)
                 if section_match:
                     try:
-                        section_in_message = int(section_match.group(1))
-                        section_title = section_match.group(2).strip() if section_match.group(2) else None
-                        logger.info(f"Found section in current message: {section_in_message} ({section_title})")
-                        last_shown_section = section_in_message
-                        # CRITICAL: Store the section title when found
-                        if section_title:
-                            last_shown_section_title = section_title
-                            logger.info(f"✅ Stored section title from message: '{last_shown_section_title}'")
-                        else:
-                            # If no title in message, try to find it from BRD data
-                            if brd_data and section_in_message <= len(brd_data.get("sections", [])):
-                                # Check if first section is document title (common pattern)
-                                sections = brd_data.get("sections", [])
-                                # If section 1 is likely a document title, adjust index
-                                if sections and section_in_message > 0:
-                                    # Try to find section by number, accounting for possible document title
-                                    section_idx = section_in_message - 1
-                                    # Check if first section is document title (has "AI-Powered" or similar, not "Document Overview")
-                                    if section_idx == 0 and sections[0].get("title", "").lower() not in ["document overview", "1. document overview"]:
-                                        # First section is likely document title, adjust
-                                        if "ai-powered" in sections[0].get("title", "").lower() or len(sections[0].get("title", "")) < 30:
-                                            # Document title detected, use next section
-                                            section_idx = section_in_message  # Don't subtract 1
-                                            logger.info(f"⚠️ Document title detected at index 0, adjusting section index from {section_in_message - 1} to {section_idx}")
-                                    
-                                    if section_idx < len(sections):
-                                        found_section = sections[section_idx]
-                                        found_title = re.sub(r'^\d+\.\s*', '', found_section.get("title", "")).strip()
-                                        last_shown_section_title = found_title
+                        cand = int(section_match.group(1))
+                        max_sec = _get_max_user_section(brd_data) if brd_data else 16
+                        if 1 <= cand <= max_sec:
+                            section_in_message = cand
+                            section_title = section_match.group(2).strip() if section_match.group(2) else None
+                            # Don't use instruction text as section title (e.g. "update section 10: summarize to 5 points")
+                            instruction_verbs = ['summarize', 'remove', 'add', 'change', 'update', 'replace', 'transfer', 'delete', 'edit']
+                            if section_title and any(v in section_title.lower() for v in instruction_verbs):
+                                section_title = None  # It's an instruction, not a section title
+                            logger.info(f"Found section in current message: {section_in_message} ({section_title})")
+                            last_shown_section = section_in_message
+                            if section_title:
+                                last_shown_section_title = section_title
+                                logger.info(f"✅ Stored section title from message: '{last_shown_section_title}'")
+                            else:
+                                arr_idx = _user_section_to_array_index(brd_data, section_in_message)
+                                if arr_idx is not None and brd_data:
+                                    sections = brd_data.get("sections", [])
+                                    if arr_idx < len(sections):
+                                        found_section = sections[arr_idx]
+                                        last_shown_section_title = re.sub(r'^\d+\.\s*', '', found_section.get("title", "")).strip()
                                         logger.info(f"✅ Stored section title from BRD data: '{last_shown_section_title}'")
                     except (ValueError, AttributeError):
                         pass
                 
                 # Also check for "## 4. Title" or "## Section 4" patterns
                 if not section_in_message:
-                    section_match = re.search(r'##\s*(?:Section\s+)?(\d+)', user_message_clean, re.IGNORECASE)
+                    section_match = re.search(r'##\s*(?:Section\s+)?(\d{1,2})', user_message_clean, re.IGNORECASE)
                     if section_match:
                         try:
-                            section_in_message = int(section_match.group(1))
-                            logger.info(f"Found section in current message (## format): {section_in_message}")
-                            last_shown_section = section_in_message
+                            cand = int(section_match.group(1))
+                            max_sec = _get_max_user_section(brd_data) if brd_data else 16
+                            if 1 <= cand <= max_sec:
+                                section_in_message = cand
+                                logger.info(f"Found section in current message (## format): {section_in_message}")
+                                last_shown_section = section_in_message
                         except ValueError:
                             pass
                 
@@ -1873,28 +2271,28 @@ def lambda_handler(event, context):
                         # - NOT update confirmations like "✅ Section '4. Stakeholders' updated"
                         
                         # Pattern 1: Section header at start of message (most reliable)
-                        section_header_match = re.search(r'^(?:##\s*)?(\d+)\.\s+([A-Z][^\n]*)', content, re.MULTILINE | re.IGNORECASE)
+                        section_header_match = re.search(r'^(?:##\s*)?(\d{1,2})\.\s+([A-Z][^\n]*)', content, re.MULTILINE | re.IGNORECASE)
                         if section_header_match:
                             try:
                                 section_num = int(section_header_match.group(1))
-                                section_title = section_header_match.group(2).strip()
-                                # Verify this looks like a section display (has content after title)
-                                if len(content) > len(section_title) + 20:  # Has substantial content
-                                    last_shown_section = section_num
-                                    logger.info(f"Found last SHOWN section from assistant display: {section_num} ({section_title})")
-                                    break
+                                max_sec = _get_max_user_section(brd_data) if brd_data else 16
+                                if 1 <= section_num <= max_sec:
+                                    section_title = section_header_match.group(2).strip()
+                                    if len(content) > len(section_title) + 20:
+                                        last_shown_section = section_num
+                                        logger.info(f"Found last SHOWN section from assistant display: {section_num} ({section_title})")
+                                        break
                             except ValueError:
                                 pass
                         
                         # Pattern 2: Section number followed by section title anywhere in content
-                        # But only if it's not an update confirmation
                         if not last_shown_section:
-                            section_match = re.search(r'(\d+)\.\s+([A-Z][a-zA-Z\s]+)', content, re.IGNORECASE)
+                            section_match = re.search(r'\b(\d{1,2})\.\s+([A-Z][a-zA-Z\s]+)', content, re.IGNORECASE)
                             if section_match:
                                 try:
                                     section_num = int(section_match.group(1))
-                                    # Make sure this isn't an update message
-                                    if "updated" not in content.lower()[:50]:  # Check first 50 chars
+                                    max_sec = _get_max_user_section(brd_data) if brd_data else 16
+                                    if 1 <= section_num <= max_sec and "updated" not in content.lower()[:50]:
                                         last_shown_section = section_num
                                         logger.info(f"Found last SHOWN section from assistant content: {section_num}")
                                         break
@@ -1924,13 +2322,18 @@ def lambda_handler(event, context):
                         if "updated successfully" in content.lower() or "✅" in content:
                             continue
                         
-                        # Look for any section number pattern
-                        section_match = re.search(r'(\d+)\.\s+', content, re.IGNORECASE)
+                        # Look for any section number pattern (single digit or "N." format only - avoid UUID fragments like "95")
+                        section_match = re.search(r'\b(\d{1,2})\.\s+', content, re.IGNORECASE)
                         if section_match:
                             try:
-                                last_shown_section = int(section_match.group(1))
-                                logger.info(f"Found section from history (fallback): {last_shown_section}")
-                                break
+                                cand = int(section_match.group(1))
+                                max_sec = _get_max_user_section(brd_data) if brd_data else 16
+                                if 1 <= cand <= max_sec:
+                                    last_shown_section = cand
+                                    logger.info(f"Found section from history (fallback): {last_shown_section}")
+                                    break
+                                else:
+                                    logger.debug(f"Rejected invalid section from history fallback: {cand} (max={max_sec})")
                             except ValueError:
                                 pass
 
@@ -2168,36 +2571,190 @@ def lambda_handler(event, context):
                 elif not assistant_response:
                     # LLM-based intent/section/update extraction - replaces brittle pattern matching
                     # Handles: "remove last two rows", "transfer last 3 points to out of scope", typos, etc.
-                    message_context = user_message_clean[:2000] if ("SECTION" in user_message_clean or "##" in user_message_clean) else ""
-                    parsed = _parse_user_intent_with_llm(user_message_clean, history, brd_data, message_context)
+                    # CRITICAL: Use full_message_for_llm_context (original message) for context - user_message_clean
+                    # may have been replaced with extracted request (e.g. "summarize this to 5 points") and lose SECTION N
+                    message_context = full_message_for_llm_context[:2000] if ("SECTION" in full_message_for_llm_context or "##" in full_message_for_llm_context) else ""
+                    user_was_shown_full_brd = False  # Deterministic: treat next update as entire-BRD if True
+                    # If user was just shown entire BRD, tell LLM so it prefers "all" for change/replace
+                    if history:
+                        for msg in reversed(history):
+                            c = msg.get("content", "")
+                            if isinstance(c, list):
+                                c = " ".join(
+                                    (item.get("text", "") if isinstance(item, dict) else str(item))
+                                    for item in c
+                                )
+                            elif isinstance(c, dict):
+                                c = c.get("text", "")
+                            if isinstance(c, str) and c.strip().startswith("## Full BRD Document"):
+                                user_was_shown_full_brd = True
+                                message_context = (message_context or "") + "\n[User was just shown the ENTIRE BRD; for change/replace use section_title: 'all'.]"
+                                logger.info("🔍 [CONTEXT] Last assistant message was full BRD; added hint for LLM to use section_title 'all' for updates.")
+                                break
+                            if msg.get("role", "").lower() == "user":
+                                break
+                    user_viewing_section = section_in_message or last_shown_section
+                    parsed = _parse_user_intent_with_llm(user_message_clean, history, brd_data, message_context, user_viewing_section)
 
-                    if parsed["intent"] == "update" and parsed["update_instruction"]:
-                        section_num = parsed["section_number"]
-                        if not section_num and parsed["section_title"]:
-                            section_num = _find_section_by_title_or_number(brd_data, parsed["section_title"])
-                        if section_num:
-                            logger.info(f"LLM parsed update: section={section_num}, instruction={parsed['update_instruction'][:80]}...")
-                            result = handle_update_section(brd_data, section_num, parsed["update_instruction"], history)
-                            assistant_response = result["message"]
-                            if result["success"]:
-                                updated_brd = result["updated_brd"]
+                    # When user clearly said "everywhere" / "entire document" with a change/replace, treat as update even if LLM returned generic
+                    if parsed.get("intent") != "update" and any(
+                        phrase in (user_message_clean or "").lower()
+                        for phrase in ["everywhere", "entire document", "whole document", "all sections", "across all"]
+                    ) and any(w in (user_message_clean or "").lower() for w in ["change", "replace", "update", "modify", "edit"]):
+                        everywhere_extract = re.search(
+                            r"(?:change|replace|update|modify|edit)\s+(.+?)\s+(?:to|with)\s+(.+?)(?:\s+everywhere|\s+in\s+(?:the\s+)?(?:entire|whole)\s+document|\s+across\s+all)?\s*$",
+                            user_message_clean or "",
+                            re.IGNORECASE | re.DOTALL,
+                        )
+                        if everywhere_extract:
+                            parsed["intent"] = "update"
+                            parsed["section_title"] = "all"
+                            parsed["section_number"] = None
+                            parsed["update_instruction"] = f"change {everywhere_extract.group(1).strip()} to {everywhere_extract.group(2).strip()}"
+                            logger.info(f"🔍 [EVERYWHERE FALLBACK] LLM returned intent={parsed.get('intent')}; forcing update everywhere, instruction: {parsed['update_instruction'][:80]}")
+                    # When user was just shown full BRD and sent an edit-like message, treat as update for entire document
+                    if user_was_shown_full_brd and parsed.get("intent") != "update" and any(
+                        w in (user_message_clean or "").lower() for w in ["change", "replace", "update", "modify", "edit"]
+                    ):
+                        edit_extract = re.search(
+                            r"(?:change|replace|update|modify|edit)\s+(.+?)\s+(?:to|with)\s+(.+?)\s*$",
+                            user_message_clean or "",
+                            re.IGNORECASE | re.DOTALL,
+                        )
+                        if edit_extract:
+                            parsed["intent"] = "update"
+                            parsed["section_title"] = "all"
+                            parsed["section_number"] = None
+                            parsed["update_instruction"] = f"change {edit_extract.group(1).strip()} to {edit_extract.group(2).strip()}"
+                            logger.info(f"🔍 [FULL BRD FALLBACK] User had just viewed full BRD; forcing intent=update for entire document, instruction: {parsed['update_instruction'][:80]}")
+
+                    if parsed["intent"] == "update" and parsed.get("update_instruction"):
+                        # Check for "everywhere" / "all" - update ALL sections and list all edited
+                        section_title_val = (parsed.get("section_title") or "").strip().lower()
+                        is_update_everywhere = (
+                            section_title_val == "all"
+                            or "everywhere" in (user_message_clean or "").lower()
+                            or "entire document" in (user_message_clean or "").lower()
+                            or "whole document" in (user_message_clean or "").lower()
+                            or "across all" in (user_message_clean or "").lower()
+                            or "in all sections" in (user_message_clean or "").lower()
+                        )
+                        # Fallback: user said everywhere/entire but LLM didn't return "all" - still treat as everywhere and derive instruction
+                        if not is_update_everywhere and any(
+                            phrase in (user_message_clean or "").lower()
+                            for phrase in ["everywhere", "entire document", "whole document", "all sections", "across all"]
+                        ) and any(w in (user_message_clean or "").lower() for w in ["change", "replace", "update", "modify", "edit"]):
+                            is_update_everywhere = True
+                            if not parsed.get("update_instruction"):
+                                everywhere_fallback = re.search(
+                                    r"(?:change|replace|update|modify|edit)\s+(.+?)\s+(?:to|with)\s+(.+?)(?:\s+everywhere|\s+in\s+(?:the\s+)?(?:entire|whole)\s+document|\s+across\s+all)?\s*$",
+                                    user_message_clean or "",
+                                    re.IGNORECASE | re.DOTALL,
+                                )
+                                if everywhere_fallback:
+                                    parsed["update_instruction"] = f"change {everywhere_fallback.group(1).strip()} to {everywhere_fallback.group(2).strip()}"
+                                    logger.info(f"🔍 [FALLBACK] Forced everywhere update; derived instruction: {parsed['update_instruction'][:100]}")
+                        # Deterministic: user just viewed Full BRD → treat this update as entire-document (don't rely on LLM)
+                        if not is_update_everywhere and user_was_shown_full_brd:
+                            is_update_everywhere = True
+                            parsed["section_title"] = "all"
+                            parsed["section_number"] = None
+                            if not parsed.get("update_instruction") and any(w in (user_message_clean or "").lower() for w in ["change", "replace", "update", "modify", "edit"]):
+                                everywhere_fallback = re.search(
+                                    r"(?:change|replace|update|modify|edit)\s+(.+?)\s+(?:to|with)\s+(.+?)\s*$",
+                                    user_message_clean or "",
+                                    re.IGNORECASE | re.DOTALL,
+                                )
+                                if everywhere_fallback:
+                                    parsed["update_instruction"] = f"change {everywhere_fallback.group(1).strip()} to {everywhere_fallback.group(2).strip()}"
+                            logger.info("🔍 [FULL BRD CONTEXT] User was just shown entire BRD; forcing update across all sections.")
+                        logger.info(f"🔍 UPDATE DECISION: section_title_val='{section_title_val}', is_update_everywhere={is_update_everywhere}")
+                        logger.info(f"   user_message_clean='{(user_message_clean or '')[:200]}'")
+                        logger.info(f"   parsed update_instruction='{(parsed.get('update_instruction') or '')[:200]}'")
+                        if is_update_everywhere:
+                            # Update all sections - loop and collect only sections that actually changed
+                            max_sec = _get_max_user_section(brd_data)
+                            logger.info(f"🌐 EVERYWHERE UPDATE: Looping through {max_sec} sections with instruction: '{parsed['update_instruction'][:200]}'")
+                            updated_sections_list = []
+                            any_section_success = False
+                            current_brd = brd_data
+                            for sec_num in range(1, max_sec + 1):
+                                arr_idx = _user_section_to_array_index(current_brd, sec_num)
+                                if arr_idx is None:
+                                    logger.info(f"   Section {sec_num}: SKIPPED (no array index)")
+                                    continue
+                                sec_title_debug = current_brd.get("sections", [])[arr_idx].get("title", "?")
+                                logger.info(f"   Section {sec_num} ({sec_title_debug}): Processing...")
+                                section_before = json.dumps(current_brd.get("sections", [])[arr_idx], sort_keys=True)
+                                result = handle_update_section(current_brd, sec_num, parsed["update_instruction"], history)
+                                logger.info(f"   Section {sec_num}: success={result['success']}, message='{result.get('message', '')[:100]}'")
+                                if result["success"]:
+                                    any_section_success = True
+                                    current_brd = result["updated_brd"]
+                                    section_after = json.dumps(current_brd.get("sections", [])[arr_idx], sort_keys=True)
+                                    changed = section_before != section_after
+                                    logger.info(f"   Section {sec_num}: content_changed={changed}")
+                                    if changed:
+                                        sections_list = current_brd.get("sections", [])
+                                        has_doc_title = sections_list and ("ai-powered" in (sections_list[0].get("title", "") or "").lower() or "brd" in (sections_list[0].get("title", "") or "").lower())
+                                        idx = sec_num if has_doc_title else sec_num - 1
+                                        sec_title = sections_list[idx].get("title", "Untitled") if idx < len(sections_list) else "Untitled"
+                                        updated_sections_list.append({"number": sec_num, "title": sec_title})
+                            logger.info(f"🌐 EVERYWHERE UPDATE COMPLETE: {len(updated_sections_list)} sections changed, any_section_success={any_section_success}")
+                            if updated_sections_list:
                                 try:
-                                    save_brd_to_s3(brd_id, updated_brd)
-                                    save_brd_text_to_s3(brd_id, updated_brd)
+                                    save_brd_to_s3(brd_id, current_brd)
+                                    save_brd_text_to_s3(brd_id, current_brd)
                                 except Exception as s3_err:
                                     logger.error(f"Failed to save BRD: {s3_err}")
                                     assistant_response = f"Error saving: {str(s3_err)}"
                                 else:
-                                    last_updated_section = section_num
-                                    sections_list = brd_data.get("sections", [])
-                                    has_doc_title = sections_list and ("ai-powered" in (sections_list[0].get("title", "") or "").lower() or "brd" in (sections_list[0].get("title", "") or "").lower())
-                                    idx = section_num if has_doc_title else section_num - 1
-                                    sec_title = sections_list[idx].get("title", "Untitled") if idx < len(sections_list) else "Untitled"
-                                    if "✅" not in assistant_response:
-                                        assistant_response = f"✅ Section '{section_num}. {sec_title}' updated successfully\n\n{assistant_response}"
+                                    sections_str = ", ".join([f"Section {s['number']} ({s['title']})" for s in updated_sections_list])
+                                    assistant_response = f"✅ Updated successfully across the entire BRD.\n\nSections edited: {sections_str}"
+                                    last_updated_section = updated_sections_list[-1]["number"] if updated_sections_list else None
                                     brd_updated = True
+                            else:
+                                if any_section_success:
+                                    assistant_response = "The update was applied to each section but no section contained the text to replace. Please check the wording (e.g. name spelling) and try again."
+                                    logger.info("🌐 EVERYWHERE: No sections had content change; at least one section returned success (possible text not found in any section).")
+                                else:
+                                    assistant_response = "Could not apply the update to any section. The model may have declined to modify content in each section; please try rephrasing or specify a section."
+                                    logger.warning("🌐 EVERYWHERE: No section returned success; possible guardrail or model refusal for all sections.")
                         else:
-                            assistant_response = "Could not determine which section to update. Please specify the section number or name (e.g., 'in section 5' or 'in the Scope section')."
+                            # Single-section update
+                            # Prefer parsed section over last_shown_section when instruction clearly refers to content
+                            # (e.g. "change Robert to Prabhat" -> Stakeholders, not last shown Scope)
+                            section_num = section_in_message or parsed["section_number"]
+                            if not section_num and parsed["section_title"]:
+                                section_num = _find_section_by_title_or_number(brd_data, parsed["section_title"])
+                            if not section_num:
+                                section_num = last_shown_section
+                            max_sec = _get_max_user_section(brd_data)
+                            if section_num and section_num > max_sec:
+                                section_num = parsed["section_number"] or _find_section_by_title_or_number(brd_data, parsed.get("section_title") or "")
+                            if section_num:
+                                logger.info(f"LLM parsed update: section={section_num}, instruction={parsed['update_instruction'][:80]}...")
+                                result = handle_update_section(brd_data, section_num, parsed["update_instruction"], history)
+                                assistant_response = result["message"]
+                                if result["success"]:
+                                    updated_brd = result["updated_brd"]
+                                    try:
+                                        save_brd_to_s3(brd_id, updated_brd)
+                                        save_brd_text_to_s3(brd_id, updated_brd)
+                                    except Exception as s3_err:
+                                        logger.error(f"Failed to save BRD: {s3_err}")
+                                        assistant_response = f"Error saving: {str(s3_err)}"
+                                    else:
+                                        last_updated_section = section_num
+                                        sections_list = brd_data.get("sections", [])
+                                        has_doc_title = sections_list and ("ai-powered" in (sections_list[0].get("title", "") or "").lower() or "brd" in (sections_list[0].get("title", "") or "").lower())
+                                        idx = section_num if has_doc_title else section_num - 1
+                                        sec_title = sections_list[idx].get("title", "Untitled") if idx < len(sections_list) else "Untitled"
+                                        if "✅" not in assistant_response:
+                                            assistant_response = f"✅ Section '{section_num}. {sec_title}' updated successfully\n\n{assistant_response}"
+                                        brd_updated = True
+                            else:
+                                assistant_response = "Could not determine which section to update. Please specify the section number or name (e.g., 'in section 5' or 'in the Scope section')."
 
                     elif parsed["intent"] == "show" and (parsed["section_number"] or parsed["section_title"]):
                         section_num = parsed["section_number"]
@@ -2213,25 +2770,68 @@ def lambda_handler(event, context):
                     instruction = None
                     match = None
                     
-                    # Pattern 1: "update section 4: change sarah to aman" or "update 4: change sarah to aman"
-                    # Use DOTALL flag to match newlines in instruction
-                    match = re.search(r'(?:update|modify|edit)\s+(?:section\s+)?(\d+)[:\s]+(.+)', user_message_clean, re.IGNORECASE | re.DOTALL)
-                    if match:
-                        section_num = int(match.group(1))
-                        instruction = match.group(2).strip()
-                        logger.info(f"Pattern 1 matched: section={section_num}, instruction length={len(instruction)} chars")
+                    # Pattern 0: "change X to Y everywhere" or "replace X with Y in entire document" (all-sections update)
+                    everywhere_handled = False
+                    everywhere_match = re.search(r'(?:change|replace|update|modify|edit)\s+(.+?)\s+(?:to|with)\s+(.+?)(?:\s+everywhere|\s+in\s+(?:the\s+)?(?:entire|whole)\s+document|\s+across\s+all)', user_message_clean, re.IGNORECASE | re.DOTALL)
+                    if everywhere_match:
+                        everywhere_handled = True
+                        old_text = everywhere_match.group(1).strip()
+                        new_text = everywhere_match.group(2).strip()
+                        instruction = f"change {old_text} to {new_text}"
+                        logger.info(f"Pattern 0 (everywhere) matched: instruction={instruction}")
+                        max_sec = _get_max_user_section(brd_data)
+                        updated_sections_list = []
+                        current_brd = brd_data
+                        for sec_num in range(1, max_sec + 1):
+                            arr_idx = _user_section_to_array_index(current_brd, sec_num)
+                            if arr_idx is None:
+                                continue
+                            section_before = json.dumps(current_brd.get("sections", [])[arr_idx], sort_keys=True)
+                            result = handle_update_section(current_brd, sec_num, instruction, history)
+                            if result["success"]:
+                                current_brd = result["updated_brd"]
+                                section_after = json.dumps(current_brd.get("sections", [])[arr_idx], sort_keys=True)
+                                if section_before != section_after:
+                                    sections_list = current_brd.get("sections", [])
+                                    has_doc_title = sections_list and ("ai-powered" in (sections_list[0].get("title", "") or "").lower() or "brd" in (sections_list[0].get("title", "") or "").lower())
+                                    idx = sec_num if has_doc_title else sec_num - 1
+                                    sec_title = sections_list[idx].get("title", "Untitled") if idx < len(sections_list) else "Untitled"
+                                    updated_sections_list.append({"number": sec_num, "title": sec_title})
+                        if updated_sections_list:
+                            try:
+                                save_brd_to_s3(brd_id, current_brd)
+                                save_brd_text_to_s3(brd_id, current_brd)
+                            except Exception as s3_err:
+                                logger.error(f"Failed to save BRD: {s3_err}")
+                                assistant_response = f"Error saving: {str(s3_err)}"
+                            else:
+                                sections_str = ", ".join([f"Section {s['number']} ({s['title']})" for s in updated_sections_list])
+                                assistant_response = f"✅ Updated successfully across the entire BRD.\n\nSections edited: {sections_str}"
+                                last_updated_section = updated_sections_list[-1]["number"] if updated_sections_list else None
+                                brd_updated = True
+                        else:
+                            assistant_response = "Could not apply the update to any section."
                     
-                    # Pattern 1b: "update section stakeholders: change sarah to aman" (section by title)
-                    if not match:
-                        match = re.search(r'(?:update|modify|edit)\s+section\s+([a-zA-Z\s]+?)[:\s]+(.+)', user_message_clean, re.IGNORECASE | re.DOTALL)
+                    if not everywhere_handled:
+                        # Pattern 1: "update section 4: change sarah to aman" or "update 4: change sarah to aman"
+                        if not match:
+                            match = re.search(r'(?:update|modify|edit)\s+(?:section\s+)?(\d+)[:\s]+(.+)', user_message_clean, re.IGNORECASE | re.DOTALL)
+                        if match and isinstance(match, re.Match):
+                            section_num = int(match.group(1))
+                            instruction = match.group(2).strip()
+                            logger.info(f"Pattern 1 matched: section={section_num}, instruction length={len(instruction)} chars")
+                        
+                        # Pattern 1b: "update section stakeholders: change sarah to aman" (section by title)
+                        if not match:
+                            match = re.search(r'(?:update|modify|edit)\s+section\s+([a-zA-Z\s]+?)[:\s]+(.+)', user_message_clean, re.IGNORECASE | re.DOTALL)
                         if match:
                             section_title = match.group(1).strip()
                             instruction = match.group(2).strip()
                             logger.info(f"Pattern 1b matched: section_title={section_title}, instruction length={len(instruction)} chars")
-                    
-                    # Pattern 2: "update section 4 sarah to aman" or "update 4 sarah to aman" (no colon, direct)
-                    if not match:
-                        match = re.search(r'(?:update|modify|edit)\s+(?:section\s+)?(\d+)\s+(.+)', user_message_clean, re.IGNORECASE | re.DOTALL)
+                        
+                        # Pattern 2: "update section 4 sarah to aman" or "update 4 sarah to aman" (no colon, direct)
+                        if not match:
+                            match = re.search(r'(?:update|modify|edit)\s+(?:section\s+)?(\d+)\s+(.+)', user_message_clean, re.IGNORECASE | re.DOTALL)
                         if match:
                             section_num = int(match.group(1))
                             instruction = match.group(2).strip()
@@ -2714,7 +3314,9 @@ If the user is asking about a section they recently viewed or updated, reference
 Please provide a helpful, friendly response."""
 
                     try:
-                        assistant_response = invoke_claude_for_chat(prompt, history)
+                        assistant_response = invoke_claude_for_chat(
+                            prompt, history, guard_content_text=user_message_clean
+                        )
                     except Exception as e:
                         logger.error(f"Error invoking Claude for general question: {e}")
                         assistant_response = f"I understand you're asking: '{user_message_clean}'. Could you be more specific? I can help you list sections, view sections, or update sections in your BRD."

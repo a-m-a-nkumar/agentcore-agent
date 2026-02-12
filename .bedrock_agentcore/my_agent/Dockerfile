@@ -14,8 +14,8 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 
 
+# Use root requirements.txt (note: .bedrock_agentcore/ is excluded by .dockerignore)
 COPY requirements.txt requirements.txt
-# Install from requirements file
 RUN uv pip install -r requirements.txt
 
 
