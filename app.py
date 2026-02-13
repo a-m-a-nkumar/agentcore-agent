@@ -26,6 +26,7 @@ from routers.projects import router as projects_router
 from routers.sessions import router as sessions_router
 from routers.integrations import router as integrations_router
 from routers.sync import router as sync_router
+from routers.jira_generation import router as jira_generation_router
 from routers.orchestration import router as orchestration_router
 
 load_dotenv()
@@ -83,14 +84,15 @@ app.include_router(sessions_router)
 app.include_router(integrations_router)
 app.include_router(sync_router)
 app.include_router(orchestration_router)
+app.include_router(jira_generation_router)
 
 # Add request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all incoming requests for debugging"""
-    if (request.url.path.startswith("/upload-transcript") or 
-        request.url.path.startswith("/chat") or 
-        request.url.path.startswith("/analyst-chat")):
+    if (request.url.path.startswith("/api/upload-transcript") or 
+        request.url.path.startswith("/api/chat") or 
+        request.url.path.startswith("/api/analyst-chat")):
         auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
         print(f"\n[REQUEST] {request.method} {request.url.path}")
         print(f"[REQUEST] Authorization header present: {bool(auth_header)}")
@@ -834,7 +836,7 @@ async def generate_brd(
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
 
-@app.post("/upload-transcript")
+@app.post("/api/upload-transcript")
 async def upload_transcript_to_s3(
     request: Request,
     transcript: UploadFile = File(...),
@@ -888,7 +890,7 @@ async def upload_transcript_to_s3(
             "message": f"Failed to upload transcript to S3: {error_msg}"
         })
 
-@app.post("/generate-from-s3")
+@app.post("/api/generate-from-s3")
 async def generate_brd_from_s3(
     transcript_s3_path: str = Form(...),
     current_user: dict = Depends(get_current_user)
@@ -1059,7 +1061,7 @@ async def generate_brd_from_s3(
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
 
-@app.post("/chat")
+@app.post("/api/chat")
 async def chat_with_agent(
     message: str = Form(...),
     brd_id: str = Form(...),
@@ -1316,7 +1318,7 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
     
     return None, None
 
-@app.post("/analyst-chat")
+@app.post("/api/analyst-chat")
 async def analyst_chat(
     message: str = Form(...),
     session_id: str = Form(...),
@@ -1749,7 +1751,7 @@ async def analyst_chat(
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
 
-@app.get("/analyst-history/{session_id}")
+@app.get("/api/analyst-history/{session_id}")
 async def get_analyst_history(
     session_id: str,
     current_user: dict = Depends(get_current_user)
@@ -1826,7 +1828,7 @@ async def get_analyst_history(
         })
 
 
-@app.post("/analyst-generate-brd")
+@app.post("/api/analyst-generate-brd")
 async def analyst_generate_brd(
     session_id: str = Form(...),
     current_user: dict = Depends(get_current_user)
@@ -2040,7 +2042,7 @@ async def analyst_generate_brd(
             "type": "UnknownError"
         })
 
-@app.post("/analyst-generate-brd")
+@app.post("/api/analyst-generate-brd")
 async def analyst_generate_brd(
     session_id: str = Form(...),
     current_user: dict = Depends(get_current_user)
@@ -2285,7 +2287,7 @@ async def analyst_generate_brd(
             "type": "UnknownError"
         })
 
-@app.post("/analyst-generate-brd")
+@app.post("/api/analyst-generate-brd")
 async def analyst_generate_brd(
     session_id: str = Form(...),
     current_user: dict = Depends(get_current_user)
@@ -2551,7 +2553,7 @@ async def analyst_generate_brd(
             "type": "UnknownError"
         })
 
-@app.get("/download-brd/{brd_id}")
+@app.get("/api/download-brd/{brd_id}")
 async def download_brd(
     brd_id: str,
     current_user: dict = Depends(get_current_user)
@@ -2796,7 +2798,7 @@ async def download_brd(
 # Analyst History Endpoint
 # -------------------------
 
-@app.get("/analyst-history/{session_id}")
+@app.get("/api/analyst-history/{session_id}")
 async def get_analyst_history(session_id: str, current_user: dict = Depends(get_current_user)):
     """Get conversation history for analyst agent session"""
     try:

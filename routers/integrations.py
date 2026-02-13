@@ -2,12 +2,17 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 import logging
+import boto3
+import json
+import os
+from datetime import datetime
 
 from auth import verify_azure_token
 from db_helper import (
     update_user_atlassian_credentials,
     get_user_atlassian_credentials,
-    create_or_update_user
+    create_or_update_user,
+    get_project
 )
 from services.jira_service import JiraService
 from services.confluence_service import ConfluenceService
@@ -50,6 +55,12 @@ class LinkAtlassianRequest(BaseModel):
     domain: str = Field(..., description="Atlassian domain (e.g., mycompany.atlassian.net)")
     email: str = Field(..., description="Email address")
     api_token: str = Field(..., description="Atlassian API token")
+
+
+class UploadBRDToConfluenceRequest(BaseModel):
+    brd_id: str = Field(..., description="BRD ID to upload")
+    project_id: str = Field(..., description="Project ID")
+    page_title: Optional[str] = Field(None, description="Custom page title (optional)")
 
 
 @router.post("/atlassian/link")
@@ -218,4 +229,130 @@ async def get_jira_issues(
     except Exception as e:
         logger.error(f"Error fetching Jira issues for project {project_key}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/confluence/upload-brd")
+async def upload_brd_to_confluence(
+    request: UploadBRDToConfluenceRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Upload BRD from S3 to Confluence
+    
+    Creates a new Confluence page with the BRD content from S3.
+    The page will be created in the Confluence space linked to the project.
+    
+    Args:
+        request: Contains brd_id and project_id
+        
+    Returns:
+        Confluence page details including page ID and web URL
+    """
+    logger.info(f"Uploading BRD {request.brd_id} to Confluence for project {request.project_id}")
+    
+    # 1. Get user's Atlassian credentials
+    credentials = get_user_atlassian_credentials(current_user['id'])
+    
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first."
+        )
+    
+    # 2. Get project to find Confluence space key
+    project = get_project(request.project_id)
+    
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    
+    if not project.get('confluence_space_key'):
+        raise HTTPException(
+            status_code=400,
+            detail="No Confluence space linked to this project. Please link a Confluence space in project settings."
+        )
+    
+    confluence_space_key = project['confluence_space_key']
+    
+    # 3. Fetch BRD from S3
+    try:
+        s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        bucket_name = os.getenv('S3_BUCKET_NAME', 'test-development-bucket-siriusai')
+        
+        # Try to fetch JSON structure first
+        json_key = f"brds/{request.brd_id}/brd_structure.json"
+        
+        try:
+            logger.info(f"Fetching BRD from S3: s3://{bucket_name}/{json_key}")
+            response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+            brd_json = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info(f"Successfully loaded BRD JSON with {len(brd_json.get('sections', []))} sections")
+        except Exception as e:
+            logger.warning(f"Could not load JSON structure: {e}. Trying text format...")
+            # Fallback to text format
+            txt_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.txt"
+            response = s3_client.get_object(Bucket=bucket_name, Key=txt_key)
+            brd_text = response['Body'].read().decode('utf-8')
+            # Convert text to simple structure
+            brd_json = {
+                "sections": [{
+                    "title": "Business Requirements Document",
+                    "content": [{"type": "paragraph", "text": brd_text}]
+                }]
+            }
+    
+    except Exception as e:
+        logger.error(f"Error fetching BRD from S3: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to fetch BRD from S3: {str(e)}"
+        )
+    
+    # 4. Convert BRD to Confluence format
+    try:
+        confluence_service = ConfluenceService(
+            credentials['atlassian_domain'],
+            credentials['atlassian_email'],
+            credentials['atlassian_api_token']
+        )
+        
+        # Convert BRD JSON to Confluence storage format
+        confluence_content = confluence_service.convert_brd_to_confluence_storage(brd_json)
+        
+        # Generate page title
+        if request.page_title:
+            page_title = request.page_title
+        else:
+            # Use project name + timestamp
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            page_title = f"BRD - {project.get('project_name', 'Untitled')} - {timestamp}"
+        
+        logger.info(f"Creating Confluence page: '{page_title}' in space '{confluence_space_key}'")
+        
+        # 5. Create Confluence page
+        page_result = confluence_service.create_page(
+            space_key=confluence_space_key,
+            title=page_title,
+            content=confluence_content
+        )
+        
+        logger.info(f"Successfully created Confluence page: {page_result['web_url']}")
+        
+        return {
+            "status": "success",
+            "message": "BRD uploaded to Confluence successfully",
+            "confluence_page": {
+                "id": page_result['id'],
+                "title": page_result['title'],
+                "web_url": page_result['web_url'],
+                "space_key": confluence_space_key
+            }
+        }
+    
+    except Exception as e:
+        logger.error(f"Error creating Confluence page: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create Confluence page: {str(e)}"
+        )
+
 
