@@ -103,6 +103,7 @@ class JiraService:
             "updated",
             "labels",
             "customfield_10016",  # Story points (common field ID)
+            "parent",  # Parent epic for stories
         ]
         
         jql = f"project = {project_key} ORDER BY created DESC"
@@ -159,6 +160,110 @@ class JiraService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Jira issues: {e}")
             raise Exception(f"Failed to fetch Jira issues: {str(e)}")
+    
+    def get_project_issue_types(self, project_key: str) -> List[Dict]:
+        """
+        Fetch available issue types for a specific project
+        
+        Args:
+            project_key: The Jira project key (e.g., 'PROJ')
+            
+        Returns:
+            List of issue types with id, name, and other metadata
+        """
+        try:
+            # First get the project details to get the project ID
+            url = f"{self.base_url}/rest/api/3/project/{project_key}"
+            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=15)
+            response.raise_for_status()
+            
+            project_data = response.json()
+            project_id = project_data.get('id')
+            
+            # Now get issue types for this project
+            url = f"{self.base_url}/rest/api/3/issuetype/project"
+            params = {"projectId": project_id}
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+            response.raise_for_status()
+            
+            issue_types = response.json()
+            logger.info(f"Found {len(issue_types)} issue types for project {project_key}")
+            
+            return issue_types
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching issue types for project {project_key}: {e}")
+            raise Exception(f"Failed to fetch issue types: {str(e)}")
+    
+    def get_issue_type_id(self, project_key: str, issue_type_name: str) -> Optional[str]:
+        """
+        Get the issue type ID for a specific issue type name
+        
+        Args:
+            project_key: The Jira project key
+            issue_type_name: Name of the issue type (e.g., 'Epic', 'Story', 'Task')
+            
+        Returns:
+            Issue type ID or None if not found
+        """
+        try:
+            issue_types = self.get_project_issue_types(project_key)
+            
+            for issue_type in issue_types:
+                if issue_type.get('name', '').lower() == issue_type_name.lower():
+                    return issue_type.get('id')
+            
+            logger.warning(f"Issue type '{issue_type_name}' not found in project {project_key}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error getting issue type ID: {e}")
+            return None
+    
+    def create_issue(self, issue_data: Dict) -> Dict:
+        """
+        Create a new issue in Jira
+        
+        Args:
+            issue_data: Issue data including fields like summary, description, issuetype, etc.
+            
+        Returns:
+            Created issue data with key and id
+        """
+        try:
+            url = f"{self.base_url}/rest/api/3/issue"
+            
+            logger.info(f"Creating Jira issue: {issue_data.get('fields', {}).get('summary', 'Unknown')}")
+            
+            response = requests.post(
+                url,
+                json=issue_data,
+                headers=self.headers,
+                auth=self.auth,
+                timeout=30
+            )
+            
+            if response.status_code == 400:
+                error_data = response.json()
+                error_messages = error_data.get('errors', {})
+                logger.error(f"Jira validation error: {error_messages}")
+                raise Exception(f"Invalid issue data: {error_messages}")
+            
+            response.raise_for_status()
+            
+            result = response.json()
+            logger.info(f"Created Jira issue: {result.get('key')}")
+            
+            return result
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error creating Jira issue: {e}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Response: {e.response.text}")
+            raise Exception(f"Failed to create Jira issue: {str(e)}")
+
+
+
 
 
 
