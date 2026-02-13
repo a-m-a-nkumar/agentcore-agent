@@ -7,6 +7,7 @@ import json
 import os
 import re
 from html import unescape
+from botocore.config import Config
 
 from auth import verify_azure_token
 from db_helper import (
@@ -23,6 +24,8 @@ logger = logging.getLogger(__name__)
 # Bedrock configuration
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+# Timeout for invoke_model (seconds). Large BRDs can take 2–5+ minutes; default 60 often too low.
+BEDROCK_READ_TIMEOUT = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))
 
 
 # ============================================
@@ -102,8 +105,13 @@ def strip_html_tags(html_content: str) -> str:
 
 
 def _get_bedrock_client():
-    """Get Bedrock runtime client"""
-    return boto3.client('bedrock-runtime', region_name=AWS_REGION)
+    """Get Bedrock runtime client with extended read timeout for large BRD generation."""
+    config = Config(
+        read_timeout=BEDROCK_READ_TIMEOUT,
+        connect_timeout=30,
+        retries={"max_attempts": 2, "mode": "standard"},
+    )
+    return boto3.client("bedrock-runtime", region_name=AWS_REGION, config=config)
 
 
 def convert_to_adf(text: str) -> Dict:
@@ -284,7 +292,7 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
         # Prepare request for Claude with increased token limit
         request_body = {
             "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 16000,  # Increased from 8000 to handle comprehensive BRDs
+            "max_tokens": 75000,  # Increased from 8000 to handle comprehensive BRDs
             "temperature": 0.3,
             "messages": [
                 {

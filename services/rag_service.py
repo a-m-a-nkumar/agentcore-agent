@@ -5,7 +5,7 @@ Combines semantic search with LLM responses for intelligent Q&A
 
 import json
 import boto3
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from services.search_service import search_service
 from langfuse_client import get_langfuse
 import os
