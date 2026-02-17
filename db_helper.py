@@ -32,6 +32,7 @@ def get_db_pool():
                 database=os.getenv("DATABASE_NAME"),
                 user=os.getenv("DATABASE_USER"),
                 password=os.getenv("DATABASE_PASSWORD"),
+                sslmode="require"
             )
             logger.info("Database connection pool initialized")
         except Exception as e:
