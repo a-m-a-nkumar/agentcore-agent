@@ -1,0 +1,30 @@
+{
+  "inputSet": {
+    "name": "Build_Python_Lambda_Inputset",
+    "identifier": "Build_Python_Lambda_Inputset",
+    "orgIdentifier": "Tools",
+    "projectIdentifier": "SDLCOR",
+    "pipeline": {
+      "identifier": "sdlc_python_fastapi_backend_CI_Pipeline",
+      "properties": {
+        "ci": {
+          "codebase": {
+            "build": {
+              "type": "branch",
+              "spec": {
+                "branch": "develop",
+                "variables": [
+                  {
+                    "name": "replicas",
+                    "type": "String",
+                    "value": "3"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
