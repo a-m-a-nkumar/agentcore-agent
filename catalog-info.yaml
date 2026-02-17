@@ -1,0 +1,43 @@
+# Component definition
+apiVersion: harness.io/v1
+kind: Component
+type: service
+name: sdlc_python_fastapi_backend
+identifier: sdlc_python_fastapi_backend
+owner: harness_sdlcor_devops
+projectIdentifier: SDLCOR
+orgIdentifier: Tools
+system: SDLC_Orchestration
+spec:
+  lifecycle: experimental
+  system:
+    - system:account.Tools.SDLCOR/SDLC_Orchestration
+  providesApis:
+    - python-lambda-api
+  consumesApis:
+    - python-lambda-api
+  sourceCode:
+    provider: Bitbucket
+    repoName: sdlc_python_fastapi_backend
+    connectorRef: account.BitbucketCloudHarnessCI2Connector
+    branch: develop
+    monoRepo: false
+    url: https://bitbucket.org/deluxe-development/sdlc_python_fastapi_backend/src/develop
+metadata:
+  name: "sdlc_python_fastapi_backend"
+  description: "A standardized Python Lambda Template"
+  tags:
+    - nodejs
+    - lambda
+    - python
+  annotations:
+    harness.io/sto-test-target:
+      - name: sdlc_python_fastapi_backend
+        scope: Tools.SDLCOR
+        variant: develop
+    backstage.io/source-location: url:https://bitbucket.org/deluxe-development/sdlc_python_fastapi_backend/src/develop/
+    bitbucket.org/project-slug: "deluxe-development/sdlc_python_fastapi_backend"
+    backstage.io/techdocs-ref: dir:.
+    sonarqube.org/project-key: SDLCOR-sdlc_python_fastapi_backend
+    harness.io/pipelines: |
+      sdlc_python_fastapi_backend_CI_Pipeline: https://app.harness.io/ng/account/PJouQ0w0S4Cr8nIfe4jHPw/all/orgs/Tools/projects/SDLCOR/pipelines/sdlc_python_fastapi_backend_CI_Pipeline/pipeline-studio/?storeType=REMOTE&connectorRef=account.BitbucketCloudHarnessCI0Connector&repoName=sdlc_python_fastapi_backend&branch=develop

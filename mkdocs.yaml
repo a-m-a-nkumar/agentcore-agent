@@ -1,0 +1,8 @@
+site_name: sdlc_python_fastapi_backend
+site_description: Python Lambda application.
+
+nav:
+  - Introduction: index.md
+
+plugins:
+  - techdocs-core
