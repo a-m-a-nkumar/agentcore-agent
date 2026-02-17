@@ -196,7 +196,9 @@ class RAGService:
             # Step 4: Build prompt
             prompt = self._build_rag_prompt(user_query, context_chunks)
             
-            # Step 5: Stream LLM response (with Langfuse generation span)
+
+
+            # Step 5: Stream LLM response
             logger.info("Streaming LLM response...")
             accumulated_output: List[str] = []
             with langfuse.start_as_current_observation(
@@ -228,6 +230,76 @@ class RAGService:
                 'message': f'An error occurred: {str(e)}'
             }
     
+    async def get_enhanced_prompt(
+        self,
+        project_id: str,
+        user_query: str,
+        max_chunks: int = 5,
+        source_filter: Optional[str] = None
+    ) -> str:
+        """
+        Retrieve context and build an enhanced prompt for IDE use (MCP)
+        Does NOT call the LLM, just returns the prompt string.
+        """
+        try:
+            # 1. Search
+            results = self.semantic_search(
+                project_id=project_id,
+                query=user_query,
+                limit=max_chunks,
+                source_type=source_filter,
+                include_context=True
+            )
+            
+            if not results:
+                return f"No relevant documentation found for: {user_query}"
+            
+            # 2. Format context
+            context_chunks = []
+            for result in results:
+                context_chunks.append({
+                    'source': f"[{result['source_type'].capitalize()}] {result['title']}",
+                    'content': result['content']
+                })
+            
+            # 3. Build optimized prompt for IDE
+            context_text = ""
+            for i, chunk in enumerate(context_chunks, 1):
+                context_text += f"\n<source_{i}>\nTitle: {chunk['source']}\nContent:\n{chunk['content']}\n</source_{i}>\n"
+            
+            # 4. Ask Claude to generate the Perfect Prompt
+            meta_prompt = f"""You are an expert AI prompt engineer. Your goal is to create a highly optimized prompt for an AI coding assistant.
+
+I will provide you with:
+1. A User Request (what the developer wants to do)
+2. Relevant Context from documentation (Confluence/Jira)
+
+Your task:
+Write a new, comprehensive prompt that I can send to the AI coding assistant. 
+- The prompt should explicitly incorporate the relevant information from the context.
+- It should be clear, step-by-step, and specific.
+- Do NOT answer the user request yourself. Just write the PROMPT for the AI to answer it.
+- Start directly with the prompt text. Do not add "Here is the prompt:" or similar meta-talk.
+
+User Request: {user_query}
+
+Relevant Context:
+{context_text}
+
+Optimized Prompt:"""
+
+            # 5. Call LLM to generate the prompt
+            generated_prompt = ""
+            async for chunk in self._stream_claude_response(meta_prompt):
+                if chunk['type'] == 'chunk':
+                    generated_prompt += chunk['content']
+            
+            return generated_prompt if generated_prompt else f"Error: Failed to generate prompt from context."
+
+        except Exception as e:
+            logger.error(f"Error building enhanced prompt: {e}")
+            return f"Error retrieving context: {str(e)}"
+
     def _build_rag_prompt(self, query: str, context_chunks: List[Dict]) -> str:
         """Build prompt for Claude with context"""
         

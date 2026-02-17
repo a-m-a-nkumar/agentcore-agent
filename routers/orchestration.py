@@ -2,7 +2,7 @@
 Orchestration Router - RAG-based question answering endpoints
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Header
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
@@ -12,6 +12,7 @@ from db_helper import create_or_update_user
 from langfuse_client import get_langfuse
 import logging
 import json
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ class QueryRequest(BaseModel):
     max_chunks: Optional[int] = 5
     source_filter: Optional[str] = None  # 'confluence' or 'jira'
     include_context: Optional[bool] = True  # Include chunk ±1
+    return_prompt: Optional[bool] = False  # If True, returns compiled prompt instead of LLM answer
 
 
 # ============================================
@@ -139,3 +141,85 @@ async def query_documentation(
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "service": "orchestration"}
+
+
+# ============================================
+# INTERNAL ENDPOINTS (MCP)
+# ============================================
+
+@router.post("/query-internal")
+async def query_internal(
+    request: QueryRequest,
+    x_api_key: str = Header(alias="X-API-Key")
+):
+    """
+    Internal endpoint for MCP or other backend tools
+    Bypasses Azure AD, uses API Key validation
+    """
+    
+    # 1. Validate API Key
+    internal_keys_str = os.environ.get("INTERNAL_API_KEYS", "{}")
+    try:
+        valid_keys = json.loads(internal_keys_str)
+    except json.JSONDecodeError:
+        logger.error("Failed to parse INTERNAL_API_KEYS from env")
+        valid_keys = {}
+        
+    if x_api_key not in valid_keys:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+        
+    # 2. Call RAG Service
+    async def generate_sse():
+        """Generate Server-Sent Events stream"""
+        try:
+            # OPTION A: RETURN PROMPT ONLY (for MCP/IDE)
+            if request.return_prompt:
+                print(f"[ORCHESTRATION] Received MCP enhancement request for project: {request.project_id}")
+                print(f"[ORCHESTRATION] User Query: {request.query}")
+                print("[ORCHESTRATION] Generating enhanced prompt context...")
+                
+                # Fetch RAG context and build the prompt
+                enhanced_prompt = await rag_service.get_enhanced_prompt(
+                    project_id=request.project_id,
+                    user_query=request.query,
+                    max_chunks=request.max_chunks,
+                    source_filter=request.source_filter
+                )
+                
+                print(f"[ORCHESTRATION] Constructed enhanced prompt ({len(enhanced_prompt)} chars).")
+                print(f"[ORCHESTRATION] Sending response to MCP client...")
+
+                # Send single event with the full prompt
+                yield f"data: {json.dumps({'type': 'enhanced_prompt', 'content': enhanced_prompt})}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                print(f"[ORCHESTRATION] Response sent.")
+                return
+
+            # OPTION B: STANDARD RAG ANSWER STREAM
+            async for event in rag_service.query_with_rag(
+                project_id=request.project_id,
+                user_query=request.query,
+                max_chunks=request.max_chunks,
+                source_filter=request.source_filter,
+                include_context=request.include_context
+            ):
+                # Send event as SSE
+                yield f"data: {json.dumps(event)}\n\n"
+        
+        except Exception as e:
+            logger.error(f"Error in SSE stream: {e}")
+            error_event = {
+                'type': 'error',
+                'message': str(e)
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
