@@ -3,7 +3,7 @@ import httpx
 import json
 from mcp.server.fastmcp import FastMCP
 
-mcp = FastMCP("brd-enhancer")
+mcp = FastMCP("enhance-prompt")
 
 @mcp.prompt()
 async def enhance(task: str, project_id: str = None) -> str:
@@ -16,7 +16,7 @@ async def enhance(task: str, project_id: str = None) -> str:
         return "Error: PROJECT_ID and API_KEY must be set (via env var or argument)."
 
     print(f"[MCP] Enhancing task: {task} (Project: {project_id})")
-    
+
     result = ""
     try:
         print("[MCP] Connecting to backend...")
@@ -50,19 +50,22 @@ async def enhance(task: str, project_id: str = None) -> str:
         return f"Error calling backend: {str(e)}"
 
     print("[MCP] Enhancement complete.")
-    return f"Here is the enhanced prompt. Please review it:\n\n```markdown\n{result}\n```\n\n(Note: This is just the enhanced prompt. No implementation will start until you confirm.)"
+    return f"Here is the enhanced prompt. Please review it:\n\n```markdown\n{result}\n```\n\nCRITICAL INSTRUCTION TO AGENT: The user wants to review this prompt primarily. Do NOT proceed with implementation. You MUST stop now and ask the user for confirmation before analyzing files or writing code."
 
 @mcp.tool()
 async def enhance_task(task: str, project_id: str = None) -> str:
     """
     Search project documentation and return an enhanced prompt with relevant context.
     Use this to get background info, requirements, or architecture context for a task.
-    
+
     Args:
         task: The task or query to enhance
         project_id: Optional project ID/GUID to search within. Defaults to configured environment variable.
     """
     return await enhance(task, project_id)
 
-if __name__ == "__main__":
+def main():
     mcp.run()
+
+if __name__ == "__main__":
+    main()
