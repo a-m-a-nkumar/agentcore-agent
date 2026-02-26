@@ -5,7 +5,6 @@ import uuid
 from typing import Any, Dict, Optional
 
 import boto3
-from botocore.config import Config
 
 # Import prompt templates from separate module
 from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig
@@ -16,8 +15,6 @@ logger.setLevel(logging.INFO)
 
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 BEDROCK_REGION = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION", "us-east-1")
-BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
-BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
 # Claude Sonnet 4.5 has 200K token context window TOTAL (input + output)
 # Reserve ~50K tokens for prompt (instructions + template + transcript)
 # This leaves ~150K tokens for generation
@@ -31,13 +28,7 @@ _bedrock_runtime = None
 def _get_bedrock_client():
     global _bedrock_runtime
     if _bedrock_runtime is None:
-        # Increase read timeout for long BRD generations (Claude Sonnet 4.5 can take longer)
-        bedrock_config = Config(
-            region_name=BEDROCK_REGION,
-            read_timeout=180,
-            connect_timeout=10,
-        )
-        _bedrock_runtime = boto3.client("bedrock-runtime", config=bedrock_config)
+        _bedrock_runtime = boto3.client("bedrock-runtime", region_name=BEDROCK_REGION)
     return _bedrock_runtime
 
 
@@ -283,20 +274,19 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None) -> str:
         # Use converse() API which supports inference profiles
         logger.info("Using converse() API for Anthropic model")
         
-        converse_kwargs = {
-            "modelId": model_id,
-            "messages": [
+        response = client.converse(
+            modelId=model_id,
+            messages=[
                 {
                     "role": "user",
                     "content": [{"text": prompt}],
                 }
             ],
-            "inferenceConfig": {
+            inferenceConfig={
                 "maxTokens": effective_max_tokens,
                 "temperature": TEMPERATURE,
             }
-        }
-        response = client.converse(**converse_kwargs)
+        )
 
         # Log the response structure
         logger.info(f"Response keys: {list(response.keys())}")
@@ -689,14 +679,11 @@ def lambda_handler(event, context):
     # Build final prompt using the separated prompt template function
     prompt = get_full_brd_generation_prompt(template_text, transcript_text)
 
-    # Calculate dynamic max tokens based on actual prompt length.
-    # Recalculate after truncation to get accurate estimate.
-    # Use PromptConfig.TOTAL_CONTEXT_TOKENS so this stays aligned with the model's context.
+    # Calculate dynamic max tokens based on actual prompt length
+    # Recalculate after truncation to get accurate estimate
     estimated_prompt_tokens = (instructions_tokens + template_tokens + transcript_tokens)
-    total_context = PromptConfig.TOTAL_CONTEXT_TOKENS
-    # Separate safety margin for output-side calculations (in addition to PromptConfig.SAFETY_MARGIN_TOKENS
-    # which is used on the input side).
-    safety_margin = 3_000
+    total_context = 8192
+    safety_margin = 300  # Increased safety margin for Llama
     available_output_tokens = total_context - estimated_prompt_tokens - safety_margin
     
     # Use the smaller of: available tokens or configured MAX_TOKENS

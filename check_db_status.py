@@ -16,7 +16,7 @@ db_config = {
     'port': '5432',
     'database': 'postgres',
     'user': 'postgres',
-    'password': os.getenv('DATABASE_PASSWORD', 'AE3GD)[GXe-OWqRuDyw4k8:bl5s$'),
+    'password': os.getenv('DATABASE_PASSWORD', ']S7]_qph(k(GNiM9oGU>EXKuUQz$'),
     'connect_timeout': 10
 }
 

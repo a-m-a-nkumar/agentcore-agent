@@ -26,8 +26,6 @@ AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
 S3_BUCKET = os.getenv('S3_BUCKET_NAME', 'test-development-bucket-siriusai')
 TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template_v2+2.docx'
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
-BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
-BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
 MAX_TOKENS = 8192
 TEMPERATURE = 0.0
 
@@ -177,25 +175,19 @@ def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     logger.info(f"Model: {BEDROCK_MODEL_ID}, Max tokens: {MAX_TOKENS}")
     
     try:
-        converse_kwargs = {
-            "modelId": BEDROCK_MODEL_ID,
-            "messages": [
+        response = bedrock.converse(
+            modelId=BEDROCK_MODEL_ID,
+            messages=[
                 {
                     "role": "user",
                     "content": [{"text": prompt}]
                 }
             ],
-            "inferenceConfig": {
+            inferenceConfig={
                 "maxTokens": MAX_TOKENS,
                 "temperature": TEMPERATURE
             }
-        }
-        if BEDROCK_GUARDRAIL_ARN:
-            converse_kwargs["guardrailConfig"] = {
-                "guardrailIdentifier": BEDROCK_GUARDRAIL_ARN,
-                "guardrailVersion": BEDROCK_GUARDRAIL_VERSION,
-            }
-        response = bedrock.converse(**converse_kwargs)
+        )
         
         # Extract generated BRD text
         output = response.get("output", {})
