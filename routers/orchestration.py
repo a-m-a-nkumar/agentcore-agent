@@ -97,6 +97,19 @@ async def query_documentation(
                     input={"query_preview": trace_metadata["user_query_preview"], "project_id": request.project_id},
                     metadata=trace_meta,
                 ) as root_span:
+                    # OPTION A: RETURN PROMPT ONLY (for Generate Code button)
+                    if request.return_prompt:
+                        enhanced_prompt = await rag_service.get_enhanced_prompt(
+                            project_id=request.project_id,
+                            user_query=request.query,
+                            max_chunks=request.max_chunks,
+                            source_filter=request.source_filter
+                        )
+                        yield f"data: {json.dumps({'type': 'enhanced_prompt', 'content': enhanced_prompt})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+
+                    # OPTION B: STANDARD RAG ANSWER STREAM
                     async for event in rag_service.query_with_rag(
                         project_id=request.project_id,
                         user_query=request.query,

@@ -243,7 +243,7 @@ class RAGService:
         """
         try:
             # 1. Search
-            results = self.semantic_search(
+            results = search_service.semantic_search(
                 project_id=project_id,
                 query=user_query,
                 limit=max_chunks,

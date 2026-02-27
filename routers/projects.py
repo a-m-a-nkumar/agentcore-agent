@@ -17,7 +17,9 @@ from db_helper import (
     get_project,
     update_project,
     delete_project,
-    create_or_update_user
+    create_or_update_user,
+    save_project_brd_session,
+    get_project_brd_session
 )
 
 # Import authentication from auth.py - assuming app run from root
@@ -46,6 +48,12 @@ class ProjectUpdate(BaseModel):
     description: Optional[str] = None
     jira_project_key: Optional[str] = None
     confluence_space_key: Optional[str] = None
+
+
+class BrdSessionUpdate(BaseModel):
+    brd_id: Optional[str] = None
+    session_id: Optional[str] = None
+    brd_content: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -252,3 +260,70 @@ async def delete_project_by_id(
         traceback.print_exc()
         logger.error(f"Error deleting project: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete project: {str(e)}")
+
+
+# ============================================
+# BRD SESSION PERSISTENCE
+# ============================================
+
+@router.get("/{project_id}/brd-session")
+async def get_brd_session(
+    project_id: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Get saved BRD session (brd_id + agentcore_session_id) for a project.
+    Returns null fields if no session exists yet.
+    """
+    try:
+        # Verify project exists and user owns it
+        existing_project = get_project(project_id)
+        if not existing_project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if existing_project["user_id"] != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        session_data = get_project_brd_session(project_id)
+        if session_data:
+            return {
+                "brd_id": session_data.get("brd_id"),
+                "session_id": session_data.get("agentcore_session_id"),
+                "brd_content": session_data.get("brd_content")
+            }
+        return {"brd_id": None, "session_id": None, "brd_content": None}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching BRD session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch BRD session")
+
+
+@router.put("/{project_id}/brd-session")
+async def save_brd_session(
+    project_id: str,
+    data: BrdSessionUpdate,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Save/update BRD session (brd_id + session_id) for a project.
+    """
+    try:
+        # Verify project exists and user owns it
+        existing_project = get_project(project_id)
+        if not existing_project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        if existing_project["user_id"] != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Not authorized")
+
+        save_project_brd_session(
+            project_id=project_id,
+            brd_id=data.brd_id,
+            agentcore_session_id=data.session_id,
+            brd_content=data.brd_content
+        )
+        return {"status": "ok", "project_id": project_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error saving BRD session: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save BRD session")

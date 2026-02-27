@@ -35,20 +35,32 @@ class ConfluenceService:
     def get_spaces(self) -> List[Dict]:
         """
         Fetch all accessible Confluence spaces
-        
+
         Returns:
             List of spaces with key, name, id, and type
         """
         try:
             url = f"{self.base_url}/rest/api/space"
-            params = {"limit": 100}
-            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
-            response.raise_for_status()
-            
-            data = response.json()
-            spaces = data.get("results", [])
-            
-            # Return simplified space list
+            all_spaces = []
+            start = 0
+            limit = 100
+
+            # Paginate through all results
+            while True:
+                params = {"limit": limit, "start": start}
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+                response.raise_for_status()
+
+                data = response.json()
+                batch = data.get("results", [])
+                all_spaces.extend(batch)
+
+                # Stop if we've received fewer results than the limit (last page)
+                if len(batch) < limit:
+                    break
+                start += limit
+
+            # Filter out personal spaces (keys starting with ~) — keep all real team spaces
             return [
                 {
                     "key": space["key"],
@@ -56,7 +68,8 @@ class ConfluenceService:
                     "id": space["id"],
                     "type": space.get("type", "global")
                 }
-                for space in spaces
+                for space in all_spaces
+                if not space["key"].startswith("~")
             ]
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Confluence spaces: {e}")
@@ -84,7 +97,37 @@ class ConfluenceService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Confluence pages: {e}")
             raise Exception(f"Failed to fetch Confluence pages: {str(e)}")
-    
+
+    def get_content_pages(self, space_key: str, limit: int = 100) -> List[Dict]:
+        """
+        Fetch pages from a space using Content API (same shape as frontend expects).
+        GET /rest/api/content?spaceKey=X&type=page&limit=N
+        """
+        try:
+            url = f"{self.base_url}/rest/api/content"
+            params = {"spaceKey": space_key, "type": "page", "limit": limit}
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("results", [])
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching Confluence content pages: {e}")
+            raise Exception(f"Failed to fetch Confluence pages: {str(e)}")
+
+    def get_content_page_by_id(self, page_id: str, expand: str = "body.storage,version,ancestors") -> Dict:
+        """
+        Get a single page by ID with optional expand (same shape as Confluence REST API).
+        """
+        try:
+            url = f"{self.base_url}/rest/api/content/{page_id}"
+            params = {"expand": expand}
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching Confluence page {page_id}: {e}")
+            raise Exception(f"Failed to fetch Confluence page: {str(e)}")
+
     def convert_brd_to_confluence_storage(self, brd_data: Dict) -> str:
         """
         Convert BRD JSON structure to Confluence storage format (HTML-like)

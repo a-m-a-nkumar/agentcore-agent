@@ -189,6 +189,61 @@ async def list_confluence_spaces(current_user: dict = Depends(get_current_user))
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/confluence/pages")
+async def list_confluence_pages(
+    space_key: str = "SO",
+    limit: int = 100,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List pages in a Confluence space using the current user's linked Atlassian credentials.
+    Replaces frontend calling /confluence-api/ with hardcoded auth.
+    """
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first.",
+        )
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        results = confluence_service.get_content_pages(space_key=space_key, limit=limit)
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Error fetching Confluence pages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/confluence/pages/{page_id}")
+async def get_confluence_page(
+    page_id: str,
+    expand: str = "body.storage,version,ancestors",
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Get a Confluence page by ID using the current user's linked Atlassian credentials.
+    """
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first.",
+        )
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        return confluence_service.get_content_page_by_id(page_id=page_id, expand=expand)
+    except Exception as e:
+        logger.error(f"Error fetching Confluence page {page_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @router.get("/jira/issues/{project_key}")
 async def get_jira_issues(

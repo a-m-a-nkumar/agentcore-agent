@@ -524,12 +524,20 @@ async def create_jira_items(
         logger.error(f"Error fetching issue types: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch issue types: {str(e)}")
     
-    # 4. Create Epics and User Stories
+    # 4. Create Epics and User Stories (only epics that have at least one selected story)
     for epic_data in request.epics:
         epic_id = epic_data.get('epic_id')
-        
+
+        # Skip this epic entirely if none of its stories are selected
+        has_selected_stories = any(
+            s.get('selected', False) for s in epic_data.get('user_stories', [])
+        )
+        if not has_selected_stories:
+            logger.info(f"Skipping Epic '{epic_data.get('title')}' — no stories selected")
+            continue
+
         try:
-            # Create Epic if requested
+            # Create Epic
             if epic_data.get('create_epic', True):
                 epic_payload = {
                     "fields": {

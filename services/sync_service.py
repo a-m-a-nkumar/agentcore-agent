@@ -98,39 +98,40 @@ async def sync_confluence_space(
     
     synced_count = 0
     skipped_count = 0
-    
-    for page in pages:
+    error_count = 0
+
+    for idx, page in enumerate(pages):
         try:
             page_id = page['id']
-            
+
             # Fetch full page details with content
             page_url = f"{confluence.base_url}/rest/api/content/{page_id}?expand=body.storage,version"
             response = requests.get(page_url, headers=confluence.headers, auth=confluence.auth, timeout=15)
             response.raise_for_status()
             full_page = response.json()
-            
+
             version_number = full_page['version']['number']
-            
+
+            logger.info(f"[ConfluenceSync] [{idx+1}/{len(pages)}] Processing page: {full_page['title']} (id={page_id})")
+
             # Check if page needs update
             local_page = get_confluence_page(project_id, page_id)
-            
+
             needs_update = False
             if not local_page:
-                # New page
-                logger.info(f"  New page: {full_page['title']}")
+                logger.info(f"[ConfluenceSync]   {page_id}: NEW (not in DB)")
                 needs_update = True
             elif local_page['version_number'] < version_number:
-                # Updated page
-                logger.info(f"  Updated page: {full_page['title']} (v{local_page['version_number']} → v{version_number})")
+                logger.info(f"[ConfluenceSync]   {page_id}: UPDATED (v{local_page['version_number']} → v{version_number})")
                 needs_update = True
             else:
-                # Unchanged page
-                logger.debug(f"  Skipping unchanged page: {full_page['title']}")
+                logger.info(f"[ConfluenceSync]   {page_id}: UNCHANGED (version matches)")
                 skipped_count += 1
                 continue
-            
+
             if needs_update:
                 # Update metadata
+                logger.info(f"[ConfluenceSync]   {page_id}: Upserting metadata...")
                 upsert_confluence_page(
                     project_id=project_id,
                     user_id=user_id,
@@ -141,12 +142,15 @@ async def sync_confluence_space(
                     version_number=version_number,
                     last_modified_at=full_page['version']['when']
                 )
-                
+                logger.info(f"[ConfluenceSync]   {page_id}: Metadata upserted OK")
+
                 # Delete old embeddings
-                delete_embeddings(project_id, 'confluence', page_id)
-                
+                deleted = delete_embeddings(project_id, 'confluence', page_id)
+                logger.info(f"[ConfluenceSync]   {page_id}: Deleted {deleted} old embeddings")
+
                 # Generate new embeddings
                 content = full_page['body']['storage']['value']
+                logger.info(f"[ConfluenceSync]   {page_id}: Content length={len(content)} chars, generating embeddings...")
                 await generate_and_store_embeddings(
                     project_id=project_id,
                     user_id=user_id,
@@ -156,14 +160,16 @@ async def sync_confluence_space(
                     content=content,
                     url=f"{confluence.base_url}{full_page['_links']['webui']}"
                 )
-                
+                logger.info(f"[ConfluenceSync]   {page_id}: Embeddings generated and stored OK")
+
                 synced_count += 1
-        
+
         except Exception as e:
-            logger.error(f"Error syncing page {page.get('title', page.get('id', 'unknown'))}: {e}")
+            error_count += 1
+            logger.error(f"[ConfluenceSync] FAILED page {page.get('title', page.get('id', 'unknown'))}: {type(e).__name__}: {e}", exc_info=True)
             continue
-    
-    logger.info(f"Confluence sync complete: {synced_count} synced, {skipped_count} skipped")
+
+    logger.info(f"[ConfluenceSync] === COMPLETE: {synced_count} synced, {skipped_count} skipped, {error_count} errors ===")
 
 
 async def sync_jira_project(
@@ -206,23 +212,27 @@ async def sync_jira_project(
             logger.error(f"Error parsing date {date_str}: {e}")
             return None
 
-    for issue in issues:
+    error_count = 0
+    for idx, issue in enumerate(issues):
         try:
             issue_key = issue['key']
             fields = issue['fields']
             updated_date_str = fields['updated']
             updated_date = parse_atlassian_date(updated_date_str)
-            
+
+            logger.info(f"[JiraSync] [{idx+1}/{len(issues)}] Processing issue: {issue_key}")
+
             # Check if issue needs update
             local_issue = get_jira_issue(project_id, issue_key)
-            
+
             needs_update = False
             if not local_issue:
                 # New issue
-                logger.info(f"  New issue: {issue_key}")
+                logger.info(f"[JiraSync]   {issue_key}: NEW (not in DB)")
                 needs_update = True
             else:
                 local_updated = local_issue['updated_date']
+                logger.info(f"[JiraSync]   {issue_key}: EXISTS in DB. local_updated={local_updated}, remote_updated={updated_date}")
                 # Ensure comparison between timezone-aware datetimes
                 if local_updated and updated_date:
                     # If one is naive and other is aware, make both naive for comparison
@@ -232,19 +242,20 @@ async def sync_jira_project(
                     else:
                         local_comp = local_updated
                         updated_comp = updated_date
-                        
+
                     if local_comp < updated_comp:
-                        logger.info(f"  Updated issue: {issue_key}")
+                        logger.info(f"[JiraSync]   {issue_key}: UPDATED (local < remote)")
                         needs_update = True
+                    else:
+                        logger.info(f"[JiraSync]   {issue_key}: UNCHANGED (timestamps match)")
                 else:
+                    logger.info(f"[JiraSync]   {issue_key}: FORCE UPDATE (null timestamps)")
                     needs_update = True
-            
+
             if not needs_update:
-                # Unchanged issue
-                logger.debug(f"  Skipping unchanged issue: {issue_key}")
                 skipped_count += 1
                 continue
-            
+
             if needs_update:
                 # Calculate actual duration if resolved
                 actual_duration_days = None
@@ -253,8 +264,9 @@ async def sync_jira_project(
                     resolved = parse_atlassian_date(fields['resolutiondate'])
                     if created and resolved:
                         actual_duration_days = (resolved - created).days
-                
+
                 # Update metadata
+                logger.info(f"[JiraSync]   {issue_key}: Upserting metadata to jira_issues table...")
                 upsert_jira_issue(
                     project_id=project_id,
                     user_id=user_id,
@@ -279,12 +291,15 @@ async def sync_jira_project(
                     resolved_date=fields.get('resolutiondate'),
                     actual_duration_days=actual_duration_days
                 )
-                
+                logger.info(f"[JiraSync]   {issue_key}: Metadata upserted OK")
+
                 # Delete old embeddings
-                delete_embeddings(project_id, 'jira', issue_key)
-                
+                deleted = delete_embeddings(project_id, 'jira', issue_key)
+                logger.info(f"[JiraSync]   {issue_key}: Deleted {deleted} old embeddings")
+
                 # Generate new embeddings
                 content = f"{fields['summary']}\n\n{fields.get('description', '')}"
+                logger.info(f"[JiraSync]   {issue_key}: Content length={len(content)} chars, generating embeddings...")
                 await generate_and_store_embeddings(
                     project_id=project_id,
                     user_id=user_id,
@@ -294,14 +309,16 @@ async def sync_jira_project(
                     content=content,
                     url=f"https://{credentials['atlassian_domain'].replace('https://', '').replace('http://', '')}/browse/{issue_key}"
                 )
-                
+                logger.info(f"[JiraSync]   {issue_key}: Embeddings generated and stored OK")
+
                 synced_count += 1
-        
+
         except Exception as e:
-            logger.error(f"Error syncing issue {issue.get('key', 'unknown')}: {e}")
+            error_count += 1
+            logger.error(f"[JiraSync] FAILED issue {issue.get('key', 'unknown')}: {type(e).__name__}: {e}", exc_info=True)
             continue
-    
-    logger.info(f"Jira sync complete: {synced_count} synced, {skipped_count} skipped")
+
+    logger.info(f"[JiraSync] === COMPLETE: {synced_count} synced, {skipped_count} skipped, {error_count} errors ===")
 
 
 async def generate_and_store_embeddings(
@@ -326,20 +343,26 @@ async def generate_and_store_embeddings(
         url: Document URL
     """
     try:
+        logger.info(f"[Embeddings] Starting for {source_type}/{source_id}: content_length={len(content)} chars")
+
         # Chunk the content
         chunks = embedding_service.chunk_text(content)
-        
+
         if not chunks:
-            logger.warning(f"No chunks generated for {source_type} {source_id}")
+            logger.warning(f"[Embeddings] No chunks generated for {source_type} {source_id} (content may be empty)")
             return
-        
-        logger.info(f"  Generated {len(chunks)} chunks for {source_type} {source_id}")
-        
+
+        logger.info(f"[Embeddings] Generated {len(chunks)} chunks for {source_type} {source_id} "
+                     f"(words per chunk: {[len(c.split()) for c in chunks]})")
+
         # Generate and store embeddings for each chunk
+        stored_count = 0
         for i, chunk in enumerate(chunks):
             # Generate embedding
+            logger.info(f"[Embeddings]   Chunk {i+1}/{len(chunks)}: generating embedding ({len(chunk.split())} words)...")
             embedding = embedding_service.generate_embedding(chunk)
-            
+            logger.info(f"[Embeddings]   Chunk {i+1}/{len(chunks)}: embedding generated (dim={len(embedding)}), inserting to DB...")
+
             # Store in database
             insert_document_embedding(
                 project_id=project_id,
@@ -352,9 +375,11 @@ async def generate_and_store_embeddings(
                 embedding=embedding,
                 url=url
             )
-        
-        logger.info(f"  Stored {len(chunks)} embeddings for {source_type} {source_id}")
-    
+            stored_count += 1
+            logger.info(f"[Embeddings]   Chunk {i+1}/{len(chunks)}: stored in DB OK")
+
+        logger.info(f"[Embeddings] DONE: Stored {stored_count}/{len(chunks)} embeddings for {source_type} {source_id}")
+
     except Exception as e:
-        logger.error(f"Error generating embeddings for {source_type} {source_id}: {e}")
+        logger.error(f"[Embeddings] FAILED for {source_type} {source_id}: {type(e).__name__}: {e}", exc_info=True)
         raise
