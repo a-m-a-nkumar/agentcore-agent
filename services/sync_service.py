@@ -4,6 +4,7 @@ Handles initial sync and incremental updates
 """
 
 import asyncio
+import hashlib
 from typing import List, Dict, Optional
 from datetime import datetime
 import requests
@@ -16,6 +17,7 @@ from db_helper_vector import (
     upsert_jira_issue,
     get_confluence_page,
     get_jira_issue,
+    find_existing_embedding,
     insert_document_embedding,
     delete_embeddings
 )
@@ -336,10 +338,20 @@ async def generate_and_store_embeddings(
         logger.info(f"  Generated {len(chunks)} chunks for {source_type} {source_id}")
         
         # Generate and store embeddings for each chunk
+        reused_count = 0
         for i, chunk in enumerate(chunks):
-            # Generate embedding
-            embedding = embedding_service.generate_embedding(chunk)
-            
+            # Compute content hash for dedup safety net
+            content_hash = hashlib.sha256(chunk.encode('utf-8')).hexdigest()
+
+            # Check if an embedding already exists from any project
+            existing_embedding = find_existing_embedding(source_type, source_id, i)
+
+            if existing_embedding is not None:
+                embedding = existing_embedding
+                reused_count += 1
+            else:
+                embedding = embedding_service.generate_embedding(chunk)
+
             # Store in database
             insert_document_embedding(
                 project_id=project_id,
@@ -350,10 +362,14 @@ async def generate_and_store_embeddings(
                 content_chunk=chunk,
                 chunk_index=i,
                 embedding=embedding,
-                url=url
+                url=url,
+                content_hash=content_hash
             )
-        
-        logger.info(f"  Stored {len(chunks)} embeddings for {source_type} {source_id}")
+
+        if reused_count > 0:
+            logger.info(f"  Stored {len(chunks)} embeddings for {source_type} {source_id} (reused {reused_count} from existing projects)")
+        else:
+            logger.info(f"  Stored {len(chunks)} embeddings for {source_type} {source_id}")
     
     except Exception as e:
         logger.error(f"Error generating embeddings for {source_type} {source_id}: {e}")

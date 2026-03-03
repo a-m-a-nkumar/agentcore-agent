@@ -53,7 +53,6 @@ class ProjectUpdate(BaseModel):
 class BrdSessionUpdate(BaseModel):
     brd_id: Optional[str] = None
     session_id: Optional[str] = None
-    brd_content: Optional[str] = None
 
 
 class ProjectResponse(BaseModel):
@@ -287,10 +286,9 @@ async def get_brd_session(
         if session_data:
             return {
                 "brd_id": session_data.get("brd_id"),
-                "session_id": session_data.get("agentcore_session_id"),
-                "brd_content": session_data.get("brd_content")
+                "session_id": session_data.get("agentcore_session_id")
             }
-        return {"brd_id": None, "session_id": None, "brd_content": None}
+        return {"brd_id": None, "session_id": None}
     except HTTPException:
         raise
     except Exception as e:
@@ -318,8 +316,7 @@ async def save_brd_session(
         save_project_brd_session(
             project_id=project_id,
             brd_id=data.brd_id,
-            agentcore_session_id=data.session_id,
-            brd_content=data.brd_content
+            agentcore_session_id=data.session_id
         )
         return {"status": "ok", "project_id": project_id}
     except HTTPException:
