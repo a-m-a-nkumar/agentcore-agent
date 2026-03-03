@@ -7,6 +7,9 @@ from db_helper import get_db_connection, release_db_connection
 from psycopg2.extras import RealDictCursor
 from typing import List, Dict, Optional, Any
 import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================
@@ -212,6 +215,53 @@ def get_all_jira_issues(project_id: str) -> List[Dict]:
 # Document Embeddings Functions
 # ============================================
 
+def find_existing_embedding(
+    source_type: str,
+    source_id: str,
+    chunk_index: int
+) -> Optional[List[float]]:
+    """
+    Check if an embedding already exists for this content from ANY project.
+    Used to avoid redundant Bedrock API calls when multiple projects
+    sync the same Confluence space or Jira project.
+
+    Uses the 4-column index: (source_type, source_id, chunk_index, content_hash)
+
+    Args:
+        source_type: 'confluence' or 'jira'
+        source_id: Page ID or Issue Key
+        chunk_index: Chunk index within the document
+
+    Returns:
+        The embedding vector as a list of floats if found, None otherwise
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT embedding
+            FROM document_embeddings
+            WHERE source_type = %s AND source_id = %s AND chunk_index = %s
+            LIMIT 1
+        """, (source_type, source_id, chunk_index))
+        result = cursor.fetchone()
+        cursor.close()
+        if result:
+            raw = result['embedding']
+            logger.info(f"[DEDUP] Found existing embedding for {source_type} {source_id} chunk {chunk_index} (type={type(raw).__name__})")
+            # pgvector returns embedding as a string like "[0.1,0.2,...]"
+            # Parse it back to a list of floats for insert_document_embedding()
+            if isinstance(raw, str):
+                parsed = [float(x) for x in raw.strip('[]').split(',')]
+                logger.info(f"[DEDUP] Parsed string to {len(parsed)} floats")
+                return parsed
+            return raw
+        logger.info(f"[DEDUP] No existing embedding for {source_type} {source_id} chunk {chunk_index} — will generate new")
+        return None
+    finally:
+        release_db_connection(conn)
+
+
 def insert_document_embedding(
     project_id: str,
     user_id: str,
@@ -222,26 +272,32 @@ def insert_document_embedding(
     chunk_index: int,
     embedding: List[float],
     url: Optional[str] = None,
-    metadata: Optional[Dict] = None
+    metadata: Optional[Dict] = None,
+    content_hash: Optional[str] = None
 ) -> Dict:
     """Insert a document embedding"""
     conn = get_db_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Convert embedding list to pgvector format
-        embedding_str = '[' + ','.join(map(str, embedding)) + ']'
-        
+
+        # Convert embedding to pgvector format
+        if isinstance(embedding, str):
+            # Already a pgvector string — use as-is
+            embedding_str = embedding
+        else:
+            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+
         cursor.execute("""
             INSERT INTO document_embeddings (
                 project_id, user_id, source_type, source_id, title,
-                content_chunk, chunk_index, embedding, url, metadata
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s)
+                content_chunk, chunk_index, embedding, url, metadata, content_hash
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s)
             RETURNING *
         """, (
             project_id, user_id, source_type, source_id, title,
             content_chunk, chunk_index, embedding_str, url,
-            json.dumps(metadata) if metadata else '{}'
+            json.dumps(metadata) if metadata else '{}',
+            content_hash
         ))
         
         result = cursor.fetchone()

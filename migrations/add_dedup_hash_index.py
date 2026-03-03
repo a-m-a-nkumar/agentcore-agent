@@ -44,8 +44,16 @@ def run():
         conn.autocommit = False
         cursor = conn.cursor()
 
+        # ── Step 0: Ensure content_hash column exists ──────────────────────
+        print("📊 Ensuring content_hash column exists on document_embeddings...")
+        cursor.execute("""
+            ALTER TABLE document_embeddings
+            ADD COLUMN IF NOT EXISTS content_hash VARCHAR;
+        """)
+        print("✅ content_hash column ready.")
+
         # ── Step 1: Drop the old 3-column index ──────────────────────────────
-        print("🗑️  Dropping old 3-column index (idx_embeddings_content_lookup)...")
+        print("\n🗑️  Dropping old 3-column index (idx_embeddings_content_lookup)...")
         cursor.execute("""
             DROP INDEX IF EXISTS idx_embeddings_content_lookup;
         """)

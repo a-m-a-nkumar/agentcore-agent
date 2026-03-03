@@ -79,32 +79,8 @@ def _run_migrations():
                     END IF;
                 END $$;
             """)
-            # Add brd_content column to projects table
-            cursor.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'projects' AND column_name = 'brd_content'
-                    ) THEN
-                        ALTER TABLE projects ADD COLUMN brd_content TEXT;
-                    END IF;
-                END $$;
-            """)
-            # Add brd_chat_history column to projects table (JSON array of chat messages)
-            cursor.execute("""
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1 FROM information_schema.columns
-                        WHERE table_name = 'projects' AND column_name = 'brd_chat_history'
-                    ) THEN
-                        ALTER TABLE projects ADD COLUMN brd_chat_history TEXT DEFAULT '[]';
-                    END IF;
-                END $$;
-            """)
             conn.commit()
-            logger.info("Database migrations completed (brd_id, agentcore_session_id, brd_content, brd_chat_history on projects)")
+            logger.info("Database migrations completed (brd_id, agentcore_session_id on projects)")
     except Exception as e:
         conn.rollback()
         logger.error(f"Migration error (non-fatal): {e}")
@@ -454,8 +430,7 @@ def delete_project(project_id: str, hard_delete: bool = False) -> bool:
 def save_project_brd_session(
     project_id: str,
     brd_id: str = None,
-    agentcore_session_id: str = None,
-    brd_content: str = None
+    agentcore_session_id: str = None
 ) -> bool:
     """
     Save/update the BRD session for a project.
@@ -472,9 +447,6 @@ def save_project_brd_session(
             if agentcore_session_id is not None:
                 updates.append("agentcore_session_id = %s")
                 params.append(agentcore_session_id)
-            if brd_content is not None:
-                updates.append("brd_content = %s")
-                params.append(brd_content)
             if not updates:
                 return False
             params.append(project_id)
@@ -503,7 +475,7 @@ def get_project_brd_session(project_id: str) -> Optional[Dict[str, Any]]:
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                SELECT brd_id, agentcore_session_id, brd_content
+                SELECT brd_id, agentcore_session_id
                 FROM projects
                 WHERE id = %s AND is_deleted = FALSE
             """, (project_id,))
@@ -514,140 +486,6 @@ def get_project_brd_session(project_id: str) -> Optional[Dict[str, Any]]:
                 if result.get('brd_id') or result.get('agentcore_session_id'):
                     return result
             return None
-    finally:
-        release_db_connection(conn)
-
-
-# ============================================
-# BRD CHAT HISTORY (DB-backed)
-# ============================================
-
-def append_brd_chat_messages(project_id: str, messages: List[Dict[str, str]]) -> bool:
-    """
-    Append one or more chat messages to the project's brd_chat_history JSON array.
-    Each message should have: role, content, timestamp.
-    """
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            # Read current history
-            cursor.execute(
-                "SELECT brd_chat_history FROM projects WHERE id = %s AND is_deleted = FALSE",
-                (project_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return False
-            current = row[0] or "[]"
-            try:
-                history = json.loads(current)
-            except (json.JSONDecodeError, TypeError):
-                history = []
-            history.extend(messages)
-            cursor.execute(
-                "UPDATE projects SET brd_chat_history = %s WHERE id = %s",
-                (json.dumps(history), project_id)
-            )
-            conn.commit()
-            return True
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error appending BRD chat messages: {e}")
-        return False
-    finally:
-        release_db_connection(conn)
-
-
-def get_brd_chat_messages(project_id: str) -> List[Dict[str, str]]:
-    """
-    Retrieve all BRD chat messages for a project.
-    Returns list of {role, content, timestamp} dicts.
-    """
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT brd_chat_history FROM projects WHERE id = %s AND is_deleted = FALSE",
-                (project_id,)
-            )
-            row = cursor.fetchone()
-            if not row or not row[0]:
-                return []
-            try:
-                return json.loads(row[0])
-            except (json.JSONDecodeError, TypeError):
-                return []
-    finally:
-        release_db_connection(conn)
-
-
-def append_brd_chat_messages_by_brd_id(brd_id: str, messages: List[Dict[str, str]]) -> bool:
-    """
-    Append chat messages to the project that owns this brd_id.
-    Looks up project_id from brd_id, then delegates to append_brd_chat_messages.
-    """
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT id FROM projects WHERE brd_id = %s AND is_deleted = FALSE LIMIT 1",
-                (brd_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                logger.warning(f"No project found for brd_id={brd_id}")
-                return False
-        release_db_connection(conn)
-        conn = None
-        return append_brd_chat_messages(row[0], messages)
-    except Exception as e:
-        logger.error(f"Error looking up project for brd_id={brd_id}: {e}")
-        return False
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-
-def get_brd_chat_messages_by_brd_id(brd_id: str) -> List[Dict[str, str]]:
-    """
-    Retrieve BRD chat messages for the project that owns this brd_id.
-    """
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "SELECT id FROM projects WHERE brd_id = %s AND is_deleted = FALSE LIMIT 1",
-                (brd_id,)
-            )
-            row = cursor.fetchone()
-            if not row:
-                return []
-        release_db_connection(conn)
-        conn = None
-        return get_brd_chat_messages(row[0])
-    except Exception as e:
-        logger.error(f"Error looking up project for brd_id={brd_id}: {e}")
-        return []
-    finally:
-        if conn:
-            release_db_connection(conn)
-
-
-def clear_brd_chat_history(project_id: str) -> bool:
-    """Clear the BRD chat history for a project (used when regenerating BRD)."""
-    conn = get_db_connection()
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                "UPDATE projects SET brd_chat_history = '[]' WHERE id = %s",
-                (project_id,)
-            )
-            conn.commit()
-            return True
-    except Exception as e:
-        conn.rollback()
-        logger.error(f"Error clearing BRD chat history: {e}")
-        return False
     finally:
         release_db_connection(conn)
 

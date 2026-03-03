@@ -6,10 +6,13 @@
 
 Runs all migrations in the correct order:
 
-  Step 1 → enable_pgvector.py       : Enable pgvector extension
-  Step 2 → setup_core_tables.py     : Create users, projects, analyst_sessions
-  Step 3 → add_vector_tables.py     : Create confluence_pages, jira_issues, document_embeddings + HNSW index
-  Step 4 → add_dedup_hash_index.py  : Upgrade dedup index to 4-column (content_hash included)
+  Step 1 → enable_pgvector.py           : Enable pgvector extension
+  Step 2 → setup_core_tables.py         : Create users, projects, analyst_sessions
+  Step 3 → add_vector_tables.py         : Create confluence_pages, jira_issues, document_embeddings + HNSW index
+  Step 4 → add_dedup_hash_index.py      : Upgrade dedup index to 4-column (content_hash included)
+  Step 5 → add_atlassian_credentials.py : Add Atlassian integration columns to users
+  Step 6 → add_brd_session_columns.py   : Add BRD session columns to projects
+  Step 7 → add_brd_feedback.py          : Create brd_feedback table
 
 Prerequisites:
   - PostgreSQL 13+ running and accessible
@@ -55,13 +58,19 @@ from migrations.enable_pgvector import enable_pgvector as step_enable_pgvector
 from migrations.setup_core_tables import run as step_core_tables
 from migrations.add_vector_tables import run_migration as step_vector_tables
 from migrations.add_dedup_hash_index import run as step_dedup_index
+from migrations.add_atlassian_credentials import add_atlassian_columns as step_atlassian_credentials
+from migrations.add_brd_session_columns import run as step_brd_session_columns
+from migrations.add_brd_feedback import run as step_brd_feedback
 
 
 STEPS = [
-    ("Step 1/4", "Enable pgvector extension",                    step_enable_pgvector),
-    ("Step 2/4", "Create core tables (users/projects/sessions)",  step_core_tables),
-    ("Step 3/4", "Create vector tables + HNSW index",            step_vector_tables),
-    ("Step 4/4", "Upgrade dedup index to 4-column composite",    step_dedup_index),
+    ("Step 1/7", "Enable pgvector extension",                    step_enable_pgvector),
+    ("Step 2/7", "Create core tables (users/projects/sessions)",  step_core_tables),
+    ("Step 3/7", "Create vector tables + HNSW index",            step_vector_tables),
+    ("Step 4/7", "Upgrade dedup index to 4-column composite",    step_dedup_index),
+    ("Step 5/7", "Add Atlassian integration columns",            step_atlassian_credentials),
+    ("Step 6/7", "Add BRD session columns to projects",          step_brd_session_columns),
+    ("Step 7/7", "Create brd_feedback table",                    step_brd_feedback),
 ]
 
 passed = []

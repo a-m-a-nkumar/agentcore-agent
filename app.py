@@ -1037,8 +1037,7 @@ async def generate_brd_from_s3(
                                 save_project_brd_session(
                                     project_id=project_id,
                                     brd_id=brd_id,
-                                    agentcore_session_id=session_id_memory,
-                                    brd_content=agent_data['brd']
+                                    agentcore_session_id=session_id_memory
                                 )
                                 print(f"[APP] ✅ Persisted BRD session to project {project_id}")
                             except Exception as e:
