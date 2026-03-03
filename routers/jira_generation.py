@@ -2,12 +2,11 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 import logging
-import boto3
 import json
 import os
 import re
 from html import unescape
-from botocore.config import Config
+from llm_gateway import chat_completion
 
 from auth import verify_azure_token
 from db_helper import (
@@ -21,11 +20,8 @@ from services.jira_service import JiraService
 router = APIRouter(prefix="/api/jira", tags=["jira"])
 logger = logging.getLogger(__name__)
 
-# Bedrock configuration
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-# Timeout for invoke_model (seconds). Large BRDs can take 2–5+ minutes; default 60 often too low.
-BEDROCK_READ_TIMEOUT = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))
+# LLM gateway configuration
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 
 # ============================================
@@ -102,16 +98,6 @@ def strip_html_tags(html_content: str) -> str:
     # Clean up whitespace
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
-
-
-def _get_bedrock_client():
-    """Get Bedrock runtime client with extended read timeout for large BRD generation."""
-    config = Config(
-        read_timeout=BEDROCK_READ_TIMEOUT,
-        connect_timeout=30,
-        retries={"max_attempts": 2, "mode": "standard"},
-    )
-    return boto3.client("bedrock-runtime", region_name=AWS_REGION, config=config)
 
 
 def convert_to_adf(text: str) -> Dict:
@@ -287,33 +273,18 @@ MANDATORY RULES:
 START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
 
     try:
-        bedrock_client = _get_bedrock_client()
-        
-        # Prepare request for Claude with increased token limit
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 75000,  # Increased from 8000 to handle comprehensive BRDs
-            "temperature": 0.3,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        }
-        
-        logger.info(f"Calling Bedrock to generate comprehensive Epics and User Stories...")
+        logger.info("Calling gateway model to generate comprehensive Epics and User Stories...")
         logger.info(f"BRD content length: {len(plain_text)} characters")
-        
-        response = bedrock_client.invoke_model(
-            modelId=BEDROCK_MODEL_ID,
-            body=json.dumps(request_body)
+
+        generated_text = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=BEDROCK_MODEL_ID,
+            temperature=0.3,
+            top_p=0.95,
+            max_tokens=75000,
         )
         
-        response_body = json.loads(response['body'].read())
-        generated_text = response_body['content'][0]['text']
-        
-        logger.info(f"Bedrock response received, length: {len(generated_text)} characters")
+        logger.info(f"Gateway response received, length: {len(generated_text)} characters")
         
         # Parse JSON response
         # Remove markdown code blocks if present
@@ -371,11 +342,11 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
         return result
         
     except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse Bedrock response as JSON: {e}")
+        logger.error(f"Failed to parse gateway response as JSON: {e}")
         logger.error(f"Response text (first 2000 chars): {generated_text[:2000]}")
         raise Exception(f"Failed to parse AI response: {str(e)}")
     except Exception as e:
-        logger.error(f"Error calling Bedrock: {e}", exc_info=True)
+        logger.error(f"Error calling gateway model: {e}", exc_info=True)
         raise Exception(f"Failed to generate Jira items: {str(e)}")
 
 

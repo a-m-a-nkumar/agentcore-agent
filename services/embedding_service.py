@@ -1,26 +1,29 @@
 """
-Embedding Service - Generate and store vector embeddings using AWS Bedrock Titan
+Embedding Service - Generate and store vector embeddings via Deluxe gateway proxy
+Uses the OpenAI-compatible embeddings endpoint with Titan model
 """
 
-import boto3
-import json
 import re
-from typing import List, Dict
+from typing import List
 import os
 from dotenv import load_dotenv
+from openai import OpenAI
 
 load_dotenv()
 
+# Deluxe gateway proxy configuration
+DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
+DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
+EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'Titan-v2')
+
+
 class EmbeddingService:
     def __init__(self):
-        self.bedrock_runtime = boto3.client(
-            'bedrock-runtime',
-            region_name=os.getenv('AWS_REGION', 'us-east-1'),
-            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
-            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
-            aws_session_token=os.getenv('AWS_SESSION_TOKEN')
+        self.client = OpenAI(
+            base_url=DLXAI_GATEWAY_URL,
+            api_key=DLXAI_GATEWAY_KEY,
         )
-        self.embedding_model_id = "amazon.titan-embed-text-v1"
+        self.embedding_model_id = EMBEDDING_MODEL
         self.chunk_size = 500  # words per chunk
     
     def chunk_text(self, text: str, chunk_size: int = None) -> List[str]:
@@ -56,7 +59,7 @@ class EmbeddingService:
     
     def generate_embedding(self, text: str) -> List[float]:
         """
-        Generate embedding vector for text using AWS Bedrock Titan
+        Generate embedding vector for text via gateway proxy (Titan model)
         
         Args:
             text: Text to embed
@@ -65,25 +68,15 @@ class EmbeddingService:
             1536-dimensional embedding vector
         """
         try:
-            # Prepare request
-            body = json.dumps({
-                "inputText": text
-            })
-            
-            # Call Bedrock
-            response = self.bedrock_runtime.invoke_model(
-                modelId=self.embedding_model_id,
-                body=body,
-                contentType='application/json',
-                accept='application/json'
+            response = self.client.embeddings.create(
+                model=self.embedding_model_id,
+                input=text,
             )
             
-            # Parse response
-            response_body = json.loads(response['body'].read())
-            embedding = response_body.get('embedding')
+            embedding = response.data[0].embedding
             
             if not embedding:
-                raise ValueError("No embedding returned from Bedrock")
+                raise ValueError("No embedding returned from gateway")
             
             return embedding
             

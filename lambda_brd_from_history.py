@@ -10,7 +10,7 @@ import uuid
 from typing import List, Dict
 
 import boto3
-from botocore.config import Config
+from llm_gateway import chat_completion
 
 # Import prompts from centralized prompts module
 from prompts import get_brd_from_history_prompt
@@ -32,22 +32,8 @@ MAX_TOKENS = 8192
 TEMPERATURE = 0.0
 
 # Lazy loading
-_bedrock_runtime = None
 _agentcore_memory_client = None
 _s3_client = None
-
-
-def _get_bedrock_runtime():
-    global _bedrock_runtime
-    if _bedrock_runtime is None:
-        # Configure Bedrock client with extended timeout for long-running generation
-        bedrock_config = Config(
-            read_timeout=600,  # 10 minutes - enough for generating 8192 tokens
-            connect_timeout=10,
-            retries={'max_attempts': 1}  # Don't retry on timeout
-        )
-        _bedrock_runtime = boto3.client('bedrock-runtime', region_name=AWS_REGION, config=bedrock_config)
-    return _bedrock_runtime
 
 
 def _get_agentcore_memory_client():
@@ -165,8 +151,6 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
 
 def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     """Generate BRD using Bedrock AI"""
-    bedrock = _get_bedrock_runtime()
-    
     # Build the full prompt using the centralized prompt function
     prompt = get_brd_from_history_prompt(
         template=template,
@@ -177,35 +161,12 @@ def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     logger.info(f"Model: {BEDROCK_MODEL_ID}, Max tokens: {MAX_TOKENS}")
     
     try:
-        converse_kwargs = {
-            "modelId": BEDROCK_MODEL_ID,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"text": prompt}]
-                }
-            ],
-            "inferenceConfig": {
-                "maxTokens": MAX_TOKENS,
-                "temperature": TEMPERATURE
-            }
-        }
-        if BEDROCK_GUARDRAIL_ARN:
-            converse_kwargs["guardrailConfig"] = {
-                "guardrailIdentifier": BEDROCK_GUARDRAIL_ARN,
-                "guardrailVersion": BEDROCK_GUARDRAIL_VERSION,
-            }
-        response = bedrock.converse(**converse_kwargs)
-        
-        # Extract generated BRD text
-        output = response.get("output", {})
-        message = output.get("message", {})
-        content_blocks = message.get("content", [])
-        
-        brd_text = "".join(
-            block.get("text", "")
-            for block in content_blocks
-            if "text" in block
+        brd_text = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            model=BEDROCK_MODEL_ID,
+            temperature=TEMPERATURE,
+            top_p=0.95,
+            max_tokens=MAX_TOKENS,
         )
         
         logger.info(f"Generated BRD: {len(brd_text)} characters")

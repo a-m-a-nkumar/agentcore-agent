@@ -5,7 +5,7 @@ import uuid
 from typing import Any, Dict, Optional
 
 import boto3
-from llm_gateway import chat_completion
+from botocore.config import Config
 
 # Import prompt templates from separate module
 from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig
@@ -24,6 +24,22 @@ BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
 # IMPORTANT: Can set higher for longer BRDs, but 8192 is a safe default
 MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "8192"))
 TEMPERATURE = float(os.getenv("BEDROCK_TEMPERATURE", "0"))
+
+_bedrock_runtime = None
+
+
+def _get_bedrock_client():
+    global _bedrock_runtime
+    if _bedrock_runtime is None:
+        # Increase read timeout for long BRD generations (Claude Sonnet 4.5 can take longer)
+        bedrock_config = Config(
+            region_name=BEDROCK_REGION,
+            read_timeout=180,
+            connect_timeout=10,
+        )
+        _bedrock_runtime = boto3.client("bedrock-runtime", config=bedrock_config)
+    return _bedrock_runtime
+
 
 def _coerce_event(event: Any) -> Dict[str, Any]:
     if isinstance(event, dict):
@@ -254,6 +270,7 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None) -> str:
         prompt: The full prompt text
         max_tokens: Maximum tokens to generate. If None, uses MAX_TOKENS env var.
     """
+    client = _get_bedrock_client()
     model_id = BEDROCK_MODEL_ID
     effective_max_tokens = max_tokens if max_tokens is not None else MAX_TOKENS
 
@@ -262,15 +279,125 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None) -> str:
     logger.info(f"Max tokens: {effective_max_tokens}, Temperature: {TEMPERATURE}")
     logger.info(f"Prompt length: {len(prompt)} characters (~{len(prompt)//4} tokens estimated)")
 
-    brd_text = chat_completion(
-        messages=[{"role": "user", "content": prompt}],
-        model=model_id,
-        temperature=TEMPERATURE,
-        top_p=0.95,
-        max_tokens=effective_max_tokens,
-    )
+    if model_id.startswith("anthropic.") or model_id.startswith("global.anthropic."):
+        # Use converse() API which supports inference profiles
+        logger.info("Using converse() API for Anthropic model")
+        
+        converse_kwargs = {
+            "modelId": model_id,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [{"text": prompt}],
+                }
+            ],
+            "inferenceConfig": {
+                "maxTokens": effective_max_tokens,
+                "temperature": TEMPERATURE,
+            }
+        }
+        response = client.converse(**converse_kwargs)
 
-    logger.info(f"Generated BRD length: {len(brd_text)} characters")
+        # Log the response structure
+        logger.info(f"Response keys: {list(response.keys())}")
+        logger.info(f"Stop reason: {response.get('stopReason', 'N/A')}")
+
+        # Extract text from converse() response format
+        output = response.get("output", {})
+        message = output.get("message", {})
+        content_blocks = message.get("content", [])
+        
+        brd_text = "".join(
+            block.get("text", "")
+            for block in content_blocks
+            if "text" in block
+        )
+
+        logger.info(f"Generated BRD length: {len(brd_text)} characters")
+
+        # Check if response was truncated due to token limit
+        if response.get("stopReason") == "max_tokens":
+            logger.warning("Response was truncated due to max_tokens limit!")
+            raise RuntimeError(
+                f"Model hit max_tokens limit ({effective_max_tokens}). "
+                f"Increase BEDROCK_MAX_TOKENS or simplify the prompt/template. "
+                f"Generated {len(brd_text)} characters before truncation."
+            )
+    elif model_id.startswith("amazon.titan-text"):
+        payload = {
+            "inputText": prompt,
+            "textGenerationConfig": {
+                "temperature": TEMPERATURE,
+                "maxTokenCount": effective_max_tokens,
+                "topP": 0.9,
+                "stopSequences": [],
+            },
+        }
+        response = client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(payload).encode("utf-8"),
+        )
+        response_body = json.loads(response["body"].read())
+
+        # Log the response structure
+        logger.info(f"Response body keys: {list(response_body.keys())}")
+
+        results = response_body.get("results", [])
+        if results:
+            completion_reason = results[0].get("completionReason", "N/A")
+            logger.info(f"Completion reason: {completion_reason}")
+
+        brd_text = "".join(result.get("outputText", "") for result in results)
+
+        logger.info(f"Generated BRD length: {len(brd_text)} characters")
+
+        # Check if response was truncated due to token limit
+        if results and results[0].get("completionReason") == "LENGTH":
+            logger.warning("Response was truncated due to LENGTH limit!")
+            raise RuntimeError(
+                f"Model hit max token limit ({effective_max_tokens}). "
+                f"Increase BEDROCK_MAX_TOKENS or simplify the prompt/template. "
+                f"Generated {len(brd_text)} characters before truncation."
+            )
+    elif "llama" in model_id.lower():
+        payload = {
+            "prompt": prompt,
+            "max_gen_len": effective_max_tokens,
+            "temperature": TEMPERATURE,
+            "top_p": 0.9,
+        }
+        response = client.invoke_model(
+            modelId=model_id,
+            body=json.dumps(payload).encode("utf-8"),
+        )
+        response_body = json.loads(response["body"].read())
+
+        # Log the response structure
+        logger.info(f"Response body keys: {list(response_body.keys())}")
+        logger.info(f"Stop reason: {response_body.get('stop_reason', 'N/A')}")
+
+        brd_text = response_body.get("generation", "")
+
+        logger.info(f"Generated BRD length: {len(brd_text)} characters")
+
+        # Check if response was truncated due to token limit
+        if response_body.get("stop_reason") == "length":
+            logger.warning(f"Response was truncated due to length limit! Generated {len(brd_text)} characters.")
+            # ALWAYS return the partial BRD, never raise an error
+            # Even if it's short, return what we have - better than an error message
+            if brd_text and len(brd_text.strip()) > 50:
+                logger.info("Returning partial BRD (truncated due to token limit)")
+                # Add a note at the end
+                brd_text += "\n\n[Note: This BRD was truncated due to token limits. Consider reducing the template or transcript length for a complete BRD.]"
+            else:
+                # If we got very little, still return it but with a warning
+                logger.warning("Generated very little content, but returning it anyway")
+                brd_text = brd_text or "[BRD generation started but was cut short due to token limits. Please reduce input size.]"
+    else:
+        raise RuntimeError(
+            f"Model '{model_id}' is not supported. "
+            "Use an Anthropic Claude 3, Amazon Titan, or Meta Llama model."
+        )
 
     if not brd_text or not brd_text.strip():
         logger.error("Model response was empty or whitespace-only!")
