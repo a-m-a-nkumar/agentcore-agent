@@ -29,6 +29,9 @@ from routers.sync import router as sync_router
 from routers.jira_generation import router as jira_generation_router
 from routers.orchestration import router as orchestration_router
 
+# Import database helpers for session persistence
+from db_helper import save_project_brd_session
+
 load_dotenv()
 
 app = FastAPI()
@@ -893,6 +896,7 @@ async def upload_transcript_to_s3(
 @app.post("/api/generate-from-s3")
 async def generate_brd_from_s3(
     transcript_s3_path: str = Form(...),
+    project_id: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
     """Generate BRD from transcript in S3 and template in S3"""
@@ -1027,6 +1031,19 @@ async def generate_brd_from_s3(
                             except Exception as e:
                                 print(f"[APP] ⚠️  Failed to create session: {e}, will auto-create on first chat")
                         
+                        # Persist BRD session to project for future restoration
+                        if project_id and brd_id:
+                            try:
+                                save_project_brd_session(
+                                    project_id=project_id,
+                                    brd_id=brd_id,
+                                    agentcore_session_id=session_id_memory,
+                                    brd_content=agent_data['brd']
+                                )
+                                print(f"[APP] ✅ Persisted BRD session to project {project_id}")
+                            except Exception as e:
+                                print(f"[APP] ⚠️  Failed to persist BRD session: {e}")
+                        
                         return JSONResponse(content={
                             'result': agent_data['brd'],
                             'brd_id': brd_id,
@@ -1105,14 +1122,14 @@ async def chat_with_agent(
         # Get fresh client to ensure we use latest credentials
         agent_core_client = get_agent_core_client()
         
-        # Use a fresh runtime session for each chat message to avoid toolUse/toolResult validation errors
-        # The Lambda functions handle their own session management via AgentCore Memory
-        fresh_session_id = str(uuid.uuid4())
-        print(f"[CHAT] Using fresh runtime session: {fresh_session_id} (Lambda will use session_id: {session_id})")
-        
+        # Use the consistent session_id as runtimeSessionId so that conversation
+        # events are stored in AgentCore Memory under this session and can be
+        # retrieved later by /api/brd-history.
+        print(f"[CHAT] Using runtimeSessionId: {session_id}")
+
         response = agent_core_client.invoke_agent_runtime(
             agentRuntimeArn=AGENT_ARN,
-            runtimeSessionId=fresh_session_id,  # Use fresh session to avoid history conflicts
+            runtimeSessionId=session_id,
             payload=payload_bytes,
             qualifier="DEFAULT"
         )
@@ -1127,15 +1144,16 @@ async def chat_with_agent(
         print(f"[CHAT] Raw response length: {len(full_response_str)}")
         
         # Parse the agent response to extract the actual text content
+        final_text = None
         try:
             result_json = json.loads(full_response_str)
             print(f"[CHAT] Parsed JSON, keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
             print(f"[CHAT] Parsed JSON type: {type(result_json)}")
-            
+
             # AgentCore returns responses in format: {'role': 'assistant', 'content': [{'text': '...'}]}
             # Extract the text from the content array
             extracted_text = None
-            
+
             if isinstance(result_json, dict):
                 # Check for 'content' field with text
                 if 'content' in result_json:
@@ -1144,7 +1162,7 @@ async def chat_with_agent(
                         first_content = content_list[0]
                         if isinstance(first_content, dict) and 'text' in first_content:
                             extracted_text = first_content['text']
-                
+
                 # Also check for 'result' field (some responses use this)
                 if not extracted_text and 'result' in result_json:
                     result_value = result_json['result']
@@ -1158,68 +1176,45 @@ async def chat_with_agent(
                                 first_content = content_list[0]
                                 if isinstance(first_content, dict) and 'text' in first_content:
                                     extracted_text = first_content['text']
-                
+
                 # Check for direct 'text' or 'message' fields
                 if not extracted_text:
                     extracted_text = result_json.get('text') or result_json.get('message') or result_json.get('response')
-            
-            # If we extracted text, return it in a clean format
+
+            # Determine final_text from extraction results
             if extracted_text:
                 print(f"[CHAT] ✅ Extracted text successfully: {extracted_text[:200]}")
                 print(f"[CHAT] Extracted text type: {type(extracted_text)}")
                 print(f"[CHAT] Extracted text length: {len(extracted_text)}")
-                # Ensure it's a string, not a dict or other type
                 if not isinstance(extracted_text, str):
                     extracted_text = str(extracted_text)
-                return JSONResponse(content={
-                    "result": extracted_text,
-                    "response": extracted_text,
-                    "session_id": session_id
-                })
+                final_text = extracted_text
             else:
-                # If we couldn't extract, try to return the raw string or a formatted version
                 print(f"[CHAT] Could not extract text, trying to format response")
-                # If result_json is a dict, try to stringify it nicely
                 if isinstance(result_json, dict):
-                    # Try one more time to find any text-like field
                     for key in ['text', 'message', 'content', 'result', 'response', 'answer']:
                         if key in result_json:
                             value = result_json[key]
                             if isinstance(value, str) and value.strip():
-                                return JSONResponse(content={
-                                    "result": value,
-                                    "response": value,
-                                    "session_id": session_id
-                                })
+                                final_text = value
+                                break
                             elif isinstance(value, list) and len(value) > 0:
-                                # Try to extract from list
                                 if isinstance(value[0], dict) and 'text' in value[0]:
-                                    return JSONResponse(content={
-                                        "result": value[0]['text'],
-                                        "response": value[0]['text'],
-                                        "session_id": session_id
-                                    })
-                
-                # Last resort: return the raw string, but try to clean it up
-                clean_response = full_response_str
-                if isinstance(result_json, dict):
-                    # Convert dict to a readable string format
-                    clean_response = json.dumps(result_json, indent=2)
-                
-                return JSONResponse(content={
-                    "result": clean_response,
-                    "response": clean_response,
-                    "session_id": session_id
-                })
-                
+                                    final_text = value[0]['text']
+                                    break
+
+                if not final_text:
+                    final_text = json.dumps(result_json, indent=2) if isinstance(result_json, dict) else full_response_str
+
         except json.JSONDecodeError:
-            # If it's not JSON, return the raw string
             print(f"[CHAT] Response is not JSON, returning as text")
-            return JSONResponse(content={
-                "result": full_response_str,
-                "response": full_response_str,
-                "session_id": session_id
-            })
+            final_text = full_response_str
+
+        return JSONResponse(content={
+            "result": final_text,
+            "response": final_text,
+            "session_id": session_id
+        })
 
     except Exception as e:
         error_msg = str(e)
@@ -1760,19 +1755,19 @@ async def get_analyst_history(
     try:
         print(f"\n[ANALYST-HISTORY] Fetching history for session: {session_id}")
         print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
-        
+
         # Get AgentCore Memory configuration
         AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
         AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
-        
+
         # Get AgentCore client
         agentcore_client = get_agent_core_client()
-        
+
         print(f"[ANALYST-HISTORY] Calling AgentCore Memory...")
         print(f"[ANALYST-HISTORY] Memory ID: {AGENTCORE_MEMORY_ID}")
         print(f"[ANALYST-HISTORY] Session ID: {session_id}")
         print(f"[ANALYST-HISTORY] Actor ID: {AGENTCORE_ACTOR_ID}")
-        
+
         # Fetch events from AgentCore Memory
         response = agentcore_client.list_events(
             memoryId=AGENTCORE_MEMORY_ID,
@@ -1781,10 +1776,10 @@ async def get_analyst_history(
             includePayloads=True,
             maxResults=99
         )
-        
+
         events = response.get("events", [])
         print(f"[ANALYST-HISTORY] Retrieved {len(events)} events from AgentCore Memory")
-        
+
         # Parse events into messages
         messages = []
         for event in events:
@@ -1793,40 +1788,39 @@ async def get_analyst_history(
                 conv_data = payload_item.get("conversational")
                 if not conv_data:
                     continue
-                
+
                 text_content = conv_data.get("content", {}).get("text")
                 if not text_content:
                     continue
-                
+
                 role = conv_data.get("role", "assistant").lower()
                 messages.append({
                     'content': text_content,
                     'isBot': role == 'assistant',
                     'timestamp': ''  # Frontend will generate timestamp
                 })
-        
+
         # Reverse messages to show in chronological order (oldest first)
         messages.reverse()
-        
+
         print(f"[ANALYST-HISTORY] ✅ Parsed {len(messages)} messages")
-        
+
         return JSONResponse(content={
             'messages': messages,
             'session_id': session_id,
             'count': len(messages)
         })
-            
+
     except Exception as e:
         error_msg = str(e)
         print(f"[ANALYST-HISTORY] ERROR: {error_msg}")
         import traceback
         traceback.print_exc()
-        
+
         return JSONResponse(status_code=500, content={
             'error': error_msg,
             'messages': []
         })
-
 
 @app.post("/api/analyst-generate-brd")
 async def analyst_generate_brd(
@@ -2823,29 +2817,29 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
             
             events = response.get("events", [])
             print(f"[ANALYST-HISTORY] Retrieved {len(events)} events")
-            
+
             for event in events:
                 payload_list = event.get("payload", [])
                 for payload_item in payload_list:
                     conv_data = payload_item.get("conversational")
                     if not conv_data:
                         continue
-                    
+
                     text_content = conv_data.get("content", {}).get("text")
                     if not text_content:
                         continue
-                    
+
                     role = conv_data.get("role", "assistant").lower()
                     messages.append({
                         "role": role,
                         "content": text_content,
                         "isBot": role == "assistant"
                     })
-            
+
             messages.reverse()
-            
+
             print(f"[ANALYST-HISTORY] Returning {len(messages)} messages")
-            
+
             return JSONResponse(content={
                 "messages": messages,
                 "session_id": session_id
@@ -2861,6 +2855,131 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
     
     except Exception as e:
         print(f"[ANALYST-HISTORY] ERROR: {e}")
+        return JSONResponse(status_code=500, content={
+            "error": str(e),
+            "messages": []
+        })
+
+# -------------------------
+# BRD Chat History Endpoint (my_agent memory)
+# -------------------------
+
+def _extract_clean_user_message(text: str) -> str:
+    """Extract the clean user message from the enhanced context sent to the LLM.
+
+    The frontend wraps user messages with section context in formats like:
+      SECTION N: Title\\n\\n{content}\\n\\nUSER REQUEST: {actual message}\\n\\nIMPORTANT: ...
+      BRD CONTEXT:\\n{content}\\n\\nUSER REQUEST: {actual message}
+    This extracts just the {actual message} part for clean chat display.
+    """
+    import re
+
+    # 1. Extract text after "USER REQUEST: " marker (strips the section context prefix)
+    marker = "USER REQUEST: "
+    idx = text.find(marker)
+    if idx != -1:
+        clean = text[idx + len(marker):]
+    else:
+        clean = text
+
+    # 2. Strip trailing IMPORTANT instruction block — use regex to handle any whitespace (\n, \r\n, etc.)
+    clean = re.split(r'\s+IMPORTANT:\s+The user is currently viewing', clean, maxsplit=1)[0]
+
+    return clean.strip()
+
+
+@app.get("/api/brd-history/{session_id}")
+async def get_brd_chat_history(
+    session_id: str,
+    project_id: str = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get conversation history for BRD chat from AgentCore Memory.
+
+    Uses the same memory the Lambda writes to (AGENTCORE_MEMORY_ID),
+    mirroring the working /api/analyst-history pattern.
+    """
+    try:
+        print(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
+
+        agentcore_client = get_agent_core_client()
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
+
+        print(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
+
+        messages = []
+
+        try:
+            response = agentcore_client.list_events(
+                memoryId=memory_id,
+                sessionId=session_id,
+                actorId=actor_id,
+                includePayloads=True,
+                maxResults=99
+            )
+
+            events = response.get("events", [])
+            print(f"[BRD-HISTORY] AgentCore returned {len(events)} events")
+
+            # Sort events by (eventTimestamp, eventId) oldest first.
+            # list_events may return in undefined order. Using eventId as
+            # a secondary key ensures correct ordering when timestamps
+            # are identical or have low precision.
+            def _event_sort_key(e):
+                ts = e.get("eventTimestamp")
+                if ts is None:
+                    ts_str = ""
+                else:
+                    ts_str = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                eid = e.get("eventId", "")
+                return (ts_str, eid)
+            events = sorted(events, key=_event_sort_key)
+
+            for event in events:
+                payload_list = event.get("payload", [])
+                for payload_item in payload_list:
+                    conv_data = payload_item.get("conversational")
+                    if not conv_data:
+                        continue
+                    text_content = conv_data.get("content", {}).get("text")
+                    if not text_content:
+                        continue
+                    role = conv_data.get("role", "assistant").lower()
+                    if role == "user":
+                        # Strip the enhanced section context; keep only the actual user message
+                        clean_text = _extract_clean_user_message(text_content)
+                        messages.append({
+                            "role": "user",
+                            "content": clean_text,
+                            "isBot": False
+                        })
+                    elif role == "assistant":
+                        messages.append({
+                            "role": "assistant",
+                            "content": text_content,
+                            "isBot": True
+                        })
+
+            # Already sorted oldest-first above — no need to reverse
+
+        except Exception as e:
+            print(f"[BRD-HISTORY] AgentCore Memory query failed: {e}")
+            import traceback
+            traceback.print_exc()
+
+        print(f"[BRD-HISTORY] Returning {len(messages)} messages")
+
+        return JSONResponse(content={
+            "messages": messages,
+            "session_id": session_id,
+            "count": len(messages)
+        })
+
+    except Exception as e:
+        print(f"[BRD-HISTORY] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
         return JSONResponse(status_code=500, content={
             "error": str(e),
             "messages": []

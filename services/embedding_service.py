@@ -6,25 +6,34 @@ Uses the OpenAI-compatible embeddings endpoint with Titan model
 import re
 from typing import List
 import os
+import logging
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
-# Deluxe gateway proxy configuration
-DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
-DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'Titan-v2')
-
+logger = logging.getLogger(__name__)
 
 class EmbeddingService:
     def __init__(self):
-        self.client = OpenAI(
-            base_url=DLXAI_GATEWAY_URL,
-            api_key=DLXAI_GATEWAY_KEY,
+        region = os.getenv('AWS_REGION', 'us-east-1')
+        has_access_key = bool(os.getenv('AWS_ACCESS_KEY_ID'))
+        has_secret_key = bool(os.getenv('AWS_SECRET_ACCESS_KEY'))
+        has_session_token = bool(os.getenv('AWS_SESSION_TOKEN'))
+        logger.info(f"[EmbeddingService] Initializing Bedrock client: region={region}, "
+                     f"access_key={'SET' if has_access_key else 'MISSING'}, "
+                     f"secret_key={'SET' if has_secret_key else 'MISSING'}, "
+                     f"session_token={'SET' if has_session_token else 'MISSING'}")
+        self.bedrock_runtime = boto3.client(
+            'bedrock-runtime',
+            region_name=region,
+            aws_access_key_id=os.getenv('AWS_ACCESS_KEY_ID'),
+            aws_secret_access_key=os.getenv('AWS_SECRET_ACCESS_KEY'),
+            aws_session_token=os.getenv('AWS_SESSION_TOKEN')
         )
         self.embedding_model_id = EMBEDDING_MODEL
         self.chunk_size = 500  # words per chunk
+        logger.info(f"[EmbeddingService] Ready. Model: {self.embedding_model_id}, chunk_size: {self.chunk_size}")
     
     def chunk_text(self, text: str, chunk_size: int = None) -> List[str]:
         """
@@ -68,20 +77,36 @@ class EmbeddingService:
             1536-dimensional embedding vector
         """
         try:
-            response = self.client.embeddings.create(
-                model=self.embedding_model_id,
-                input=text,
+            input_length = len(text)
+            word_count = len(text.split())
+            logger.info(f"[EmbeddingService] generate_embedding: input_length={input_length} chars, {word_count} words")
+
+            # Prepare request
+            body = json.dumps({
+                "inputText": text
+            })
+
+            # Call Bedrock
+            logger.info(f"[EmbeddingService] Calling Bedrock invoke_model (model={self.embedding_model_id})...")
+            response = self.bedrock_runtime.invoke_model(
+                modelId=self.embedding_model_id,
+                body=body,
+                contentType='application/json',
+                accept='application/json'
             )
-            
-            embedding = response.data[0].embedding
-            
+
+            # Parse response
+            response_body = json.loads(response['body'].read())
+            embedding = response_body.get('embedding')
+
             if not embedding:
-                raise ValueError("No embedding returned from gateway")
-            
+                raise ValueError("No embedding returned from Bedrock")
+
+            logger.info(f"[EmbeddingService] Bedrock returned embedding: dimension={len(embedding)}")
             return embedding
-            
+
         except Exception as e:
-            print(f"Error generating embedding: {e}")
+            logger.error(f"[EmbeddingService] FAILED to generate embedding: {type(e).__name__}: {e}")
             raise
     
     def generate_embeddings_for_chunks(self, chunks: List[str]) -> List[List[float]]:

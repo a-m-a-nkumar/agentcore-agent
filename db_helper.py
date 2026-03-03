@@ -6,6 +6,7 @@ Handles all database operations for users, projects, and analyst sessions
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import os
+import json
 import logging
 import time
 from psycopg2 import pool
@@ -26,44 +27,153 @@ def get_db_pool():
     global _db_pool
     if _db_pool is None:
         try:
-            params = get_db_params()
-            _db_pool = pool.ThreadedConnectionPool(1, 20, **params)
+            _db_pool = pool.ThreadedConnectionPool(
+                1, 20,
+                host=os.getenv("DATABASE_HOST"),
+                port=os.getenv("DATABASE_PORT", "5432"),
+                database=os.getenv("DATABASE_NAME"),
+                user=os.getenv("DATABASE_USER"),
+                password=os.getenv("DATABASE_PASSWORD"),
+                sslmode="require",
+                # TCP keepalive to prevent the remote DB from dropping idle connections
+                keepalives=1,
+                keepalives_idle=30,      # send keepalive after 30s idle
+                keepalives_interval=10,  # retry every 10s
+                keepalives_count=5       # give up after 5 missed replies
+            )
             logger.info("Database connection pool initialized")
+            # Run auto-migrations on first pool init
+            _run_migrations()
         except Exception as e:
             logger.error(f"Failed to initialize database pool: {e}")
             raise
     return _db_pool
 
 
-def reset_db_pool():
-    """Reset the connection pool (e.g., when IAM token expires)"""
-    global _db_pool
-    if _db_pool:
-        try:
-            _db_pool.closeall()
-        except Exception:
-            pass
-    _db_pool = None
-    logger.info("Database connection pool reset")
+def _run_migrations():
+    """Run safe ALTER TABLE migrations (idempotent — skips if columns already exist)"""
+    conn = _db_pool.getconn()
+    try:
+        with conn.cursor() as cursor:
+            # Add brd_id column to projects table
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'projects' AND column_name = 'brd_id'
+                    ) THEN
+                        ALTER TABLE projects ADD COLUMN brd_id TEXT;
+                    END IF;
+                END $$;
+            """)
+            # Add agentcore_session_id column to projects table
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'projects' AND column_name = 'agentcore_session_id'
+                    ) THEN
+                        ALTER TABLE projects ADD COLUMN agentcore_session_id TEXT;
+                    END IF;
+                END $$;
+            """)
+            # Add brd_content column to projects table
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'projects' AND column_name = 'brd_content'
+                    ) THEN
+                        ALTER TABLE projects ADD COLUMN brd_content TEXT;
+                    END IF;
+                END $$;
+            """)
+            # Add brd_chat_history column to projects table (JSON array of chat messages)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'projects' AND column_name = 'brd_chat_history'
+                    ) THEN
+                        ALTER TABLE projects ADD COLUMN brd_chat_history TEXT DEFAULT '[]';
+                    END IF;
+                END $$;
+            """)
+            conn.commit()
+            logger.info("Database migrations completed (brd_id, agentcore_session_id, brd_content, brd_chat_history on projects)")
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Migration error (non-fatal): {e}")
+    finally:
+        _db_pool.putconn(conn)
 
 def get_db_connection():
     """
-    Get a connection from the pool
+    Get a connection from the pool with health check.
+    If the connection is stale (RDS dropped it), discard and get a fresh one.
     """
     start_time = time.time()
-    try:
-        conn = get_db_pool().getconn()
-        duration = (time.time() - start_time) * 1000
-        logger.info(f"[DB_PERF] Borrowed connection from pool in {duration:.2f}ms")
-        return conn
-    except Exception as e:
-        logger.error(f"Failed to get connection from pool: {e}")
-        raise
+    max_retries = 2
+    for attempt in range(max_retries):
+        try:
+            conn = get_db_pool().getconn()
+            # Health check: ping the connection
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+            except Exception:
+                # Connection is stale — discard it and retry
+                logger.warning(f"[DB] Stale connection detected (attempt {attempt + 1}), discarding and retrying...")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                try:
+                    get_db_pool().putconn(conn, close=True)
+                except Exception:
+                    pass
+                if attempt < max_retries - 1:
+                    continue
+                # Last attempt: reset the entire pool
+                global _db_pool
+                logger.warning("[DB] Resetting connection pool after stale connections")
+                try:
+                    _db_pool.closeall()
+                except Exception:
+                    pass
+                _db_pool = None
+                conn = get_db_pool().getconn()
+            
+            duration = (time.time() - start_time) * 1000
+            logger.info(f"[DB_PERF] Borrowed connection from pool in {duration:.2f}ms")
+            return conn
+        except Exception as e:
+            if attempt < max_retries - 1:
+                logger.warning(f"[DB] Connection attempt {attempt + 1} failed: {e}, retrying...")
+                continue
+            logger.error(f"Failed to get connection from pool: {e}")
+            raise
 
 def release_db_connection(conn):
-    """Return a connection to the pool"""
+    """Return a connection to the pool, discarding it if broken"""
     if _db_pool and conn:
-        _db_pool.putconn(conn)
+        try:
+            _db_pool.putconn(conn)
+        except Exception:
+            # Connection is dead — close and discard it instead of returning to pool
+            logger.warning("[DB] Connection broken on release, discarding from pool")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                _db_pool.putconn(conn, close=True)
+            except Exception:
+                pass
 
 
 # ============================================
@@ -333,6 +443,211 @@ def delete_project(project_id: str, hard_delete: bool = False) -> bool:
         conn.rollback()
         logger.error(f"Error deleting project: {e}")
         raise
+    finally:
+        release_db_connection(conn)
+
+
+# ============================================
+# PROJECT BRD SESSION PERSISTENCE
+# ============================================
+
+def save_project_brd_session(
+    project_id: str,
+    brd_id: str = None,
+    agentcore_session_id: str = None,
+    brd_content: str = None
+) -> bool:
+    """
+    Save/update the BRD session for a project.
+    Stores brd_id and agentcore_session_id so chat can be restored later.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            updates = []
+            params = []
+            if brd_id is not None:
+                updates.append("brd_id = %s")
+                params.append(brd_id)
+            if agentcore_session_id is not None:
+                updates.append("agentcore_session_id = %s")
+                params.append(agentcore_session_id)
+            if brd_content is not None:
+                updates.append("brd_content = %s")
+                params.append(brd_content)
+            if not updates:
+                return False
+            params.append(project_id)
+            cursor.execute(f"""
+                UPDATE projects
+                SET {', '.join(updates)}, updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND is_deleted = FALSE
+            """, params)
+            conn.commit()
+            logger.info(f"Saved BRD session for project {project_id}: brd_id={brd_id}, session_id={agentcore_session_id}")
+            return cursor.rowcount > 0
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error saving project BRD session: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_project_brd_session(project_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Get the saved BRD session for a project.
+    Returns {brd_id, agentcore_session_id} or None.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT brd_id, agentcore_session_id, brd_content
+                FROM projects
+                WHERE id = %s AND is_deleted = FALSE
+            """, (project_id,))
+            row = cursor.fetchone()
+            if row:
+                result = dict(row)
+                # Only return if at least one field is set
+                if result.get('brd_id') or result.get('agentcore_session_id'):
+                    return result
+            return None
+    finally:
+        release_db_connection(conn)
+
+
+# ============================================
+# BRD CHAT HISTORY (DB-backed)
+# ============================================
+
+def append_brd_chat_messages(project_id: str, messages: List[Dict[str, str]]) -> bool:
+    """
+    Append one or more chat messages to the project's brd_chat_history JSON array.
+    Each message should have: role, content, timestamp.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            # Read current history
+            cursor.execute(
+                "SELECT brd_chat_history FROM projects WHERE id = %s AND is_deleted = FALSE",
+                (project_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return False
+            current = row[0] or "[]"
+            try:
+                history = json.loads(current)
+            except (json.JSONDecodeError, TypeError):
+                history = []
+            history.extend(messages)
+            cursor.execute(
+                "UPDATE projects SET brd_chat_history = %s WHERE id = %s",
+                (json.dumps(history), project_id)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error appending BRD chat messages: {e}")
+        return False
+    finally:
+        release_db_connection(conn)
+
+
+def get_brd_chat_messages(project_id: str) -> List[Dict[str, str]]:
+    """
+    Retrieve all BRD chat messages for a project.
+    Returns list of {role, content, timestamp} dicts.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT brd_chat_history FROM projects WHERE id = %s AND is_deleted = FALSE",
+                (project_id,)
+            )
+            row = cursor.fetchone()
+            if not row or not row[0]:
+                return []
+            try:
+                return json.loads(row[0])
+            except (json.JSONDecodeError, TypeError):
+                return []
+    finally:
+        release_db_connection(conn)
+
+
+def append_brd_chat_messages_by_brd_id(brd_id: str, messages: List[Dict[str, str]]) -> bool:
+    """
+    Append chat messages to the project that owns this brd_id.
+    Looks up project_id from brd_id, then delegates to append_brd_chat_messages.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM projects WHERE brd_id = %s AND is_deleted = FALSE LIMIT 1",
+                (brd_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                logger.warning(f"No project found for brd_id={brd_id}")
+                return False
+        release_db_connection(conn)
+        conn = None
+        return append_brd_chat_messages(row[0], messages)
+    except Exception as e:
+        logger.error(f"Error looking up project for brd_id={brd_id}: {e}")
+        return False
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def get_brd_chat_messages_by_brd_id(brd_id: str) -> List[Dict[str, str]]:
+    """
+    Retrieve BRD chat messages for the project that owns this brd_id.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT id FROM projects WHERE brd_id = %s AND is_deleted = FALSE LIMIT 1",
+                (brd_id,)
+            )
+            row = cursor.fetchone()
+            if not row:
+                return []
+        release_db_connection(conn)
+        conn = None
+        return get_brd_chat_messages(row[0])
+    except Exception as e:
+        logger.error(f"Error looking up project for brd_id={brd_id}: {e}")
+        return []
+    finally:
+        if conn:
+            release_db_connection(conn)
+
+
+def clear_brd_chat_history(project_id: str) -> bool:
+    """Clear the BRD chat history for a project (used when regenerating BRD)."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "UPDATE projects SET brd_chat_history = '[]' WHERE id = %s",
+                (project_id,)
+            )
+            conn.commit()
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error clearing BRD chat history: {e}")
+        return False
     finally:
         release_db_connection(conn)
 
