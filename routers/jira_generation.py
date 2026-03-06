@@ -278,10 +278,8 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
 
         generated_text = chat_completion(
             messages=[{"role": "user", "content": prompt}],
-            model=BEDROCK_MODEL_ID,
             temperature=0.3,
-            top_p=0.95,
-            max_tokens=75000,
+            max_tokens=16384,
         )
         
         logger.info(f"Gateway response received, length: {len(generated_text)} characters")

@@ -19,15 +19,13 @@ def chat_completion(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     temperature: float = 0.9,
-    top_p: float = 0.95,
     max_tokens: Optional[int] = None,
 ) -> str:
     client = _get_client()
     params = {
-        "model": model or os.getenv("BEDROCK_MODEL_ID", DEFAULT_CHAT_MODEL),
+        "model": model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL),
         "messages": messages,
         "temperature": temperature,
-        "top_p": top_p,
     }
     if max_tokens is not None:
         params["max_tokens"] = max_tokens

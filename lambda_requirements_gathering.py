@@ -178,9 +178,7 @@ def lambda_handler(event, context):
 
         assistant_response = chat_completion(
             messages=[{"role": "user", "content": full_prompt}],
-            model=BEDROCK_MODEL_ID,
             temperature=TEMPERATURE,
-            top_p=0.95,
             max_tokens=MAX_TOKENS,
         )
         

@@ -48,6 +48,7 @@ Thumbs.db
 
 # Lambda packages
 lambda_*_package/
+lambda_builds/
 *.zip
 
 # AgentCore

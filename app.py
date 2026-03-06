@@ -31,8 +31,15 @@ from routers.orchestration import router as orchestration_router
 
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
+from services.s3_service import s3_put_object, get_s3_client
 
-load_dotenv()
+load_dotenv(override=True)
+
+# When using AWS_PROFILE (SSO), clear any stale STS credentials from the environment
+# so boto3 resolves credentials via the SSO profile instead of expired keys
+if os.getenv("AWS_PROFILE"):
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        os.environ.pop(key, None)
 
 app = FastAPI()
 
@@ -163,11 +170,6 @@ def check_aws_credentials():
         return True, identity
     except Exception as e:
         return False, str(e)
-
-# Function to get fresh boto3 clients (reinitializes on each call to pick up credential changes)
-def get_s3_client():
-    """Get a fresh S3 client"""
-    return boto3.client("s3", region_name=REGION)
 
 def get_agent_core_client():
     """Get a fresh AgentCore client with increased timeout for long-running operations"""
@@ -789,7 +791,7 @@ async def generate_brd(
                                     'transcript': transcript_text[:500]  # Truncate for session creation
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName='brd_chat_lambda',
+                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -852,25 +854,24 @@ async def upload_transcript_to_s3(
         print(f"[UPLOAD] User: {current_user.get('email')} ({current_user.get('user_id')})")
         print("="*80)
         
-        s3_client = get_s3_client()
         bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-        
+
         # Generate unique key for transcript
         transcript_id = str(uuid.uuid4())
         transcript_key = f"transcripts/{transcript_id}/{transcript.filename}"
-        
+
         # Read file content
         transcript_content = await transcript.read()
-        
+
         print(f"[UPLOAD] Uploading to S3: s3://{bucket_name}/{transcript_key}")
         print(f"[UPLOAD] File size: {len(transcript_content)} bytes")
-        
-        # Upload to S3
-        s3_client.put_object(
-            Bucket=bucket_name,
-            Key=transcript_key,
-            Body=transcript_content,
-            ContentType=transcript.content_type or "application/octet-stream"
+
+        # Upload to S3 (KMS encrypted)
+        s3_put_object(
+            key=transcript_key,
+            body=transcript_content,
+            content_type=transcript.content_type or "application/octet-stream",
+            bucket=bucket_name,
         )
         
         print(f"[UPLOAD] ✅ Successfully uploaded to S3")
@@ -908,8 +909,8 @@ async def generate_brd_from_s3(
         s3_client = get_s3_client()
         bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
         
-        # Template path in S3 - confirmed: templates/Deluxe_BRD_Template_v2+2.docx
-        template_s3_path = "templates/Deluxe_BRD_Template_v2+2.docx"
+        # Template path in S3 - confirmed: templates/Deluxe_BRD_Template.docx
+        template_s3_path = "templates/Deluxe_BRD_Template.docx"
         
         print(f"[APP] Transcript S3 path: {transcript_s3_path}")
         print(f"[APP] Template S3 path: {template_s3_path}")
@@ -1017,7 +1018,7 @@ async def generate_brd_from_s3(
                                     'transcript': transcript_text[:500]
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName='brd_chat_lambda',
+                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -1933,7 +1934,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2178,7 +2179,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2392,7 +2393,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2428,7 +2429,7 @@ async def analyst_generate_brd(
         
         # Get S3 bucket and template path
         s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-        template_s3_key = "templates/Deluxe_BRD_Template_v2+2.docx"
+        template_s3_key = "templates/Deluxe_BRD_Template.docx"
         
         # Get Lambda client with increased timeout for long-running BRD generation
         from botocore.config import Config
@@ -2439,7 +2440,7 @@ async def analyst_generate_brd(
         )
         lambda_client = boto3.client('lambda', region_name=REGION, config=lambda_config)
         # Use lambda_brd_from_history for analyst agent BRD generation
-        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
         
         # Prepare Lambda payload for lambda_brd_from_history
         # This Lambda expects: conversation_history (list of messages)
@@ -2718,11 +2719,11 @@ async def download_brd(
                         
                         # Also save the text file for future downloads
                         try:
-                            s3_client.put_object(
-                                Bucket=bucket_name,
-                                Key=s3_key_txt,
-                                Body=brd_text.encode("utf-8"),
-                                ContentType="text/plain"
+                            s3_put_object(
+                                key=s3_key_txt,
+                                body=brd_text,
+                                content_type="text/plain",
+                                bucket=bucket_name,
                             )
                             print(f"[DOWNLOAD] ✅ Saved rendered text file to S3 for future downloads")
                         except Exception as save_err:
@@ -3052,15 +3053,20 @@ def _load_brd_structure_from_s3(brd_id: str) -> dict:
 
 
 def _is_doc_title_section(title: str) -> bool:
-    t = (title or "").strip().lower()
+    """Detect if the first section is a document title (not a real BRD section).
+
+    Real BRD sections always start with a number like "1. Document Overview".
+    The LLM sometimes prepends a project-name section without a number prefix;
+    this helper identifies those so ``_iter_user_sections`` can skip them.
+    """
+    t = (title or "").strip()
     if not t:
         return False
-    # Match lambda behavior: doc title often looks like "AI-Powered..." or similar and not "1. ..."
-    if "ai-powered" in t or "brd" in t:
-        return True
-    if len(t) < 30 and not re.match(r"^\d+\.", t):
-        return True
-    return False
+    # If the first section starts with a digit it is a real numbered section.
+    if re.match(r"^\d+\.", t):
+        return False
+    # Everything else (project names, headings without numbers) is a doc title.
+    return True
 
 
 def _iter_user_sections(brd_data: dict):
