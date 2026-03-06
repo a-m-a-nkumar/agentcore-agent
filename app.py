@@ -108,8 +108,8 @@ async def log_requests(request: Request, call_next):
     return response
 
 # Configuration (from .env)
-AGENT_ARN = os.getenv("AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK")
-ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/Analyst_agent-kCoE8v38c0")
+AGENT_ARN = os.getenv("AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/pm_agent-uDlkiNFagv")
+ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/analyst_agent-JAa3wMFKOK")
 REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Log agent ARNs on startup
@@ -853,7 +853,7 @@ async def upload_transcript_to_s3(
         print("="*80)
         
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
         
         # Generate unique key for transcript
         transcript_id = str(uuid.uuid4())
@@ -906,7 +906,7 @@ async def generate_brd_from_s3(
         print("="*80)
         
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
         
         # Template path in S3 - confirmed: templates/Deluxe_BRD_Template_v2+2.docx
         template_s3_path = "templates/Deluxe_BRD_Template_v2+2.docx"
@@ -1756,7 +1756,7 @@ async def get_analyst_history(
         print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
 
         # Get AgentCore Memory configuration
-        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
+        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
         AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
 
         # Get AgentCore client
@@ -1832,7 +1832,7 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         # Get conversation history from AgentCore Memory
@@ -2046,7 +2046,7 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         # If session_id is "none" or empty, try to find the most recent session
@@ -2291,7 +2291,7 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         # Get conversation history from AgentCore Memory
@@ -2427,7 +2427,7 @@ async def analyst_generate_brd(
         brd_id = str(uuid.uuid4())
         
         # Get S3 bucket and template path
-        s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
         template_s3_key = "templates/Deluxe_BRD_Template_v2+2.docx"
         
         # Get Lambda client with increased timeout for long-running BRD generation
@@ -2559,7 +2559,7 @@ async def download_brd(
         
         # Get S3 client
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
         
         # BRD is stored as: brds/{brd_id}/BRD_{brd_id}.txt
         s3_key_txt = f"brds/{brd_id}/BRD_{brd_id}.txt"
@@ -2799,7 +2799,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         messages = []
@@ -2902,7 +2902,7 @@ async def get_brd_chat_history(
         print(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
 
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
 
         print(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
@@ -3038,7 +3038,7 @@ async def revoke_brd_access(
 def _load_brd_structure_from_s3(brd_id: str) -> dict:
     """Load the latest BRD structure JSON from S3."""
     s3_client = get_s3_client()
-    bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+    bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
     key = f"brds/{brd_id}/brd_structure.json"
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=key)

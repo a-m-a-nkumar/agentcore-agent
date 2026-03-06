@@ -21,10 +21,10 @@ logger.setLevel(logging.INFO)
 
 # Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
+AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
 AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
-S3_BUCKET = os.getenv('S3_BUCKET_NAME', 'test-development-bucket-siriusai')
-TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template_v2+2.docx'
+S3_BUCKET = os.getenv('S3_BUCKET_NAME', 'sdlc-orch-dev-us-east-1-app-data')
+TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template.docx'
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
 BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')

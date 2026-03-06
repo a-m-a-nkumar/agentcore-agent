@@ -296,7 +296,7 @@ def setup_database(conn):
                 title TEXT NOT NULL,
                 content_chunk TEXT NOT NULL,
                 chunk_index INTEGER DEFAULT 0,
-                embedding vector(1536) NOT NULL,
+                embedding vector(1024) NOT NULL,
                 url TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 metadata JSONB DEFAULT '{}'::jsonb

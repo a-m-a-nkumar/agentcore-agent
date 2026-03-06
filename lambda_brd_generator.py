@@ -612,7 +612,7 @@ def lambda_handler(event, context):
         
         if brd_id:
             try:
-                s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+                s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
                 s3_region = os.getenv("AWS_REGION", "us-east-1")
                 s3_client = boto3.client("s3", region_name=s3_region)
                 brd_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
@@ -657,7 +657,7 @@ def lambda_handler(event, context):
         
         if brd_id:
             try:
-                s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+                s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
                 s3_region = os.getenv("AWS_REGION", "us-east-1")
                 s3_client = boto3.client("s3", region_name=s3_region)
                 brd_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
@@ -722,7 +722,7 @@ def lambda_handler(event, context):
     # Always save to S3 now (since we have brd_id)
     if brd_id:
         try:
-            s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+            s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
             s3_region = os.getenv("AWS_REGION", "us-east-1")
             s3_client = boto3.client("s3", region_name=s3_region)
             brd_key = f"brds/{brd_id}/BRD_{brd_id}.txt"

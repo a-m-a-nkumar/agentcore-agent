@@ -28,9 +28,9 @@ BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
 BEDROCK_MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4000"))
 BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
-AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "testgatewayfbdd062d-e2eo4q0y09")
-AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "sdlc-dev-agentcore-gateway-z8tkb0pspy")
+AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
 AGENTCORE_ACTOR_ID = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
 
 def _get_s3_client():

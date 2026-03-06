@@ -9,8 +9,16 @@ ENV UV_SYSTEM_PYTHON=1 \
     DOCKER_CONTAINER=1 \
     AWS_REGION=us-east-1 \
     AWS_DEFAULT_REGION=us-east-1 \
-    BEDROCK_AGENTCORE_MEMORY_ID=Test-DGwqpP7Rvj \
-    BEDROCK_AGENTCORE_MEMORY_NAME=Test
+    BEDROCK_AGENTCORE_MEMORY_ID=sdlc_dev_agentcore_memory-VF74Yf64ZB \
+    BEDROCK_AGENTCORE_MEMORY_NAME=sdlc_dev_agentcore_memory \
+    AGENTCORE_MEMORY_ID=sdlc_dev_agentcore_memory-VF74Yf64ZB \
+    AGENTCORE_ACTOR_ID=analyst-session \
+    AGENTCORE_GATEWAY_ID=sdlc-dev-agentcore-gateway-z8tkb0pspy \
+    S3_BUCKET_NAME=sdlc-orch-dev-us-east-1-app-data \
+    LAMBDA_REQUIREMENTS_GATHERING_ARN=arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering \
+    LAMBDA_BRD_FROM_HISTORY_ARN=arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history \
+    DLXAI_GATEWAY_URL=https://dlxai-dev.deluxe.com/proxy \
+    GATEWAY_MODEL=Claude-4.5-Sonnet
 
 
 

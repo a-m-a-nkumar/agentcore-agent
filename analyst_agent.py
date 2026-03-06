@@ -40,11 +40,11 @@ GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', 'Claude-4.5-Sonnet')
 # Lambda Function ARNs (can also use function names, but ARNs are more explicit)
 LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
     'LAMBDA_REQUIREMENTS_GATHERING_ARN',
-    'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
+    'arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering'
 )
 LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
     'LAMBDA_BRD_FROM_HISTORY_ARN',
-    'arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda'
+    'arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history'
 )
 
 # For backward compatibility, also support function names

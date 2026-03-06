@@ -16,9 +16,9 @@ from strands.models.openai import OpenAIModel
 app = BedrockAgentCoreApp()
 
 # Lambda function names (configurable via environment variables)
-LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'brd_generator_lambda')
-LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', 'brd_retriever_lambda')
-LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', 'brd_chat_lambda')
+LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-generator')
+LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', 'arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-retriever')
+LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', 'arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-chat')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 
 # Deluxe gateway proxy (OpenAI-compatible wrapper for Bedrock)
@@ -27,7 +27,7 @@ DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
 GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', 'Claude-4.5-Sonnet')
 
 # AgentCore Memory configuration
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
+AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
 AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'brd-session')
 
 # Lazy loading of boto3 Lambda client

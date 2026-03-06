@@ -2,7 +2,7 @@ import json
 import uuid
 import boto3
 
-agent_arn = "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK"
+agent_arn = "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/pm_agent-uDlkiNFagv"
 prompt = "Tell me a joke"
 
 # Initialize the Amazon Bedrock AgentCore client
