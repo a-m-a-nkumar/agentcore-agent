@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "enhance-prompt": {
+      "command": "C:\\Users\\Aman1Kumar\\OneDrive - Sirius AI\\Documents\\agentcore-starter 3\\agentcore-starter\\.venv\\Scripts\\prompt-enhancer-mcp.exe",
+      "env": {
+        "PROJECT_ID": "84d5aff2-ad2e-4b95-82fd-78fd8331c64f",
+        "API_URL": "http://localhost:8000",
+        "API_KEY": "dev-key-aman"
+      }
+    }
+  }
+}

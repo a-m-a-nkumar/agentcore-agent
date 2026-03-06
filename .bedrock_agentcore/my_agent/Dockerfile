@@ -23,8 +23,8 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 
 
-# Use root requirements.txt (note: .bedrock_agentcore/ is excluded by .dockerignore)
-COPY requirements.txt requirements.txt
+# Use lean agent-only requirements (NOT the full backend requirements.txt)
+COPY requirements-agent.txt requirements.txt
 RUN uv pip install -r requirements.txt
 
 
