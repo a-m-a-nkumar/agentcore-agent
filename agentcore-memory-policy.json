@@ -1,0 +1,20 @@
+{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": [
+                "bedrock-agentcore:ListEvents",
+                "bedrock-agentcore:PutEvents",
+                "bedrock-agentcore:CreateEvent",
+                "bedrock-agentcore:GetMemory",
+                "bedrock-agentcore:DeleteMemory",
+                "bedrock-agentcore:*"
+            ],
+            "Resource": [
+                "arn:aws:bedrock-agentcore:us-east-1:448049797912:memory/*"
+            ]
+        }
+    ]
+}
+
