@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY app.py .
 COPY auth.py .
+COPY db_config.py .
 COPY db_helper.py .
 COPY db_helper_vector.py .
 COPY langfuse_client.py .
