@@ -25,6 +25,7 @@ COPY db_config.py .
 COPY db_helper.py .
 COPY db_helper_vector.py .
 COPY langfuse_client.py .
+COPY llm_gateway.py .
 COPY routers/ ./routers/
 COPY services/ ./services/
 COPY templates/ ./templates/
