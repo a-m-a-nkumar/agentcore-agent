@@ -27,14 +27,16 @@ def get_db_pool():
     global _db_pool
     if _db_pool is None:
         try:
+            db_params = get_db_params()
+            sslmode = db_params.get("sslmode", "require")
             _db_pool = pool.ThreadedConnectionPool(
                 1, 20,
-                host=os.getenv("DATABASE_HOST"),
-                port=os.getenv("DATABASE_PORT", "5432"),
-                database=os.getenv("DATABASE_NAME"),
-                user=os.getenv("DATABASE_USER"),
-                password=os.getenv("DATABASE_PASSWORD"),
-                sslmode="require",
+                host=db_params["host"],
+                port=db_params["port"],
+                database=db_params["database"],
+                user=db_params["user"],
+                password=db_params["password"],
+                sslmode=sslmode,
                 # TCP keepalive to prevent the remote DB from dropping idle connections
                 keepalives=1,
                 keepalives_idle=30,      # send keepalive after 30s idle
