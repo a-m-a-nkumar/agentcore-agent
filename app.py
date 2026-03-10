@@ -3085,8 +3085,11 @@ def _iter_user_sections(brd_data: dict):
         title = (sec.get("title", "") or "").strip()
         title_lower = title.lower()
 
-        # Skip Scope subsections - same rule as lambda
-        if title.startswith("#") and ("in scope" in title_lower or "out of scope" in title_lower):
+        # Skip ALL subsections whose title starts with "#"
+        # These are sub-headers within a parent section (e.g. "# User Story 1: ...",
+        # "# In Scope", "# Out of Scope", "# Acronyms and Abbreviations", "# Appendix")
+        # and should not appear as top-level BRD sections.
+        if title.startswith("#"):
             continue
 
         yield user_num, idx, title, sec
