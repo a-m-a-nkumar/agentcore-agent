@@ -1,0 +1,30 @@
+# Use pre-built images tagged "backend" and "frontend".
+# 1) Build backend:  docker build -t backend .
+# 2) Build frontend: cd <deluxe-sdlc-frontend> && docker build -t frontend .
+# 3) Run:            docker compose up
+# Backend: http://localhost:8000  |  Frontend: http://localhost:8080
+
+version: "3.8"
+
+services:
+  backend:
+    image: backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NEXTAUTH_URL=https://deluxe.siriusai.com
+      - NEXTAUTH_SECRET=u6sHkQxF9mZq0u5y7k3qP9WkLrF8sD2aQ9Xk1G0pM8E=
+
+  frontend:
+    image: frontend
+    ports:
+      - "8080:8080"
+    environment:
+      BACKEND_URL: http://backend:8000
+      NEXTAUTH_URL: https://deluxe.siriusai.com
+      NEXTAUTH_SECRET: u6sHkQxF9mZq0u5y7k3qP9WkLrF8sD2aQ9Xk1G0pM8E=
+    depends_on:
+      - backend
