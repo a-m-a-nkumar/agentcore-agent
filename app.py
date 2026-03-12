@@ -28,6 +28,7 @@ from routers.integrations import router as integrations_router
 from routers.sync import router as sync_router
 from routers.jira_generation import router as jira_generation_router
 from routers.orchestration import router as orchestration_router
+from routers.test_generation import router as test_generation_router
 
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
@@ -88,6 +89,7 @@ app.include_router(integrations_router)
 app.include_router(sync_router)
 app.include_router(orchestration_router)
 app.include_router(jira_generation_router)
+app.include_router(test_generation_router)
 
 # Add request logging middleware
 @app.middleware("http")
