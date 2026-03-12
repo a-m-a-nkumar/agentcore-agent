@@ -402,13 +402,26 @@ async def push_test_scenarios_to_confluence(
             credentials['atlassian_api_token']
         )
         confluence_html = markdown_to_confluence_storage(request.content)
-        page = confluence_service.create_page(
-            space_key=space_key,
-            title=request.page_title,
-            content=confluence_html,
-            parent_id=request.parent_page_id
-        )
-        logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
+
+        existing = confluence_service.find_page_by_title(space_key, request.page_title)
+        if existing:
+            current_version = existing.get('version', {}).get('number', 1)
+            page = confluence_service.update_page(
+                page_id=existing['id'],
+                title=request.page_title,
+                content=confluence_html,
+                current_version=current_version
+            )
+            logger.info(f"Updated Confluence page: {page['title']} (ID: {page['id']})")
+        else:
+            page = confluence_service.create_page(
+                space_key=space_key,
+                title=request.page_title,
+                content=confluence_html,
+                parent_id=request.parent_page_id
+            )
+            logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
+
         return {
             "page_id": page['id'],
             "page_title": page['title'],
