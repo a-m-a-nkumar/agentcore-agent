@@ -51,7 +51,7 @@ async def get_current_user(token_data: dict = Depends(verify_azure_token)):
 class QueryRequest(BaseModel):
     project_id: str
     query: str
-    max_chunks: Optional[int] = 5
+    max_chunks: Optional[int] = 20
     source_filter: Optional[str] = None  # 'confluence' or 'jira'
     include_context: Optional[bool] = True  # Include chunk ±1
     return_prompt: Optional[bool] = False  # If True, returns compiled prompt instead of LLM answer

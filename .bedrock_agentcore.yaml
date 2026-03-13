@@ -7,7 +7,7 @@ agents:
     runtime_type: null
     platform: linux/arm64
     container_runtime: none
-    source_path: .
+    source_path: .bedrock_agentcore/my_agent
     aws:
       execution_role: arn:aws:iam::448049797912:role/AmazonBedrockAgentCoreSDKRuntime-us-east-1-e72c1a7c7a
       execution_role_auto_create: false

@@ -88,23 +88,17 @@ catch {
 Write-Host ""
 Write-Host "[3/6] Verifying agent files..." -ForegroundColor Yellow
 
-if (-not (Test-Path "my_agent.py")) {
-    Write-Host "  [ERROR] my_agent.py not found!" -ForegroundColor Red
+if (-not (Test-Path ".bedrock_agentcore\my_agent\my_agent.py")) {
+    Write-Host "  [ERROR] .bedrock_agentcore\my_agent\my_agent.py not found!" -ForegroundColor Red
     exit 1
 }
-Write-Host "  [OK] my_agent.py exists" -ForegroundColor Green
+Write-Host "  [OK] my_agent.py exists in .bedrock_agentcore/my_agent/" -ForegroundColor Green
 
-if (-not (Test-Path "requirements.txt")) {
-    Write-Host "  [WARN] requirements.txt not found, creating..." -ForegroundColor Yellow
-    @"
-strands-agents>=0.1.0
-boto3>=1.28.0
-python-docx>=0.8.11
-pydantic>=2.0.0
-"@ | Set-Content "requirements.txt"
-    Write-Host "  [OK] Created requirements.txt" -ForegroundColor Green
+if (-not (Test-Path ".bedrock_agentcore\my_agent\requirements.txt")) {
+    Write-Host "  [ERROR] .bedrock_agentcore\my_agent\requirements.txt not found!" -ForegroundColor Red
+    exit 1
 }
-Write-Host "  [OK] requirements.txt exists" -ForegroundColor Green
+Write-Host "  [OK] requirements.txt exists in .bedrock_agentcore/my_agent/" -ForegroundColor Green
 
 if (-not (Test-Path ".bedrock_agentcore.yaml")) {
     Write-Host "  [ERROR] .bedrock_agentcore.yaml not found!" -ForegroundColor Red

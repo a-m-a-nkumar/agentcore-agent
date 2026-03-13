@@ -6,7 +6,7 @@ import re
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
@@ -18,6 +18,13 @@ import jwt
 from jwt import PyJWKClient
 from functools import wraps
 from typing import Optional
+import asyncio
+from functools import partial as _partial
+
+async def run_sync(func, *args, **kwargs):
+    """Run a synchronous function in a thread pool without blocking the event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _partial(func, *args, **kwargs))
 import requests
 from datetime import datetime
 
@@ -725,7 +732,7 @@ async def generate_brd(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = agent_core_client.invoke_agent_runtime(
+            response = await run_sync(agent_core_client.invoke_agent_runtime,
                 agentRuntimeArn=AGENT_ARN,
                 runtimeSessionId=session_id,
                 payload=payload_bytes,
@@ -866,7 +873,7 @@ async def upload_transcript_to_s3(
         print(f"[UPLOAD] File size: {len(transcript_content)} bytes")
         
         # Upload to S3
-        s3_client.put_object(
+        await run_sync(s3_client.put_object,
             Bucket=bucket_name,
             Key=transcript_key,
             Body=transcript_content,
@@ -916,12 +923,12 @@ async def generate_brd_from_s3(
         
         # 1. Fetch transcript from S3
         print(f"[APP] Fetching transcript from S3...")
-        transcript_response = s3_client.get_object(Bucket=bucket_name, Key=transcript_s3_path)
+        transcript_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=transcript_s3_path)
         transcript_content = transcript_response['Body'].read()
         
         # 2. Fetch template from S3
         print(f"[APP] Fetching template from S3...")
-        template_response = s3_client.get_object(Bucket=bucket_name, Key=template_s3_path)
+        template_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=template_s3_path)
         template_content = template_response['Body'].read()
         
         print(f"[APP] Transcript file: {len(transcript_content)} bytes")
@@ -960,7 +967,7 @@ async def generate_brd_from_s3(
         agent_core_client = get_agent_core_client()
         
         try:
-                        response = agent_core_client.invoke_agent_runtime(
+            response = await run_sync(agent_core_client.invoke_agent_runtime,
                 agentRuntimeArn=AGENT_ARN,
                 runtimeSessionId=session_id,
                 payload=payload_bytes,
@@ -1126,7 +1133,7 @@ async def chat_with_agent(
         # retrieved later by /api/brd-history.
         print(f"[CHAT] Using runtimeSessionId: {session_id}")
 
-        response = agent_core_client.invoke_agent_runtime(
+        response = await run_sync(agent_core_client.invoke_agent_runtime,
             agentRuntimeArn=AGENT_ARN,
             runtimeSessionId=session_id,
             payload=payload_bytes,
@@ -1367,7 +1374,7 @@ async def analyst_chat(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = agent_core_client.invoke_agent_runtime(
+            response = await run_sync(agent_core_client.invoke_agent_runtime,
                 agentRuntimeArn=ANALYST_AGENT_ARN,
                 runtimeSessionId=runtime_session_id,
                 payload=payload_bytes,
@@ -1745,6 +1752,61 @@ async def analyst_chat(
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
 
+@app.post("/api/analyst-warm")
+async def analyst_warm():
+    """No-op warm-up endpoint for frontend to call on page load"""
+    return JSONResponse(content={"status": "ok"})
+
+
+@app.post("/api/analyst-chat-stream")
+async def analyst_chat_stream(
+    message: str = Form(...),
+    session_id: str = Form(...),
+    project_id: str = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """SSE streaming wrapper around analyst_chat for frontend compatibility"""
+    SSE_END = chr(10) + chr(10)  # two newline chars for SSE event separator
+
+    async def generate_sse():
+        try:
+            result = await analyst_chat(
+                message=message,
+                session_id=session_id,
+                project_id=project_id,
+                current_user=current_user
+            )
+            result_body = json.loads(result.body.decode("utf-8"))
+
+            response_text = result_body.get("result") or result_body.get("response") or ""
+            resp_session_id = result_body.get("session_id", session_id)
+            resp_brd_id = result_body.get("brd_id")
+
+            chunk_event = {"type": "chunk", "content": response_text}
+            yield "data: " + json.dumps(chunk_event) + SSE_END
+
+            meta = {"type": "metadata", "session_id": resp_session_id}
+            if resp_brd_id:
+                meta["brd_id"] = resp_brd_id
+            yield "data: " + json.dumps(meta) + SSE_END
+
+            done_event = {"type": "done"}
+            yield "data: " + json.dumps(done_event) + SSE_END
+
+        except Exception as e:
+            error_event = {"type": "error", "message": str(e)}
+            yield "data: " + json.dumps(error_event) + SSE_END
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
 @app.get("/api/analyst-history/{session_id}")
 async def get_analyst_history(
     session_id: str,
@@ -1768,7 +1830,7 @@ async def get_analyst_history(
         print(f"[ANALYST-HISTORY] Actor ID: {AGENTCORE_ACTOR_ID}")
 
         # Fetch events from AgentCore Memory
-        response = agentcore_client.list_events(
+        response = await run_sync(agentcore_client.list_events,
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID,
@@ -1883,7 +1945,7 @@ async def analyst_generate_brd(
                         print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not initialize actor: {init_err}")
             
             # List events from AgentCore Memory for this session
-            events_response = agentcore_client.list_events(
+            events_response = await run_sync(agentcore_client.list_events,
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2081,7 +2143,7 @@ async def analyst_generate_brd(
                     print(f"[ANALYST-GENERATE-BRD] Attempting fallback: listing events to find sessions...")
                     try:
                         # List recent events to find session IDs
-                        events_response = agentcore_client.list_events(
+                        events_response = await run_sync(agentcore_client.list_events,
                             memoryId=memory_id,
                             actorId=actor_id,
                             includePayloads=False,
@@ -2128,7 +2190,7 @@ async def analyst_generate_brd(
         
         # List events from AgentCore Memory for this session
         try:
-            events_response = agentcore_client.list_events(
+            events_response = await run_sync(agentcore_client.list_events,
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2342,7 +2404,7 @@ async def analyst_generate_brd(
                         print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not initialize actor: {init_err}")
             
             # List events from AgentCore Memory for this session
-            events_response = agentcore_client.list_events(
+            events_response = await run_sync(agentcore_client.list_events,
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2580,11 +2642,11 @@ async def download_brd(
             json_key = f"brds/{brd_id}/brd_structure.json"
             try:
                 try:
-                    json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                    json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
                 except ClientError as e:
                     if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
                         json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
-                        json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                        json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
                     else:
                         raise e
                 
@@ -2617,7 +2679,7 @@ async def download_brd(
                 if json_error_code == 'NoSuchKey':
                     print(f"[DOWNLOAD] ⚠️  BRD JSON not found, trying text file...")
                     # Fallback to text file and convert to DOCX
-                    response = s3_client.get_object(Bucket=bucket_name, Key=s3_key_txt)
+                    response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=s3_key_txt)
                     # Read with explicit UTF-8 encoding and error handling
                     text_body = response['Body'].read()
                     print(f"[DOWNLOAD] Read {len(text_body)} bytes from text file")
@@ -2693,11 +2755,11 @@ async def download_brd(
                     json_key = f"brds/{brd_id}/brd_structure.json"
                     try:
                         try:
-                            json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                            json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
                         except ClientError as e:
                             if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
                                 json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
-                                json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
+                                json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
                             else:
                                 raise e
                         
@@ -2718,7 +2780,7 @@ async def download_brd(
                         
                         # Also save the text file for future downloads
                         try:
-                            s3_client.put_object(
+                            await run_sync(s3_client.put_object,
                                 Bucket=bucket_name,
                                 Key=s3_key_txt,
                                 Body=brd_text.encode("utf-8"),
@@ -2806,7 +2868,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
         
         try:
             # List events from AgentCore Memory
-            response = agentcore_client.list_events(
+            response = await run_sync(agentcore_client.list_events,
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2910,7 +2972,7 @@ async def get_brd_chat_history(
         messages = []
 
         try:
-            response = agentcore_client.list_events(
+            response = await run_sync(agentcore_client.list_events,
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -3052,15 +3114,14 @@ def _load_brd_structure_from_s3(brd_id: str) -> dict:
 
 
 def _is_doc_title_section(title: str) -> bool:
-    t = (title or "").strip().lower()
+    t = (title or "").strip()
     if not t:
         return False
-    # Match lambda behavior: doc title often looks like "AI-Powered..." or similar and not "1. ..."
-    if "ai-powered" in t or "brd" in t:
-        return True
-    if len(t) < 30 and not re.match(r"^\d+\.", t):
-        return True
-    return False
+    # Doc title is never numbered ("1. Something"), regular sections always are.
+    # If the first section lacks a numbered prefix, it is the doc title.
+    if re.match(r"^\d+\.", t):
+        return False
+    return True
 
 
 def _iter_user_sections(brd_data: dict):
@@ -3079,8 +3140,8 @@ def _iter_user_sections(brd_data: dict):
         title = (sec.get("title", "") or "").strip()
         title_lower = title.lower()
 
-        # Skip Scope subsections - same rule as lambda
-        if title.startswith("#") and ("in scope" in title_lower or "out of scope" in title_lower):
+        # Skip ALL subsections whose title starts with "#"
+        if title.startswith("#"):
             continue
 
         yield user_num, idx, title, sec

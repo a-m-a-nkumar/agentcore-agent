@@ -7,9 +7,17 @@ import json
 import boto3
 from typing import List, Dict, Optional, Any
 from services.search_service import search_service
+from services.embedding_service import embedding_service
+from db_helper_vector import search_embeddings, get_surrounding_chunks_batch
 from langfuse_client import get_langfuse
 import os
 import logging
+import asyncio
+from functools import partial as _partial
+
+async def run_sync(func, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _partial(func, *args, **kwargs))
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +158,7 @@ class RAGService:
                 name="rag.search",
                 metadata={"query_length": len(user_query), "project_id": project_id, "max_chunks": max_chunks, "source_filter": source_filter or ""},
             ):
-                results = search_service.semantic_search(
+                results = await run_sync(search_service.semantic_search,
                     project_id=project_id,
                     query=user_query,
                     limit=max_chunks,
@@ -243,7 +251,7 @@ class RAGService:
         """
         try:
             # 1. Search
-            results = search_service.semantic_search(
+            results = await run_sync(search_service.semantic_search,
                 project_id=project_id,
                 query=user_query,
                 limit=max_chunks,
@@ -347,7 +355,7 @@ Answer:"""
             }
             
             # Invoke model with streaming
-            response = self.bedrock_runtime.invoke_model_with_response_stream(
+            response = await run_sync(self.bedrock_runtime.invoke_model_with_response_stream,
                 modelId=self.model_id,
                 body=json.dumps(request_body)
             )

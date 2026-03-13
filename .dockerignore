@@ -66,6 +66,12 @@ tests/
 # Keep wheelhouse for offline installations
 # wheelhouse/
 
+# Lambda deployment packages (NOT needed in agent container)
+lambda_generator_package/
+lambda_generator_package.zip
+lambda_*_package/
+*.zip
+
 # Monorepo directories
 cdk/
 terraform/
