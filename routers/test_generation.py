@@ -4,20 +4,25 @@ Generates test scenario documents from Confluence BRD pages using Claude (Bedroc
 Supports pushing the result back to Confluence as a new page.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
+import asyncio
 import logging
 import boto3
 import json
 import os
 import re
+import uuid
+from datetime import datetime
 from html import unescape
 from botocore.config import Config
 
 from auth import verify_azure_token
 from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
 from services.confluence_service import ConfluenceService
+from services.github_service import GitHubService
 
 router = APIRouter(prefix="/api/test", tags=["test"])
 logger = logging.getLogger(__name__)
@@ -57,8 +62,30 @@ class GenerateTestScenariosRequest(BaseModel):
 class PushToConfluenceRequest(BaseModel):
     project_id: str
     page_title: str
-    content: str  # Markdown content from the editor
+    content: str  # Markdown or Gherkin content from the editor
     parent_page_id: Optional[str] = None
+    source_scenario_page: Optional[str] = None  # Title of the source BRD scenario page
+    coverage_summary: Optional[str] = None  # JSON string of coverage data
+
+
+class FeatureFile(BaseModel):
+    filename: str
+    content: str
+
+
+class PushToGitHubRequest(BaseModel):
+    project_id: str
+    github_token: str = Field(..., description="GitHub PAT with repo scope")
+    repo_url: str = Field(..., description="GitHub repository URL or owner/repo")
+    feature_files: List[FeatureFile]
+    branch: str = "test/auto-generated"
+    base_path: str = "tests/features"
+    create_pr: bool = True
+
+
+class ParseScenariosRequest(BaseModel):
+    confluence_page_id: str = Field(..., description="Confluence page ID of the test scenario document")
+    project_id: str = Field(..., description="Project ID")
 
 
 # ============================================
@@ -375,13 +402,173 @@ async def generate_test_scenarios(
         raise HTTPException(status_code=500, detail=f"Failed to generate test scenarios: {str(e)}")
 
 
+def extract_scenarios_with_bedrock(raw_content: str, page_title: str) -> dict:
+    """
+    Use Bedrock (Claude) to extract structured test scenarios from raw
+    Confluence page content and generate a clean Gherkin prompt.
+    Returns { scenarios: [...], prompt: "..." }
+    """
+    plain_text = strip_html_tags(raw_content)
+
+    extraction_prompt = f"""You are a senior QA engineer. I will give you the raw text content of a test scenario document from Confluence titled "{page_title}".
+
+Your task:
+1. Extract ONLY fully defined test scenarios from this document. A fully defined scenario has a structured format with fields like Scenario ID, Requirement Ref, Priority, Objective, Preconditions, Happy Path steps, Edge Cases, and Negative Cases. Do NOT extract items that are merely listed in scope sections, bullet lists, or placeholder notes.
+2. For each fully defined scenario, extract its ID (like TS-001, SC-01, etc.), title/name, and a one-line description (the Objective or Description field).
+3. Then generate a detailed, implementation-level Gherkin generation prompt that a developer will paste into their AI IDE (Cursor, Copilot, Claude Code, etc.).
+
+IMPORTANT CONTEXT: The prompt will be used INSIDE an AI IDE that already has the codebase open. The AI IDE can see all the code in the project automatically. So the prompt must NOT ask the user to paste code — instead it should tell the AI to analyse the code in the current project/workspace.
+
+RAW DOCUMENT CONTENT:
+{plain_text}
+
+RESPOND WITH EXACTLY THIS JSON FORMAT (no markdown fences, no commentary):
+{{
+  "scenarios": [
+    {{
+      "id": "TS-001",
+      "name": "Language Detection and Response",
+      "description": "Verify that the system correctly detects and responds in all 12 supported languages"
+    }},
+    {{
+      "id": "TS-002",
+      "name": "Real-time Sentiment Detection",
+      "description": "Verify that the system accurately analyzes customer sentiment in real-time"
+    }}
+  ],
+  "prompt": "You are a senior QA automation expert specializing in BDD test case generation.\\n\\nYOUR TASK:\\nAnalyse ALL the code in this project (services, controllers, routes, models, utils — everything) and generate implementation-level test cases in Gherkin format (.feature file syntax).\\n\\nBRD TEST SCENARIOS:\\nBelow are test scenarios derived from the BRD \\"{page_title}\\". These define WHAT needs to be tested at a business level:\\n\\n  TS-001: Language Detection and Response\\n    → Verify that the system correctly detects and responds in all 12 supported languages\\n  TS-002: Real-time Sentiment Detection\\n    → Verify that the system accurately analyzes customer sentiment in real-time\\n\\nCRITICAL INSTRUCTIONS:\\n\\n1. CODE-FIRST APPROACH: Scan the entire codebase first. Identify which features are actually implemented. ONLY generate test cases for scenarios whose functionality EXISTS in the code. If a scenario's feature is not implemented, SKIP it entirely.\\n\\n2. IMPLEMENTATION-LEVEL GHERKIN: Do NOT write generic business-level Gherkin. Your Given/When/Then steps MUST reference actual implementation details found in the code:\\n   - Real API endpoints (e.g., POST /api/v1/detect-language)\\n   - Real function/service names (e.g., LanguageDetectionService)\\n   - Real request/response fields (e.g., \\"detected_language\\", \\"confidence_score\\")\\n   - Real database models or schemas if relevant\\n   - Real error codes and messages from the codebase\\n\\n3. TAG each test case with its scenario ID: @TS-XXX @regression\\n\\n4. For each covered scenario, generate:\\n   - Happy path (main success flow with real data)\\n   - Edge cases (boundary values, empty inputs, max lengths, concurrent requests)\\n   - Negative/error conditions (invalid inputs, service failures, timeout handling)\\n\\n5. OUTPUT FORMAT — valid Gherkin (.feature file), one feature per scenario:\\n\\n   @TS-001 @regression\\n   Feature: Language Detection and Response\\n\\n     Background:\\n       Given the language detection service is running\\n       And the NLP models for all 12 languages are loaded\\n\\n     Scenario: Successfully detect Spanish input\\n       When I send a POST request to \\"/api/v1/detect-language\\" with body:\\n         \\"\\"\\"\\n         {{\\"text\\": \\"Hola, necesito ayuda con mi pedido\\"}}\\n         \\"\\"\\"\\n       Then the response status should be 200\\n       And the response field \\"detected_language\\" should be \\"es\\"\\n       And the response field \\"confidence\\" should be greater than 0.95\\n\\n     Scenario: Reject unsupported language\\n       When I send a POST request to \\"/api/v1/detect-language\\" with body:\\n         \\"\\"\\"\\n         {{\\"text\\": \\"unsupported text\\"}}\\n         \\"\\"\\"\\n       Then the response status should be 422\\n       And the response field \\"error\\" should contain \\"unsupported_language\\"\\n\\n6. COVERAGE SUMMARY — at the end, provide:\\n   - ✅ Covered: List each TS-ID, what code implements it, and how many test cases generated\\n   - ❌ Skipped: List each TS-ID that was skipped and WHY (feature not found in code)\\n   - 📊 Overall: X of Y scenarios covered\\n\\nIMPORTANT REMINDERS:\\n- Do NOT hallucinate endpoints or functions that don't exist in the code\\n- Do NOT generate test cases for features that aren't implemented\\n- Every Given/When/Then step should be traceable to actual code\\n- Use realistic test data that matches the codebase's data models\\n- If the project uses specific testing frameworks or patterns, follow those conventions"
+}}
+
+RULES:
+- ONLY extract scenarios that are FULLY DEFINED with structured fields (Scenario ID, Objective, Preconditions, Happy Path, etc.)
+- Do NOT extract items that only appear in "Test Scope" sections, bullet lists, or placeholder notes like "[Continue with additional scenarios for FR-03 through FR-22...]"
+- Do NOT extract requirement references (FR-XX) that are merely listed but lack a complete scenario definition with steps
+- If the document says "TS-001: Language Detection" with a full table of fields, Objective, Preconditions, Happy Path — that IS a scenario. If it just says "FR-05: Platform Integrations" in a scope list — that is NOT a scenario.
+- The "prompt" field must be a COMPLETE, ready-to-use prompt string with ONLY the fully defined scenarios injected into it
+- The prompt MUST follow the detailed implementation-level format shown above — NOT the shorter generic format
+- The prompt must NOT ask the user to paste or provide code — the AI IDE already has the code open
+- The prompt must say "Analyse ALL the code in this project" and use the CODE-FIRST APPROACH instruction
+- The prompt must instruct the AI to write IMPLEMENTATION-LEVEL Gherkin referencing real endpoints, functions, fields, error codes
+- The prompt must include the Background section example showing real API endpoint usage
+- Use \\n for newlines in the JSON string values
+- Include the exact scenario IDs from the document (TS-001, SC-01, etc.)
+- The prompt must instruct the AI to tag Gherkin output with @TS-XXX or @SC-XX tags
+- The coverage summary must use the emoji format: ✅ Covered, ❌ Skipped, 📊 Overall
+- Do NOT include "[PASTE YOUR CODE BELOW]" or similar — the AI IDE handles code context automatically
+- Output ONLY valid JSON, nothing else
+"""
+
+    bedrock_client = _get_bedrock_client()
+    request_body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "max_tokens": 8000,
+        "temperature": 0.1,
+        "messages": [{"role": "user", "content": extraction_prompt}]
+    }
+
+    logger.info(f"Calling Bedrock to extract scenarios from: {page_title}")
+    response = bedrock_client.invoke_model(
+        modelId=BEDROCK_MODEL_ID,
+        body=json.dumps(request_body)
+    )
+    response_body = json.loads(response['body'].read())
+    content_text = response_body['content'][0]['text']
+    logger.info(f"Bedrock extraction response length: {len(content_text)} chars")
+
+    # Parse JSON response — strip markdown fences if present
+    cleaned = content_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
+        cleaned = re.sub(r'\s*```$', '', cleaned)
+
+    result = json.loads(cleaned)
+    return result
+
+
+@router.post("/parse-scenarios")
+async def parse_scenarios_from_confluence(
+    request: ParseScenariosRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Extract structured test scenarios from a Confluence page using Bedrock.
+    Returns parsed scenario list + a ready-to-use Gherkin generation prompt.
+    """
+    credentials = get_user_atlassian_credentials(current_user['id'])
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+
+    project = get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        confluence_service = ConfluenceService(
+            credentials['atlassian_domain'],
+            credentials['atlassian_email'],
+            credentials['atlassian_api_token']
+        )
+        page_data = confluence_service.get_page_content(request.confluence_page_id)
+        logger.info(f"Fetched scenario page: {page_data['title']}")
+    except Exception as e:
+        logger.error(f"Error fetching Confluence page: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch Confluence page: {str(e)}")
+
+    try:
+        result = extract_scenarios_with_bedrock(
+            page_data['content'],
+            page_data['title']
+        )
+        return {
+            "page_title": page_data['title'],
+            "scenarios": result.get("scenarios", []),
+            "prompt": result.get("prompt", ""),
+        }
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse Bedrock JSON response: {e}")
+        raise HTTPException(status_code=500, detail="AI returned invalid format. Please try again.")
+    except Exception as e:
+        logger.error(f"Error extracting scenarios: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse scenarios: {str(e)}")
+
+
+def _gherkin_to_confluence_html(gherkin: str, source_page: str = None, coverage: str = None) -> str:
+    """
+    Convert Gherkin text to well-formatted Confluence storage HTML.
+    Wraps in a code macro for readability and adds metadata panel.
+    """
+    parts = []
+
+    # Metadata panel
+    now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    parts.append('<ac:structured-macro ac:name="info"><ac:rich-text-body>')
+    parts.append(f'<p><strong>Generated:</strong> {now}</p>')
+    if source_page:
+        parts.append(f'<p><strong>Source BRD Scenarios:</strong> {source_page}</p>')
+    if coverage:
+        parts.append(f'<p><strong>Coverage:</strong> {coverage}</p>')
+    parts.append('</ac:rich-text-body></ac:structured-macro>')
+
+    # Gherkin content in a code block macro
+    parts.append(
+        '<ac:structured-macro ac:name="code">'
+        '<ac:parameter ac:name="language">gherkin</ac:parameter>'
+        '<ac:plain-text-body><![CDATA['
+    )
+    parts.append(gherkin)
+    parts.append(']]></ac:plain-text-body></ac:structured-macro>')
+
+    return ''.join(parts)
+
+
 @router.post("/push-to-confluence")
 async def push_test_scenarios_to_confluence(
     request: PushToConfluenceRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Push the (edited) test scenario markdown document as a new Confluence page.
+    Push Gherkin test cases or test scenario markdown to a new Confluence page.
+    Includes metadata: source BRD page, coverage summary, generation date.
     """
     credentials = get_user_atlassian_credentials(current_user['id'])
     if not credentials or not credentials.get('atlassian_api_token'):
@@ -401,7 +588,19 @@ async def push_test_scenarios_to_confluence(
             credentials['atlassian_email'],
             credentials['atlassian_api_token']
         )
-        confluence_html = markdown_to_confluence_storage(request.content)
+
+        # Detect if content is Gherkin (has Feature:/Scenario: keywords) vs markdown
+        is_gherkin = bool(re.search(r'^\s*(Feature|Scenario):', request.content, re.MULTILINE))
+
+        if is_gherkin:
+            confluence_html = _gherkin_to_confluence_html(
+                request.content,
+                source_page=request.source_scenario_page,
+                coverage=request.coverage_summary,
+            )
+        else:
+            confluence_html = markdown_to_confluence_storage(request.content)
+
         page = confluence_service.create_page(
             space_key=space_key,
             title=request.page_title,
@@ -417,3 +616,282 @@ async def push_test_scenarios_to_confluence(
     except Exception as e:
         logger.error(f"Error pushing to Confluence: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to push to Confluence: {str(e)}")
+
+
+# ============================================
+# GITHUB PUSH ENDPOINT
+# ============================================
+
+@router.post("/push-to-github")
+async def push_feature_files_to_github(
+    request: PushToGitHubRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Push .feature files to a GitHub repository.
+    Creates a branch, commits the files, and optionally opens a PR.
+    """
+    project = get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not request.feature_files:
+        raise HTTPException(status_code=400, detail="No feature files provided")
+
+    try:
+        github_service = GitHubService(request.github_token)
+
+        # Validate token
+        user_info = github_service.test_connection()
+        logger.info(f"GitHub authenticated as: {user_info['login']}")
+
+        result = github_service.push_feature_files(
+            repo_url=request.repo_url,
+            feature_files=[ff.dict() for ff in request.feature_files],
+            branch=request.branch,
+            base_path=request.base_path,
+            create_pr=request.create_pr,
+        )
+
+        return {
+            "success": True,
+            "branch": result["branch"],
+            "branch_url": result["branch_url"],
+            "files": result["files"],
+            "pr_url": result.get("pr_url"),
+            "pr_number": result.get("pr_number"),
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error pushing to GitHub: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to push to GitHub: {str(e)}")
+
+
+# ============================================
+# MCP INTERNAL ENDPOINTS (API Key Auth)
+# ============================================
+
+# In-memory session store for MCP test sessions
+_test_sessions: dict = {}           # session_id → { project_id, scenarios, prompt, gherkin, ... }
+_project_events: dict = {}          # project_id → asyncio.Event
+
+
+def _validate_api_key(x_api_key: str) -> str:
+    """Validate API key and return associated project_id."""
+    internal_keys_str = os.environ.get("INTERNAL_API_KEYS", "{}")
+    try:
+        valid_keys = json.loads(internal_keys_str)
+    except json.JSONDecodeError:
+        logger.error("Failed to parse INTERNAL_API_KEYS from env")
+        valid_keys = {}
+
+    if x_api_key not in valid_keys:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    return valid_keys[x_api_key]  # returns project_id
+
+
+class ListPagesInternalRequest(BaseModel):
+    project_id: Optional[str] = None
+    filter: Optional[str] = "test scenario"
+
+
+class ParseScenariosInternalRequest(BaseModel):
+    confluence_page_id: str
+    project_id: Optional[str] = None
+
+
+class SubmitGherkinInternalRequest(BaseModel):
+    project_id: Optional[str] = None
+    gherkin: str
+    session_id: Optional[str] = None
+
+
+@router.post("/list-pages-internal")
+async def list_pages_internal(
+    request: ListPagesInternalRequest,
+    x_api_key: str = Header(alias="X-API-Key"),
+):
+    """
+    List Confluence pages for a project. Used by MCP tool.
+    Resolves Atlassian credentials from the project owner.
+    """
+    key_project_id = _validate_api_key(x_api_key)
+    project_id = request.project_id or key_project_id
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    # Get project owner's Atlassian credentials
+    owner_id = project.get("user_id")
+    if not owner_id:
+        raise HTTPException(status_code=400, detail="Project has no owner")
+
+    credentials = get_user_atlassian_credentials(owner_id)
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Project owner has no linked Atlassian account")
+
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        space_key = project.get("confluence_space_key", "SO")
+        all_pages = confluence_service.get_content_pages(space_key=space_key, limit=500)
+
+        # Filter to test scenario pages if filter provided
+        filter_term = (request.filter or "").lower()
+        if filter_term:
+            pages = [
+                {"id": p["id"], "title": p["title"]}
+                for p in all_pages
+                if filter_term in p.get("title", "").lower()
+            ]
+        else:
+            pages = [{"id": p["id"], "title": p["title"]} for p in all_pages]
+
+        return {"pages": pages, "total": len(pages)}
+    except Exception as e:
+        logger.error(f"Error listing pages: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/parse-scenarios-internal")
+async def parse_scenarios_internal(
+    request: ParseScenariosInternalRequest,
+    x_api_key: str = Header(alias="X-API-Key"),
+):
+    """
+    Parse test scenarios from a Confluence page. Used by MCP tool.
+    Returns session_id + prompt for the AI IDE to generate .feature files.
+    """
+    key_project_id = _validate_api_key(x_api_key)
+    project_id = request.project_id or key_project_id
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    owner_id = project.get("user_id")
+    if not owner_id:
+        raise HTTPException(status_code=400, detail="Project has no owner")
+
+    credentials = get_user_atlassian_credentials(owner_id)
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Project owner has no linked Atlassian account")
+
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        page_data = confluence_service.get_page_content(request.confluence_page_id)
+        logger.info(f"[MCP] Fetched scenario page: {page_data['title']}")
+    except Exception as e:
+        logger.error(f"[MCP] Error fetching Confluence page: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch Confluence page: {str(e)}")
+
+    try:
+        result = extract_scenarios_with_bedrock(
+            page_data["content"],
+            page_data["title"],
+        )
+
+        session_id = str(uuid.uuid4())
+        _test_sessions[session_id] = {
+            "project_id": project_id,
+            "page_title": page_data["title"],
+            "scenarios": result.get("scenarios", []),
+            "prompt": result.get("prompt", ""),
+            "gherkin": None,
+        }
+
+        return {
+            "session_id": session_id,
+            "page_title": page_data["title"],
+            "scenarios": result.get("scenarios", []),
+            "prompt": result.get("prompt", ""),
+        }
+    except Exception as e:
+        logger.error(f"[MCP] Error extracting scenarios: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to parse scenarios: {str(e)}")
+
+
+@router.post("/submit-gherkin-internal")
+async def submit_gherkin_internal(
+    request: SubmitGherkinInternalRequest,
+    x_api_key: str = Header(alias="X-API-Key"),
+):
+    """
+    Submit generated Gherkin from AI IDE back to the platform.
+    Signals the SSE listener so the frontend auto-populates.
+    """
+    key_project_id = _validate_api_key(x_api_key)
+    project_id = request.project_id or key_project_id
+
+    session_id = request.session_id or str(uuid.uuid4())
+
+    # Store gherkin in session
+    if session_id in _test_sessions:
+        _test_sessions[session_id]["gherkin"] = request.gherkin
+    else:
+        _test_sessions[session_id] = {
+            "project_id": project_id,
+            "gherkin": request.gherkin,
+        }
+
+    # Signal the SSE listener for this project
+    if project_id not in _project_events:
+        _project_events[project_id] = asyncio.Event()
+    _project_events[project_id].set()
+
+    logger.info(f"[MCP] Gherkin submitted for project {project_id}, session {session_id}")
+    return {"session_id": session_id, "status": "received"}
+
+
+@router.get("/listen/{project_id}")
+async def listen_for_test_cases(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    SSE endpoint for the frontend to listen for test cases from MCP.
+    Uses Azure AD auth (this is called by the frontend, not MCP).
+    """
+    async def event_generator():
+        if project_id not in _project_events:
+            _project_events[project_id] = asyncio.Event()
+
+        event = _project_events[project_id]
+
+        try:
+            while True:
+                # Wait for event with timeout for heartbeat
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield f"data: {json.dumps({'type': 'ping'})}\n\n"
+                    continue
+
+                # Event fired — find the session with gherkin for this project
+                event.clear()
+                for sid, session in _test_sessions.items():
+                    if session.get("project_id") == project_id and session.get("gherkin"):
+                        yield f"data: {json.dumps({'type': 'gherkin_received', 'gherkin': session['gherkin'], 'session_id': sid})}\n\n"
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                        return
+        except asyncio.CancelledError:
+            logger.info(f"[SSE] Client disconnected from listen/{project_id}")
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

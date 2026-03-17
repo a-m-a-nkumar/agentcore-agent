@@ -192,12 +192,12 @@ async def list_confluence_spaces(current_user: dict = Depends(get_current_user))
 @router.get("/confluence/pages")
 async def list_confluence_pages(
     space_key: str = "SO",
-    limit: int = 100,
+    limit: int = 500,
     current_user: dict = Depends(get_current_user),
 ):
     """
     List pages in a Confluence space using the current user's linked Atlassian credentials.
-    Replaces frontend calling /confluence-api/ with hardcoded auth.
+    Paginates through all results (Confluence Cloud may return max 25 per request).
     """
     credentials = get_user_atlassian_credentials(current_user["id"])
     if not credentials or not credentials.get("atlassian_api_token"):

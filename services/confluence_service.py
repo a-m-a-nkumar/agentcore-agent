@@ -100,16 +100,40 @@ class ConfluenceService:
 
     def get_content_pages(self, space_key: str, limit: int = 100) -> List[Dict]:
         """
-        Fetch pages from a space using Content API (same shape as frontend expects).
-        GET /rest/api/content?spaceKey=X&type=page&limit=N
+        Fetch ALL pages from a space using Content API with pagination.
+        GET /rest/api/content?spaceKey=X&type=page&start=N&limit=N
+
+        Confluence Cloud may cap per-request limit at 25, so we paginate
+        until all pages are retrieved.
         """
         try:
             url = f"{self.base_url}/rest/api/content"
-            params = {"spaceKey": space_key, "type": "page", "limit": limit}
-            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
-            response.raise_for_status()
-            data = response.json()
-            return data.get("results", [])
+            all_pages = []
+            start = 0
+            page_size = min(limit, 100)  # per-request batch size
+
+            while True:
+                params = {
+                    "spaceKey": space_key,
+                    "type": "page",
+                    "limit": page_size,
+                    "start": start,
+                }
+                response = requests.get(
+                    url, headers=self.headers, auth=self.auth, params=params, timeout=15
+                )
+                response.raise_for_status()
+                data = response.json()
+                batch = data.get("results", [])
+                all_pages.extend(batch)
+
+                # Stop if we got fewer than requested (last page) or hit caller limit
+                if len(batch) < page_size or len(all_pages) >= limit:
+                    break
+                start += len(batch)
+
+            logger.info(f"Fetched {len(all_pages)} pages from Confluence space '{space_key}'")
+            return all_pages[:limit]
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Confluence content pages: {e}")
             raise Exception(f"Failed to fetch Confluence pages: {str(e)}")

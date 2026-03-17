@@ -6,7 +6,7 @@ import re
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from fastapi.requests import Request
@@ -95,9 +95,10 @@ app.include_router(test_generation_router)
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all incoming requests for debugging"""
-    if (request.url.path.startswith("/api/upload-transcript") or 
-        request.url.path.startswith("/api/chat") or 
-        request.url.path.startswith("/api/analyst-chat")):
+    if (request.url.path.startswith("/api/upload-transcript") or
+        request.url.path.startswith("/api/chat") or
+        request.url.path.startswith("/api/analyst-chat") or
+        request.url.path.startswith("/api/analyst-chat-stream")):
         auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
         print(f"\n[REQUEST] {request.method} {request.url.path}")
         print(f"[REQUEST] Authorization header present: {bool(auth_header)}")
@@ -1314,6 +1315,64 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
     
     return None, None
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lambda Warm-Up endpoint
+# Called silently when the BRD Analyst page opens to pre-warm Lambda containers
+# before the user sends their first message.
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/api/analyst-warm")
+async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
+    """
+    Pre-warm Lambda functions used by the BRD Analyst Agent.
+    Sends a lightweight 'ping' payload to both Lambdas in parallel.
+    Responds immediately with status — Lambda errors are non-fatal.
+    """
+    import asyncio
+
+    LAMBDA_REQ = os.getenv(
+        'LAMBDA_REQUIREMENTS_GATHERING_ARN',
+        'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
+    )
+    LAMBDA_BRD = os.getenv(
+        'LAMBDA_BRD_FROM_HISTORY_ARN',
+        'arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda'
+    )
+
+    ping_payload = json.dumps({"action": "ping", "warm": True}).encode("utf-8")
+
+    def _invoke_lambda(function_name: str) -> dict:
+        try:
+            from botocore.config import Config
+            config = Config(read_timeout=10, connect_timeout=5, retries={"max_attempts": 0})
+            lc = boto3.client("lambda", region_name=os.getenv("AWS_REGION", "us-east-1"), config=config)
+            resp = lc.invoke(
+                FunctionName=function_name,
+                InvocationType="RequestResponse",
+                Payload=ping_payload
+            )
+            status = resp.get("StatusCode", 0)
+            print(f"[WARM-UP] ✅ {function_name.split(':')[-1]} → HTTP {status}", flush=True)
+            return {"function": function_name.split(":")[-1], "status": status, "warmed": True}
+        except Exception as e:
+            print(f"[WARM-UP] ⚠️  {function_name.split(':')[-1]} ping failed (non-fatal): {e}", flush=True)
+            return {"function": function_name.split(":")[-1], "status": "error", "warmed": False}
+
+    print("[WARM-UP] Warming Lambda containers in parallel...", flush=True)
+
+    loop = asyncio.get_event_loop()
+    results = await asyncio.gather(
+        loop.run_in_executor(None, _invoke_lambda, LAMBDA_REQ),
+        loop.run_in_executor(None, _invoke_lambda, LAMBDA_BRD),
+    )
+
+    print(f"[WARM-UP] Done. Results: {results}", flush=True)
+
+    return JSONResponse(content={
+        "status": "warmed",
+        "lambdas": list(results)
+    })
+
+
 @app.post("/api/analyst-chat")
 async def analyst_chat(
     message: str = Form(...),
@@ -1746,6 +1805,161 @@ async def analyst_chat(
             "result": f"Error: {error_msg}",
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
+
+
+@app.post("/api/analyst-chat-stream")
+async def analyst_chat_stream(
+    message: str = Form(...),
+    session_id: str = Form(...),
+    project_id: str = Form(None),
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Streaming SSE analyst chat — calls requirements_gathering Lambda directly,
+    bypassing AgentCore Runtime for faster responses.
+    """
+    # Normalize project_id
+    if project_id:
+        project_id = project_id.strip() if isinstance(project_id, str) else str(project_id)
+        if not project_id or project_id == "none":
+            project_id = None
+
+    # Validate session_id
+    if not session_id or session_id == "none":
+        runtime_session_id = str(uuid.uuid4())
+        print(f"[ANALYST-STREAM] No session_id provided, created new: {runtime_session_id}")
+    else:
+        runtime_session_id = session_id
+        print(f"[ANALYST-STREAM] Using session ID: {runtime_session_id}")
+
+    formatted_message = message.strip()
+
+    LAMBDA_REQ_ARN = os.getenv(
+        'LAMBDA_REQUIREMENTS_GATHERING_ARN',
+        'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
+    )
+
+    async def generate_sse():
+        """Generate SSE stream — direct Lambda invocation (no AgentCore middleman)"""
+        import asyncio
+
+        try:
+            print(f"[ANALYST-STREAM] Direct Lambda call: session={runtime_session_id}, message={formatted_message[:100]}...")
+
+            # Call requirements_gathering Lambda directly in a thread
+            def _call_lambda():
+                from botocore.config import Config
+                config = Config(
+                    read_timeout=900,
+                    connect_timeout=60,
+                    retries={'max_attempts': 0}
+                )
+                lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'us-east-1'), config=config)
+
+                payload = {
+                    'session_id': runtime_session_id,
+                    'user_message': formatted_message
+                }
+
+                response = lambda_client.invoke(
+                    FunctionName=LAMBDA_REQ_ARN,
+                    InvocationType='RequestResponse',
+                    Payload=json.dumps(payload)
+                )
+
+                response_payload = json.loads(response['Payload'].read())
+
+                if 'FunctionError' in response:
+                    error_msg = response_payload.get('errorMessage', 'Unknown Lambda error')
+                    raise Exception(f"Lambda error: {error_msg}")
+
+                return response_payload
+
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(None, _call_lambda)
+            except Exception as invoke_error:
+                print(f"[ANALYST-STREAM] Lambda invoke error: {invoke_error}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(invoke_error)})}\n\n"
+                return
+
+            print(f"[ANALYST-STREAM] Lambda response received: {type(result)}")
+
+            # Extract text from Lambda response
+            # Lambda returns: {"statusCode": 200, "body": {"response": "..."}}
+            # or directly: {"response": "...", "message": "..."}
+            final_text = None
+            extracted_brd_id = None
+
+            if isinstance(result, dict):
+                if 'statusCode' in result:
+                    body = result.get('body', {})
+                    if isinstance(body, str):
+                        try:
+                            body = json.loads(body)
+                        except json.JSONDecodeError:
+                            final_text = body
+                    if isinstance(body, dict):
+                        final_text = body.get('response') or body.get('message') or body.get('result')
+                else:
+                    final_text = result.get('response') or result.get('message') or result.get('result')
+
+            if not final_text:
+                final_text = str(result)
+
+            # Clean up if still JSON string
+            if isinstance(final_text, str) and final_text.strip().startswith('{'):
+                try:
+                    parsed = json.loads(final_text.strip())
+                    if isinstance(parsed, dict):
+                        final_text = parsed.get('response') or parsed.get('message') or parsed.get('result') or final_text
+                except (json.JSONDecodeError, Exception):
+                    pass
+
+            print(f"[ANALYST-STREAM] Extracted text: {len(final_text)} chars")
+
+            # Check for BRD ID
+            if final_text:
+                brd_match = re.search(r'BRD ID:\s*([a-f0-9-]+)', final_text, re.IGNORECASE)
+                if brd_match:
+                    extracted_brd_id = brd_match.group(1)
+
+            # Stream in small chunks with delay for natural typing feel
+            if final_text:
+                words = final_text.split(' ')
+                chunk = ''
+                for i, word in enumerate(words):
+                    chunk += word + ' '
+                    # Send every 3 words
+                    if (i + 1) % 3 == 0 or i == len(words) - 1:
+                        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+                        await asyncio.sleep(0.02)
+                        chunk = ''
+
+            # Send metadata
+            metadata = {'type': 'metadata', 'session_id': runtime_session_id}
+            if extracted_brd_id:
+                metadata['brd_id'] = extracted_brd_id
+            yield f"data: {json.dumps(metadata)}\n\n"
+
+            # Done
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
+        except Exception as e:
+            print(f"[ANALYST-STREAM] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        generate_sse(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
+
 
 @app.get("/api/analyst-history/{session_id}")
 async def get_analyst_history(
