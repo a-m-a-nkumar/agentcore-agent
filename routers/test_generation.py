@@ -330,16 +330,18 @@ RULES — follow all of these strictly:
 3. TS-IDs are sequential across the whole document (TS-001, TS-002, TS-003 ...)
 4. Reference actual field names, user roles, data values, and business rules from the BRD — do not be generic
 5. Use the Markdown table for the scenario metadata fields
-6. Keep Happy Path steps as a numbered list
-7. Keep Edge Cases and Negative Cases as bullet lists
+6. Keep Happy Path steps as a numbered list (max 5 steps)
+7. Keep Edge Cases and Negative Cases as bullet lists (max 3 bullets each)
 8. Use professional QA language — be precise and unambiguous
 9. Output ONLY the markdown document — no preamble, no commentary, nothing outside the document
+10. NEVER truncate, summarise, or add placeholder notes like "[Continue with...]" or "[Due to length...]" — you MUST complete every single scenario fully
+11. Be concise in each scenario — short, precise sentences only. Do not pad with unnecessary explanation.
 """
 
     bedrock_client = _get_bedrock_client()
     request_body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 16000,
+        "max_tokens": 8000,
         "temperature": 0.3,
         "messages": [{"role": "user", "content": prompt}]
     }
@@ -601,24 +603,13 @@ async def push_test_scenarios_to_confluence(
         else:
             confluence_html = markdown_to_confluence_storage(request.content)
 
-        existing = confluence_service.find_page_by_title(space_key, request.page_title)
-        if existing:
-            current_version = existing.get('version', {}).get('number', 1)
-            page = confluence_service.update_page(
-                page_id=existing['id'],
-                title=request.page_title,
-                content=confluence_html,
-                current_version=current_version
-            )
-            logger.info(f"Updated Confluence page: {page['title']} (ID: {page['id']})")
-        else:
-            page = confluence_service.create_page(
-                space_key=space_key,
-                title=request.page_title,
-                content=confluence_html,
-                parent_id=request.parent_page_id
-            )
-            logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
+        page = confluence_service.create_page(
+            space_key=space_key,
+            title=request.page_title,
+            content=confluence_html,
+            parent_id=request.parent_page_id
+        )
+        logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
         return {
             "page_id": page['id'],
             "page_title": page['title'],
