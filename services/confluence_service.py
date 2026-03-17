@@ -273,6 +273,46 @@ class ConfluenceService:
                 logger.error(f"Response: {e.response.text}")
             raise Exception(f"Failed to create Confluence page: {str(e)}")
     
+    def find_page_by_title(self, space_key: str, title: str) -> Optional[Dict]:
+        """Find a page in a space by exact title. Returns None if not found."""
+        try:
+            url = f"{self.base_url}/rest/api/content"
+            params = {"spaceKey": space_key, "title": title, "type": "page", "expand": "version"}
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+            response.raise_for_status()
+            results = response.json().get("results", [])
+            return results[0] if results else None
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error searching Confluence page by title: {e}")
+            return None
+
+    def update_page(self, page_id: str, title: str, content: str, current_version: int) -> Dict:
+        """Update an existing Confluence page — saves as a new version."""
+        try:
+            url = f"{self.base_url}/rest/api/content/{page_id}"
+            payload = {
+                "type": "page",
+                "title": title,
+                "version": {"number": current_version + 1},
+                "body": {
+                    "storage": {
+                        "value": content,
+                        "representation": "storage"
+                    }
+                }
+            }
+            response = requests.put(url, json=payload, headers=self.headers, auth=self.auth, timeout=30)
+            response.raise_for_status()
+            page_data = response.json()
+            return {
+                "id": page_data.get("id"),
+                "title": page_data.get("title"),
+                "web_url": f"{self.base_url}{page_data.get('_links', {}).get('webui', '')}"
+            }
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error updating Confluence page: {e}")
+            raise Exception(f"Failed to update Confluence page: {str(e)}")
+
     def get_page_content(self, page_id: str) -> Dict:
         """
         Get full content of a Confluence page by ID
