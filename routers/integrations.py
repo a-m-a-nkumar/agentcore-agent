@@ -132,13 +132,17 @@ async def get_atlassian_status(current_user: dict = Depends(get_current_user)):
         if cached and datetime.utcnow() < cached[1]:
             token_valid = cached[0]
         else:
-            # Validate token against Atlassian and cache the result
-            jira_service = JiraService(
-                credentials['atlassian_domain'],
-                credentials['atlassian_email'],
-                credentials['atlassian_api_token']
-            )
-            token_valid, _ = jira_service.test_connection()
+            # Validate token against Atlassian — only mark expired on 401, not on network errors
+            try:
+                jira_service = JiraService(
+                    credentials['atlassian_domain'],
+                    credentials['atlassian_email'],
+                    credentials['atlassian_api_token']
+                )
+                token_valid, _ = jira_service.test_connection()
+            except Exception:
+                # Network/timeout errors — assume token is still valid, don't disconnect user
+                token_valid = True
             _token_validation_cache[user_id] = (token_valid, datetime.utcnow() + timedelta(minutes=TOKEN_CACHE_TTL_MINUTES))
 
         return {
