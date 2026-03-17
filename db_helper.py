@@ -30,7 +30,7 @@ def get_db_pool():
             db_params = get_db_params()
             sslmode = db_params.get("sslmode", "require")
             _db_pool = pool.ThreadedConnectionPool(
-                1, 20,
+                5, 50,
                 host=db_params["host"],
                 port=db_params["port"],
                 database=db_params["database"],

@@ -71,18 +71,20 @@ class ProjectResponse(BaseModel):
 # AUTHENTICATION DEPENDENCY
 # ============================================
 
-async def get_current_user(token_data: dict = Depends(verify_azure_token)):
+def get_current_user(token_data: dict = Depends(verify_azure_token)):
     """
     Get current user from Azure AD token
-    Creates/updates user in database if needed
+    Creates/updates user in database if needed.
+    Using def (not async def) so FastAPI runs this in a thread pool,
+    preventing synchronous DB calls from blocking the event loop.
     """
     user_id = token_data.get("oid") or token_data.get("sub")
     email = token_data.get("preferred_username") or token_data.get("email") or token_data.get("upn")
     name = token_data.get("name")
-    
+
     if not user_id or not email:
         raise HTTPException(status_code=401, detail="Invalid token: missing user information")
-    
+
     # Create or update user in database
     try:
         user = create_or_update_user(user_id, email, name)
@@ -97,7 +99,7 @@ async def get_current_user(token_data: dict = Depends(verify_azure_token)):
 # ============================================
 
 @router.get("/", response_model=List[ProjectResponse])
-async def get_projects(current_user: dict = Depends(get_current_user)):
+def get_projects(current_user: dict = Depends(get_current_user)):
     """
     Get all projects for the current user
     """
@@ -111,7 +113,7 @@ async def get_projects(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/", response_model=ProjectResponse, status_code=201)
-async def create_new_project(
+def create_new_project(
     project_data: ProjectCreate,
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
@@ -154,7 +156,7 @@ async def create_new_project(
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project_by_id(
+def get_project_by_id(
     project_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -180,7 +182,7 @@ async def get_project_by_id(
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
-async def update_project_by_id(
+def update_project_by_id(
     project_id: str,
     project_data: ProjectUpdate,
     current_user: dict = Depends(get_current_user)
@@ -223,7 +225,7 @@ async def update_project_by_id(
 
 
 @router.delete("/{project_id}", status_code=204)
-async def delete_project_by_id(
+def delete_project_by_id(
     project_id: str,
     hard_delete: bool = True,
     current_user: dict = Depends(get_current_user)
@@ -266,7 +268,7 @@ async def delete_project_by_id(
 # ============================================
 
 @router.get("/{project_id}/brd-session")
-async def get_brd_session(
+def get_brd_session(
     project_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -297,7 +299,7 @@ async def get_brd_session(
 
 
 @router.put("/{project_id}/brd-session")
-async def save_brd_session(
+def save_brd_session(
     project_id: str,
     data: BrdSessionUpdate,
     current_user: dict = Depends(get_current_user)

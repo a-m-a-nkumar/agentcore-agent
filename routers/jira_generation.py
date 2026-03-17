@@ -28,15 +28,16 @@ BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet
 # AUTHENTICATION DEPENDENCY
 # ============================================
 
-async def get_current_user(token_data: dict = Depends(verify_azure_token)):
-    """Get current user from Azure AD token"""
+def get_current_user(token_data: dict = Depends(verify_azure_token)):
+    """Get current user from Azure AD token.
+    Using def (not async def) so FastAPI runs this in a thread pool."""
     user_id = token_data.get("oid") or token_data.get("sub")
     email = token_data.get("preferred_username") or token_data.get("email") or token_data.get("upn")
     name = token_data.get("name")
-    
+
     if not user_id or not email:
         raise HTTPException(status_code=401, detail="Invalid token: missing user information")
-    
+
     try:
         user = create_or_update_user(user_id, email, name)
         return user
@@ -353,7 +354,7 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
 # ============================================
 
 @router.post("/generate-from-confluence", response_model=GenerateJiraItemsResponse)
-async def generate_jira_items_from_confluence(
+def generate_jira_items_from_confluence(
     request: GenerateJiraItemsRequest,
     current_user: dict = Depends(get_current_user)
 ):
@@ -430,7 +431,7 @@ async def generate_jira_items_from_confluence(
 
 
 @router.post("/create-from-generated")
-async def create_jira_items(
+def create_jira_items(
     request: CreateJiraItemsRequest,
     current_user: dict = Depends(get_current_user)
 ):
