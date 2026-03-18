@@ -130,10 +130,27 @@ def revoke_brd_access_via_agentcore(user_id: str) -> bool:
 
 from fastapi import Header, HTTPException
 
+# ── TEMPORARY DEV BYPASS — remove once Azure AD approval is granted ──
+DEV_BYPASS_TOKEN = "dev-bypass-T479888"
+DEV_BYPASS_EMAIL = "T479888@deluxe.com"
+# ─────────────────────────────────────────────────────────────────────
+
 def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     """Verify Azure AD JWT token and return decoded claims"""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header missing")
+
+    # ── TEMPORARY DEV BYPASS — remove once Azure AD approval is granted ──
+    raw = authorization.replace("Bearer ", "").strip() if authorization else ""
+    if raw == DEV_BYPASS_TOKEN:
+        return {
+            "oid": "dev-bypass-T479888",
+            "sub": "dev-bypass-T479888",
+            "preferred_username": DEV_BYPASS_EMAIL,
+            "email": DEV_BYPASS_EMAIL,
+            "name": "Dev User (T479888)",
+        }
+    # ─────────────────────────────────────────────────────────────────────
     
     # Handle both "Bearer <token>" and raw token formats
     if authorization.startswith("Bearer "):

@@ -25,19 +25,19 @@ logger = logging.getLogger(__name__)
 # AUTHENTICATION DEPENDENCY
 # ============================================
 
-async def get_current_user(token_data: dict = Depends(verify_azure_token)):
+def get_current_user(token_data: dict = Depends(verify_azure_token)):
     """
     Get current user from Azure AD token
-    Creates/updates user in database if needed
+    Creates/updates user in database if needed.
+    Using def (not async def) so FastAPI runs this in a thread pool.
     """
     user_id = token_data.get("oid") or token_data.get("sub")
     email = token_data.get("preferred_username") or token_data.get("email") or token_data.get("upn")
     name = token_data.get("name")
-    
+
     if not user_id or not email:
         raise HTTPException(status_code=401, detail="Invalid token: missing user information")
-    
-    # Create or update user in database
+
     try:
         user = create_or_update_user(user_id, email, name)
         return user
@@ -64,7 +64,7 @@ class UploadBRDToConfluenceRequest(BaseModel):
 
 
 @router.post("/atlassian/link")
-async def link_atlassian_account(
+def link_atlassian_account(
     request: LinkAtlassianRequest,
     current_user: dict = Depends(get_current_user)
 ):
@@ -104,7 +104,7 @@ async def link_atlassian_account(
 
 
 @router.get("/atlassian/status")
-async def get_atlassian_status(current_user: dict = Depends(get_current_user)):
+def get_atlassian_status(current_user: dict = Depends(get_current_user)):
     """
     Check if user has linked their Atlassian account
     
@@ -128,7 +128,7 @@ async def get_atlassian_status(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/jira/projects")
-async def list_jira_projects(current_user: dict = Depends(get_current_user)):
+def list_jira_projects(current_user: dict = Depends(get_current_user)):
     """
     List all accessible Jira projects for the linked Atlassian account
     
@@ -159,7 +159,7 @@ async def list_jira_projects(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/confluence/spaces")
-async def list_confluence_spaces(current_user: dict = Depends(get_current_user)):
+def list_confluence_spaces(current_user: dict = Depends(get_current_user)):
     """
     List all accessible Confluence spaces for the linked Atlassian account
     
@@ -190,7 +190,7 @@ async def list_confluence_spaces(current_user: dict = Depends(get_current_user))
 
 
 @router.get("/confluence/pages")
-async def list_confluence_pages(
+def list_confluence_pages(
     space_key: str = "SO",
     limit: int = 100,
     current_user: dict = Depends(get_current_user),
@@ -219,7 +219,7 @@ async def list_confluence_pages(
 
 
 @router.get("/confluence/pages/{page_id}")
-async def get_confluence_page(
+def get_confluence_page(
     page_id: str,
     expand: str = "body.storage,version,ancestors",
     current_user: dict = Depends(get_current_user),
@@ -246,7 +246,7 @@ async def get_confluence_page(
 
 
 @router.get("/jira/issues/{project_key}")
-async def get_jira_issues(
+def get_jira_issues(
     project_key: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -287,7 +287,7 @@ async def get_jira_issues(
 
 
 @router.post("/confluence/upload-brd")
-async def upload_brd_to_confluence(
+def upload_brd_to_confluence(
     request: UploadBRDToConfluenceRequest,
     current_user: dict = Depends(get_current_user)
 ):

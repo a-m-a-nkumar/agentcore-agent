@@ -15,8 +15,8 @@ import logging
 from typing import Dict, List, Optional, Any
 
 import boto3
-from botocore.config import Config
 from botocore.exceptions import ClientError
+from llm_gateway import chat_completion
 
 # Configure logging
 logger = logging.getLogger()
@@ -29,23 +29,9 @@ BEDROCK_MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4000"))
 BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
-AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "testgatewayfbdd062d-e2eo4q0y09")
-AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "sdlc-dev-agentcore-gateway-z8tkb0pspy")
+AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
 AGENTCORE_ACTOR_ID = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
-
-# Bedrock client (cached)
-_bedrock_client = None
-
-def _get_bedrock_client():
-    """Get or create Bedrock runtime client"""
-    global _bedrock_client
-    if _bedrock_client is None:
-        _bedrock_client = boto3.client(
-            "bedrock-runtime",
-            region_name=BEDROCK_REGION,
-            config=Config(read_timeout=300, connect_timeout=60)
-        )
-    return _bedrock_client
 
 def _get_s3_client():
     """Get S3 client"""
@@ -822,19 +808,11 @@ def invoke_claude_for_chat(
     guard_content_text: Optional[str] = None,
 ) -> str:
     """
-    Invoke Bedrock model with conversation context.
+    Invoke gateway model with conversation context.
 
-    Supports Anthropic Claude, Amazon Titan, and Meta Llama chat-style models.
-    
-    IMPORTANT: For converse() API, we use a single user message with history as text
-    to avoid toolUse/toolResult validation errors.
-    When guard_content_text is provided and a guardrail is configured, only that text
-    is sent to the guardrail (guardContent) so the guardrail evaluates the user's
-    actual message instead of the full prompt (avoids false positives on long prompts).
+    Uses a single user message with history as text to keep prior behavior stable.
     """
-    client = _get_bedrock_client()
     model_id = BEDROCK_MODEL_ID or ""
-    model_lower = model_id.lower()
 
     # Convert history to plain text (safest approach - avoids toolUse/toolResult issues)
     history_text = _render_history_as_text(conversation_history or [])
@@ -846,91 +824,18 @@ def invoke_claude_for_chat(
         full_prompt = f"User: {prompt}\nAssistant:"
 
     try:
-        if model_lower.startswith("anthropic.") or model_lower.startswith("global.anthropic."):
-            # Use converse() API with a SINGLE user message containing the full conversation
-            # This avoids toolUse/toolResult validation errors completely
-            logger.info("Using converse() API for Anthropic model (single message with text history)")
-            content_blocks = [{"text": full_prompt}]
-            if BEDROCK_GUARDRAIL_ARN and guard_content_text is not None:
-                content_blocks.append({"guardContent": {"text": {"text": guard_content_text}}})
-            converse_kwargs = {
-                "modelId": model_id,
-                "messages": [{
-                    "role": "user",
-                    "content": content_blocks
-                }],
-                "inferenceConfig": {
-                    "maxTokens": BEDROCK_MAX_TOKENS,
-                    "temperature": 0
-                }
-            }
-            if BEDROCK_GUARDRAIL_ARN:
-                converse_kwargs["guardrailConfig"] = {
-                    "guardrailIdentifier": BEDROCK_GUARDRAIL_ARN,
-                    "guardrailVersion": BEDROCK_GUARDRAIL_VERSION,
-                }
-            response = client.converse(**converse_kwargs)
-            
-            # Extract text from converse() response format
-            output = response.get("output", {})
-            message = output.get("message", {})
-            content_blocks = message.get("content", [])
-            
-            if content_blocks:
-                text = content_blocks[0].get("text", "")
-                logger.info(f"Claude response length: {len(text)} characters")
-                return text
-            raise RuntimeError("Empty response from Claude")
-
-        elif model_lower.startswith("amazon.titan-text"):
-            payload = {
-                "inputText": full_prompt,
-                "textGenerationConfig": {
-                    "temperature": 0,
-                    "maxTokenCount": BEDROCK_MAX_TOKENS,
-                    "topP": 0.9,
-                    "stopSequences": ["\nUser:"]
-                }
-            }
-            response = client.invoke_model(
-                modelId=model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps(payload)
-            )
-            response_body = json.loads(response["body"].read())
-            results = response_body.get("results", [])
-            if results:
-                text = results[0].get("outputText", "")
-                logger.info(f"Titan response length: {len(text)} characters")
-                return text.strip()
-            raise RuntimeError("Empty response from Titan model")
-
-        elif "llama" in model_lower:
-            payload = {
-                "prompt": full_prompt,
-                "max_gen_len": BEDROCK_MAX_TOKENS,
-                "temperature": 0,
-                "top_p": 0.9,
-            }
-            response = client.invoke_model(
-                modelId=model_id,
-                contentType="application/json",
-                accept="application/json",
-                body=json.dumps(payload)
-            )
-            response_body = json.loads(response["body"].read())
-            text = response_body.get("generation", "")
-            if text:
-                logger.info(f"Llama response length: {len(text)} characters")
-                return text.strip()
-            raise RuntimeError("Empty response from Llama model")
-
-        else:
-            raise RuntimeError(f"Unsupported Bedrock model for chat: {model_id}")
+        text = chat_completion(
+            messages=[{"role": "user", "content": full_prompt}],
+            model=model_id,
+            temperature=0,
+            top_p=0.95,
+            max_tokens=BEDROCK_MAX_TOKENS,
+        )
+        logger.info(f"Gateway response length: {len(text)} characters")
+        return text
 
     except Exception as e:
-        logger.error(f"Bedrock invocation failed: {e}")
+        logger.error(f"Gateway invocation failed: {e}")
         raise
 
 

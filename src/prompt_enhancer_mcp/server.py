@@ -20,7 +20,8 @@ async def enhance(task: str, project_id: str = None) -> str:
     result = ""
     try:
         print("[MCP] Connecting to backend...")
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        verify_ssl = os.environ.get("VERIFY_SSL", "false").lower() not in ("false", "0", "no")
+        async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
             async with client.stream(
                 "POST",
                 f"{api_url}/api/orchestration/query-internal",

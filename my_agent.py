@@ -10,7 +10,7 @@ from typing import Optional
 
 from bedrock_agentcore import BedrockAgentCoreApp
 from strands import Agent, tool
-from strands.models import BedrockModel
+from strands.models.openai import OpenAIModel
 
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
@@ -19,10 +19,12 @@ app = BedrockAgentCoreApp()
 LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'brd_generator_lambda')
 LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', 'brd_retriever_lambda')
 LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', 'brd_chat_lambda')
-BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
-BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
-BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+
+# Deluxe gateway proxy (OpenAI-compatible wrapper for Bedrock)
+DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
+DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
+GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', 'Claude-4.5-Sonnet')
 
 # AgentCore Memory configuration
 AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
@@ -383,13 +385,14 @@ def _get_agent(fresh=False):
     # For chat requests, always create a fresh agent to avoid tool block conflicts
     if fresh or _agent_instance is None:
         try:
-            # Initialize Bedrock model with guardrail
-            model_kwargs = {"model_id": BEDROCK_MODEL_ID}
-            if BEDROCK_GUARDRAIL_ARN:
-                model_kwargs["guardrail_id"] = BEDROCK_GUARDRAIL_ARN
-                model_kwargs["guardrail_version"] = BEDROCK_GUARDRAIL_VERSION
-                model_kwargs["guardrail_trace"] = "enabled"
-            model = BedrockModel(**model_kwargs)
+            # Initialize OpenAI model via Deluxe gateway proxy
+            model = OpenAIModel(
+                model_id=GATEWAY_MODEL,
+                client_args={
+                    "base_url": DLXAI_GATEWAY_URL,
+                    "api_key": DLXAI_GATEWAY_KEY,
+                },
+            )
             
             # Create list of tools
             tools = [generate_brd, fetch_brd, chat_with_brd, get_brd_conversation_history]
@@ -636,5 +639,5 @@ if __name__ == "__main__":
     print(f"[BRD-AGENT] Lambda Generator: {LAMBDA_GENERATOR}", flush=True)
     print(f"[BRD-AGENT] Lambda Retriever: {LAMBDA_RETRIEVER}", flush=True)
     print(f"[BRD-AGENT] Lambda Chat: {LAMBDA_CHAT}", flush=True)
-    print(f"[BRD-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
+    print(f"[BRD-AGENT] Gateway Model: {GATEWAY_MODEL} via {DLXAI_GATEWAY_URL}", flush=True)
     app.run()

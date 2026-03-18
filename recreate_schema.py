@@ -16,11 +16,11 @@ def recreate_schema():
     conn = None
     try:
         conn = psycopg2.connect(
-            host=os.getenv("DATABASE_HOST"),
-            port=os.getenv("DATABASE_PORT", "5432"),
-            database=os.getenv("DATABASE_NAME"),
-            user=os.getenv("DATABASE_USER"),
-            password=os.getenv("DATABASE_PASSWORD"),
+            host=os.getenv("DATABASE_HOST") or os.getenv("RDS_HOST"),
+            port=os.getenv("DATABASE_PORT") or os.getenv("RDS_PORT", "5432"),
+            database=os.getenv("DATABASE_NAME") or os.getenv("RDS_DATABASE"),
+            user=os.getenv("DATABASE_USER") or os.getenv("RDS_USER", "postgres"),
+            password=os.getenv("DATABASE_PASSWORD", ""),
         )
         
         print("✅ Connected to database successfully!")

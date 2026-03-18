@@ -3,16 +3,16 @@ RAG Service - Retrieval-Augmented Generation for question answering
 Combines semantic search with LLM responses for intelligent Q&A
 """
 
-import json
-import boto3
 from typing import List, Dict, Optional, Any
 from services.search_service import search_service
 from services.embedding_service import embedding_service
 from db_helper_vector import search_embeddings, get_surrounding_chunks_batch
 from langfuse_client import get_langfuse
 import os
+import json
 import logging
 import asyncio
+import boto3
 from functools import partial as _partial
 
 async def run_sync(func, *args, **kwargs):
@@ -26,10 +26,7 @@ class RAGService:
     """Service for RAG-based question answering with integrated semantic search"""
     
     def __init__(self):
-        region = os.getenv('AWS_REGION', os.getenv('BEDROCK_REGION', 'us-east-1'))
-        self.bedrock_runtime = boto3.client('bedrock-runtime', region_name=region)
-        # Use cross-region inference profile for on-demand throughput support
-        self.model_id = os.getenv('BEDROCK_MODEL_ID', 'us.anthropic.claude-3-5-sonnet-20241022-v2:0')
+        self.model_id = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
     
     def semantic_search(
         self,
@@ -337,9 +334,13 @@ Answer:"""
         return prompt
     
     async def _stream_claude_response(self, prompt: str):
-        """Stream response from Claude"""
+        """Generate response via Bedrock and emit as chunk events."""
         try:
-            # Prepare request body
+            bedrock_runtime = boto3.client(
+                'bedrock-runtime',
+                region_name=os.getenv('BEDROCK_REGION', os.getenv('AWS_REGION', 'us-east-1'))
+            )
+
             request_body = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": 4096,
@@ -349,38 +350,28 @@ Answer:"""
                         "content": prompt
                     }
                 ],
-                # For Claude 3.5 Sonnet on Bedrock, only one of temperature or top_p
-                # may be specified. We use temperature for balanced creativity.
                 "temperature": 0.7
             }
-            
-            # Invoke model with streaming
-            response = await run_sync(self.bedrock_runtime.invoke_model_with_response_stream,
+
+            response = await run_sync(bedrock_runtime.invoke_model_with_response_stream,
                 modelId=self.model_id,
                 body=json.dumps(request_body)
             )
-            
-            # Stream chunks
+
             stream = response.get('body')
             if stream:
                 for event in stream:
-                    chunk = event.get('chunk')
-                    if chunk:
-                        chunk_data = json.loads(chunk.get('bytes').decode())
-                        
-                        # Handle different event types
-                        if chunk_data.get('type') == 'content_block_delta':
-                            delta = chunk_data.get('delta', {})
-                            if delta.get('type') == 'text_delta':
-                                text = delta.get('text', '')
-                                if text:
-                                    yield {
-                                        'type': 'chunk',
-                                        'content': text
-                                    }
-        
+                    chunk_data = json.loads(event['chunk']['bytes'].decode())
+                    if chunk_data['type'] == 'content_block_delta':
+                        text = chunk_data['delta'].get('text', '')
+                        if text:
+                            yield {
+                                'type': 'chunk',
+                                'content': text
+                            }
+
         except Exception as e:
-            logger.error(f"Error streaming Claude response: {e}")
+            logger.error(f"Error generating Bedrock response: {e}")
             yield {
                 'type': 'error',
                 'message': f'Error generating response: {str(e)}'

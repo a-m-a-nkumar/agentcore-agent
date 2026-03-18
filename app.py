@@ -17,7 +17,7 @@ import io
 import jwt
 from jwt import PyJWKClient
 from functools import wraps
-from typing import Optional
+from typing import Optional, List
 import asyncio
 from functools import partial as _partial
 
@@ -38,8 +38,15 @@ from routers.orchestration import router as orchestration_router
 
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
+from services.s3_service import s3_put_object, get_s3_client
 
-load_dotenv()
+load_dotenv(override=True)
+
+# When using AWS_PROFILE (SSO), clear any stale STS credentials from the environment
+# so boto3 resolves credentials via the SSO profile instead of expired keys
+if os.getenv("AWS_PROFILE"):
+    for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        os.environ.pop(key, None)
 
 app = FastAPI()
 
@@ -170,11 +177,6 @@ def check_aws_credentials():
         return True, identity
     except Exception as e:
         return False, str(e)
-
-# Function to get fresh boto3 clients (reinitializes on each call to pick up credential changes)
-def get_s3_client():
-    """Get a fresh S3 client"""
-    return boto3.client("s3", region_name=REGION)
 
 def get_agent_core_client():
     """Get a fresh AgentCore client with increased timeout for long-running operations"""
@@ -675,6 +677,21 @@ def read_docx(file_content):
     doc = Document(io.BytesIO(file_content))
     return "\n".join([p.text for p in doc.paragraphs])
 
+def read_pdf(file_content):
+    from PyPDF2 import PdfReader
+    reader = PdfReader(io.BytesIO(file_content))
+    return "\n".join([page.extract_text() or "" for page in reader.pages])
+
+def extract_text(file_content, filename):
+    """Extract text from .docx, .pdf, or .txt files."""
+    lower = filename.lower()
+    if lower.endswith(".docx"):
+        return read_docx(file_content)
+    elif lower.endswith(".pdf"):
+        return read_pdf(file_content)
+    else:
+        return file_content.decode("utf-8", errors="replace")
+
 @app.get("/", response_class=HTMLResponse)
 async def read_root(request: Request):
     return templates.TemplateResponse("index.html", {"request": request})
@@ -796,7 +813,7 @@ async def generate_brd(
                                     'transcript': transcript_text[:500]  # Truncate for session creation
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName='brd_chat_lambda',
+                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -849,47 +866,56 @@ async def generate_brd(
 @app.post("/api/upload-transcript")
 async def upload_transcript_to_s3(
     request: Request,
-    transcript: UploadFile = File(...),
+    transcripts: List[UploadFile] = File(...),
     current_user: dict = Depends(get_current_user)
 ):
-    """Upload transcript file to S3 and return S3 path"""
+    """Upload one or more transcript files to S3 and return S3 paths"""
     try:
         print("\n" + "="*80)
-        print("[UPLOAD] Uploading transcript to S3")
+        print(f"[UPLOAD] Uploading {len(transcripts)} transcript(s) to S3")
         print(f"[UPLOAD] User: {current_user.get('email')} ({current_user.get('user_id')})")
         print("="*80)
-        
-        s3_client = get_s3_client()
+
         bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
-        
-        # Generate unique key for transcript
-        transcript_id = str(uuid.uuid4())
-        transcript_key = f"transcripts/{transcript_id}/{transcript.filename}"
-        
-        # Read file content
-        transcript_content = await transcript.read()
-        
-        print(f"[UPLOAD] Uploading to S3: s3://{bucket_name}/{transcript_key}")
-        print(f"[UPLOAD] File size: {len(transcript_content)} bytes")
-        
-        # Upload to S3
-        await run_sync(s3_client.put_object,
-            Bucket=bucket_name,
-            Key=transcript_key,
-            Body=transcript_content,
-            ContentType=transcript.content_type or "application/octet-stream"
-        )
-        
-        print(f"[UPLOAD] ✅ Successfully uploaded to S3")
-        
-        return JSONResponse(content={
+        uploaded_files = []
+
+        for transcript in transcripts:
+            transcript_id = str(uuid.uuid4())
+            transcript_key = f"transcripts/{transcript_id}/{transcript.filename}"
+            transcript_content = await transcript.read()
+
+            print(f"[UPLOAD] Uploading to S3: s3://{bucket_name}/{transcript_key}")
+            print(f"[UPLOAD] File: {transcript.filename}, Size: {len(transcript_content)} bytes")
+
+            s3_put_object(
+                key=transcript_key,
+                body=transcript_content,
+                content_type=transcript.content_type or "application/octet-stream",
+                bucket=bucket_name,
+            )
+            uploaded_files.append({
+                "transcript_id": transcript_id,
+                "s3_path": transcript_key,
+                "s3_url": f"s3://{bucket_name}/{transcript_key}",
+                "filename": transcript.filename
+            })
+
+        print(f"[UPLOAD] ✅ Successfully uploaded {len(uploaded_files)} file(s) to S3")
+
+        # Return both multi-file format and single-file backward compat
+        result = {
             "success": True,
-            "transcript_id": transcript_id,
-            "s3_path": transcript_key,
-            "s3_url": f"s3://{bucket_name}/{transcript_key}",
-            "filename": transcript.filename
-        })
-        
+            "files": uploaded_files,
+        }
+        # Backward compat: also set top-level fields from first file
+        if uploaded_files:
+            result["transcript_id"] = uploaded_files[0]["transcript_id"]
+            result["s3_path"] = uploaded_files[0]["s3_path"]
+            result["s3_url"] = uploaded_files[0]["s3_url"]
+            result["filename"] = uploaded_files[0]["filename"]
+
+        return JSONResponse(content=result)
+
     except Exception as e:
         error_msg = str(e)
         print(f"[UPLOAD] ERROR: {error_msg}")
@@ -902,46 +928,55 @@ async def upload_transcript_to_s3(
 
 @app.post("/api/generate-from-s3")
 async def generate_brd_from_s3(
-    transcript_s3_path: str = Form(...),
+    transcript_s3_paths: Optional[str] = Form(None),
+    transcript_s3_path: Optional[str] = Form(None),
     project_id: Optional[str] = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """Generate BRD from transcript in S3 and template in S3"""
+    """Generate BRD from transcript(s) in S3 and template in S3"""
     try:
         print("\n" + "="*80)
         print("[APP] Starting BRD generation from S3")
         print("="*80)
-        
+
+        # Support both plural (new) and singular (backward compat) field names
+        raw_paths = transcript_s3_paths or transcript_s3_path or ""
+        s3_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+        if not s3_paths:
+            return JSONResponse(status_code=400, content={"error": "No transcript S3 paths provided"})
+
         s3_client = get_s3_client()
         bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
-        
-        # Template path in S3 - confirmed: templates/Deluxe_BRD_Template_v2+2.docx
-        template_s3_path = "templates/Deluxe_BRD_Template_v2+2.docx"
-        
-        print(f"[APP] Transcript S3 path: {transcript_s3_path}")
-        print(f"[APP] Template S3 path: {template_s3_path}")
-        
-        # 1. Fetch transcript from S3
-        print(f"[APP] Fetching transcript from S3...")
-        transcript_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=transcript_s3_path)
-        transcript_content = transcript_response['Body'].read()
-        
+
+        # Template path in S3
+        template_s3_path_key = "templates/Deluxe_BRD_Template.docx"
+
+        print(f"[APP] Transcript S3 paths ({len(s3_paths)}): {s3_paths}")
+        print(f"[APP] Template S3 path: {template_s3_path_key}")
+
+        # 1. Fetch and extract text from all transcript files
+        transcript_texts = []
+        for s3_path in s3_paths:
+            print(f"[APP] Fetching transcript from S3: {s3_path}")
+            resp = s3_client.get_object(Bucket=bucket_name, Key=s3_path)
+            content = resp['Body'].read()
+            print(f"[APP] File: {s3_path}, Size: {len(content)} bytes")
+            text = extract_text(content, s3_path)
+            transcript_texts.append(text)
+
+        transcript_text = "\n\n---\n\n".join(transcript_texts)
+
         # 2. Fetch template from S3
         print(f"[APP] Fetching template from S3...")
-        template_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=template_s3_path)
+        template_response = s3_client.get_object(Bucket=bucket_name, Key=template_s3_path_key)
         template_content = template_response['Body'].read()
-        
-        print(f"[APP] Transcript file: {len(transcript_content)} bytes")
+
+        print(f"[APP] Combined transcript text: {len(transcript_text)} chars")
         print(f"[APP] Template file: {len(template_content)} bytes")
-        
-        # 3. Extract text
-        if transcript_s3_path.endswith(".docx"):
-            transcript_text = read_docx(transcript_content)
-        else:
-            transcript_text = transcript_content.decode("utf-8", errors="replace")
-            
+
+        # 3. Extract template text
         template_text = read_docx(template_content)
-        
+
         print(f"[APP] Transcript text: {len(transcript_text)} chars")
         print(f"[APP] Template text: {len(template_text)} chars")
         
@@ -1024,7 +1059,7 @@ async def generate_brd_from_s3(
                                     'transcript': transcript_text[:500]
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName='brd_chat_lambda',
+                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -1818,7 +1853,7 @@ async def get_analyst_history(
         print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
 
         # Get AgentCore Memory configuration
-        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
+        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
         AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
 
         # Get AgentCore client
@@ -1894,7 +1929,7 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         # Get conversation history from AgentCore Memory
@@ -1995,7 +2030,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2108,7 +2143,7 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         # If session_id is "none" or empty, try to find the most recent session
@@ -2240,7 +2275,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2353,7 +2388,7 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         # Get conversation history from AgentCore Memory
@@ -2454,7 +2489,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2490,7 +2525,7 @@ async def analyst_generate_brd(
         
         # Get S3 bucket and template path
         s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
-        template_s3_key = "templates/Deluxe_BRD_Template_v2+2.docx"
+        template_s3_key = "templates/Deluxe_BRD_Template.docx"
         
         # Get Lambda client with increased timeout for long-running BRD generation
         from botocore.config import Config
@@ -2501,7 +2536,7 @@ async def analyst_generate_brd(
         )
         lambda_client = boto3.client('lambda', region_name=REGION, config=lambda_config)
         # Use lambda_brd_from_history for analyst agent BRD generation
-        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "brd_from_history_lambda")
+        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
         
         # Prepare Lambda payload for lambda_brd_from_history
         # This Lambda expects: conversation_history (list of messages)
@@ -2780,11 +2815,11 @@ async def download_brd(
                         
                         # Also save the text file for future downloads
                         try:
-                            await run_sync(s3_client.put_object,
-                                Bucket=bucket_name,
-                                Key=s3_key_txt,
-                                Body=brd_text.encode("utf-8"),
-                                ContentType="text/plain"
+                            s3_put_object(
+                                key=s3_key_txt,
+                                body=brd_text,
+                                content_type="text/plain",
+                                bucket=bucket_name,
                             )
                             print(f"[DOWNLOAD] ✅ Saved rendered text file to S3 for future downloads")
                         except Exception as save_err:
@@ -2861,7 +2896,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
         
         messages = []
@@ -2964,7 +2999,7 @@ async def get_brd_chat_history(
         print(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
 
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
         actor_id = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
 
         print(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
@@ -3114,11 +3149,15 @@ def _load_brd_structure_from_s3(brd_id: str) -> dict:
 
 
 def _is_doc_title_section(title: str) -> bool:
+    """Detect if the first section is a document title (not a real BRD section).
+
+    Real BRD sections always start with a number like "1. Document Overview".
+    The LLM sometimes prepends a project-name section without a number prefix;
+    this helper identifies those so ``_iter_user_sections`` can skip them.
+    """
     t = (title or "").strip()
     if not t:
         return False
-    # Doc title is never numbered ("1. Something"), regular sections always are.
-    # If the first section lacks a numbered prefix, it is the doc title.
     if re.match(r"^\d+\.", t):
         return False
     return True
@@ -3141,6 +3180,9 @@ def _iter_user_sections(brd_data: dict):
         title_lower = title.lower()
 
         # Skip ALL subsections whose title starts with "#"
+        # These are sub-headers within a parent section (e.g. "# User Story 1: ...",
+        # "# In Scope", "# Out of Scope", "# Acronyms and Abbreviations", "# Appendix")
+        # and should not appear as top-level BRD sections.
         if title.startswith("#"):
             continue
 

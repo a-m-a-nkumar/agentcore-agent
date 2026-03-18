@@ -10,7 +10,8 @@ import uuid
 from typing import List, Dict
 
 import boto3
-from botocore.config import Config
+from llm_gateway import chat_completion
+from services.s3_service import s3_put_object
 
 # Import prompts from centralized prompts module
 from prompts import get_brd_from_history_prompt
@@ -21,10 +22,10 @@ logger.setLevel(logging.INFO)
 
 # Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
+AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
 AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
 S3_BUCKET = os.getenv('S3_BUCKET_NAME', 'test-development-bucket-siriusai')
-TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template_v2+2.docx'
+TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template.docx'
 BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
 BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
@@ -32,22 +33,8 @@ MAX_TOKENS = 8192
 TEMPERATURE = 0.0
 
 # Lazy loading
-_bedrock_runtime = None
 _agentcore_memory_client = None
 _s3_client = None
-
-
-def _get_bedrock_runtime():
-    global _bedrock_runtime
-    if _bedrock_runtime is None:
-        # Configure Bedrock client with extended timeout for long-running generation
-        bedrock_config = Config(
-            read_timeout=600,  # 10 minutes - enough for generating 8192 tokens
-            connect_timeout=10,
-            retries={'max_attempts': 1}  # Don't retry on timeout
-        )
-        _bedrock_runtime = boto3.client('bedrock-runtime', region_name=AWS_REGION, config=bedrock_config)
-    return _bedrock_runtime
 
 
 def _get_agentcore_memory_client():
@@ -165,8 +152,6 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
 
 def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     """Generate BRD using Bedrock AI"""
-    bedrock = _get_bedrock_runtime()
-    
     # Build the full prompt using the centralized prompt function
     prompt = get_brd_from_history_prompt(
         template=template,
@@ -177,35 +162,10 @@ def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     logger.info(f"Model: {BEDROCK_MODEL_ID}, Max tokens: {MAX_TOKENS}")
     
     try:
-        converse_kwargs = {
-            "modelId": BEDROCK_MODEL_ID,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [{"text": prompt}]
-                }
-            ],
-            "inferenceConfig": {
-                "maxTokens": MAX_TOKENS,
-                "temperature": TEMPERATURE
-            }
-        }
-        if BEDROCK_GUARDRAIL_ARN:
-            converse_kwargs["guardrailConfig"] = {
-                "guardrailIdentifier": BEDROCK_GUARDRAIL_ARN,
-                "guardrailVersion": BEDROCK_GUARDRAIL_VERSION,
-            }
-        response = bedrock.converse(**converse_kwargs)
-        
-        # Extract generated BRD text
-        output = response.get("output", {})
-        message = output.get("message", {})
-        content_blocks = message.get("content", [])
-        
-        brd_text = "".join(
-            block.get("text", "")
-            for block in content_blocks
-            if "text" in block
+        brd_text = chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
         )
         
         logger.info(f"Generated BRD: {len(brd_text)} characters")
@@ -349,31 +309,19 @@ def convert_brd_to_json(brd_text: str) -> Dict:
 
 def save_brd_to_s3(brd_text: str, brd_id: str) -> Dict[str, str]:
     """Save generated BRD to S3 in both text and JSON formats"""
-    s3_client = _get_s3_client()
-    
     try:
         # Save as text file
         txt_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
-        s3_client.put_object(
-            Bucket=S3_BUCKET,
-            Key=txt_key,
-            Body=brd_text.encode('utf-8'),
-            ContentType='text/plain'
-        )
+        s3_put_object(key=txt_key, body=brd_text, content_type="text/plain")
         txt_location = f"s3://{S3_BUCKET}/{txt_key}"
         logger.info(f"Saved BRD text to {txt_location}")
-        
+
         # Convert to JSON structure
         brd_json = convert_brd_to_json(brd_text)
-        
+
         # Save as JSON file
         json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
-        s3_client.put_object(
-            Bucket=S3_BUCKET,
-            Key=json_key,
-            Body=json.dumps(brd_json, indent=2).encode('utf-8'),
-            ContentType='application/json'
-        )
+        s3_put_object(key=json_key, body=json.dumps(brd_json, indent=2), content_type="application/json")
         json_location = f"s3://{S3_BUCKET}/{json_key}"
         logger.info(f"Saved BRD JSON to {json_location}")
         

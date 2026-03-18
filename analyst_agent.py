@@ -24,16 +24,18 @@ except ImportError:
             raise
 
 from strands import Agent, tool
-from strands.models import BedrockModel
+from strands.models.openai import OpenAIModel
 
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
 
 # Configuration
-BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
-BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
-BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+
+# Deluxe gateway proxy (OpenAI-compatible wrapper for Bedrock)
+DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
+DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
+GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', 'Claude-4.5-Sonnet')
 
 # Lambda Function ARNs (can also use function names, but ARNs are more explicit)
 LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
@@ -235,13 +237,14 @@ def _get_agent(fresh=False):
     
     if fresh or _agent_instance is None:
         try:
-            # Initialize Bedrock model with guardrail
-            model_kwargs = {"model_id": BEDROCK_MODEL_ID}
-            if BEDROCK_GUARDRAIL_ARN:
-                model_kwargs["guardrail_id"] = BEDROCK_GUARDRAIL_ARN
-                model_kwargs["guardrail_version"] = BEDROCK_GUARDRAIL_VERSION
-                model_kwargs["guardrail_trace"] = "enabled"
-            model = BedrockModel(**model_kwargs)
+            # Initialize OpenAI model via Deluxe gateway proxy
+            model = OpenAIModel(
+                model_id=GATEWAY_MODEL,
+                client_args={
+                    "base_url": DLXAI_GATEWAY_URL,
+                    "api_key": DLXAI_GATEWAY_KEY,
+                },
+            )
             
             # System prompt for the agent
             system_prompt = """You are Mary, a Strategic Business Analyst and Requirements Expert.
@@ -424,7 +427,7 @@ Please help the user with their BRD requirements gathering or generation request
 
 # Run the app when module is loaded (always run, not just when executed directly)
 print("[ANALYST-AGENT] Initializing AgentCore Runtime app...", flush=True)
-print(f"[ANALYST-AGENT] Bedrock Model: {BEDROCK_MODEL_ID}", flush=True)
+print(f"[ANALYST-AGENT] Gateway Model: {GATEWAY_MODEL} via {DLXAI_GATEWAY_URL}", flush=True)
 print(f"[ANALYST-AGENT] Lambda Requirements Gathering ARN: {LAMBDA_REQUIREMENTS_GATHERING_ARN}", flush=True)
 print(f"[ANALYST-AGENT] Lambda BRD from History ARN: {LAMBDA_BRD_FROM_HISTORY_ARN}", flush=True)
 app.run()

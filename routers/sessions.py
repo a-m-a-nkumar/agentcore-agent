@@ -62,7 +62,7 @@ class SessionResponse(BaseModel):
 # ============================================
 
 @router.get("/", response_model=List[SessionResponse])
-async def get_sessions(
+def get_sessions(
     project_id: str = Query(..., description="Project ID to filter sessions"),
     current_user: dict = Depends(get_current_user)
 ):
@@ -92,7 +92,7 @@ async def get_sessions(
 
 
 @router.post("/", response_model=SessionResponse, status_code=201)
-async def create_new_session(
+def create_new_session(
     session_data: SessionCreate,
     current_user: dict = Depends(get_current_user)
 ):
@@ -127,7 +127,7 @@ async def create_new_session(
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
-async def get_session_by_id(
+def get_session_by_id(
     session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -153,7 +153,7 @@ async def get_session_by_id(
 
 
 @router.patch("/{session_id}", response_model=SessionResponse)
-async def update_session_by_id(
+def update_session_by_id(
     session_id: str,
     session_data: SessionUpdate,
     current_user: dict = Depends(get_current_user)
@@ -187,7 +187,7 @@ async def update_session_by_id(
 
 
 @router.post("/{session_id}/increment-messages", response_model=dict)
-async def increment_session_messages(
+def increment_session_messages(
     session_id: str,
     current_user: dict = Depends(get_current_user)
 ):
@@ -215,7 +215,7 @@ async def increment_session_messages(
 
 
 @router.delete("/{session_id}", status_code=204)
-async def delete_session_by_id(
+def delete_session_by_id(
     session_id: str,
     hard_delete: bool = True,
     current_user: dict = Depends(get_current_user)
