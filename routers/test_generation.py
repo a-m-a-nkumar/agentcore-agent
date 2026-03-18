@@ -27,7 +27,7 @@ from services.github_service import GitHubService
 router = APIRouter(prefix="/api/test", tags=["test"])
 logger = logging.getLogger(__name__)
 
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-3-5-sonnet-20241022-v2:0")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 BEDROCK_READ_TIMEOUT = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))
 
@@ -229,6 +229,19 @@ def markdown_to_confluence_storage(markdown: str) -> str:
     return ''.join(html_parts)
 
 
+def _strip_trailing_notes(content: str) -> str:
+    """Remove trailing placeholder/continuation notes Claude adds when hitting token limit."""
+    patterns = [
+        r'\n+\[[^\]]{10,}\]\s*$',
+        r'\n+\([^)]{10,}\)\s*$',
+        r'\n+[^\n]{0,300}(continue|remaining|length limit|token limit|same format|same detailed format|subsequent scenario|following the same|proceed with|would you like|I can add|I have covered)[^\n]*\s*$',
+    ]
+    result = content
+    for pattern in patterns:
+        result = re.sub(pattern, '', result, flags=re.IGNORECASE)
+    return result.rstrip()
+
+
 def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str) -> str:
     """
     Use Bedrock (Claude) to generate a Test Scenario document from BRD content.
@@ -341,7 +354,7 @@ RULES — follow all of these strictly:
     bedrock_client = _get_bedrock_client()
     request_body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 8000,
+        "max_tokens": 8192,
         "temperature": 0.3,
         "messages": [{"role": "user", "content": prompt}]
     }
@@ -353,6 +366,7 @@ RULES — follow all of these strictly:
     )
     response_body = json.loads(response['body'].read())
     content = response_body['content'][0]['text']
+    content = _strip_trailing_notes(content)
     logger.info(f"Bedrock response received, length: {len(content)} characters")
     return content
 
@@ -603,13 +617,23 @@ async def push_test_scenarios_to_confluence(
         else:
             confluence_html = markdown_to_confluence_storage(request.content)
 
-        page = confluence_service.create_page(
-            space_key=space_key,
-            title=request.page_title,
-            content=confluence_html,
-            parent_id=request.parent_page_id
-        )
-        logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
+        existing_page = confluence_service.find_page_by_title(space_key, request.page_title)
+        if existing_page:
+            page = confluence_service.update_page(
+                page_id=existing_page['id'],
+                title=request.page_title,
+                content=confluence_html,
+                current_version=existing_page['version']['number']
+            )
+            logger.info(f"Updated existing Confluence page: {page['title']} (ID: {page['id']})")
+        else:
+            page = confluence_service.create_page(
+                space_key=space_key,
+                title=request.page_title,
+                content=confluence_html,
+                parent_id=request.parent_page_id
+            )
+            logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
         return {
             "page_id": page['id'],
             "page_title": page['title'],
