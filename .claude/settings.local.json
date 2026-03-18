@@ -10,7 +10,8 @@
       "mcp__enhance-prompt__list_test_scenario_pages",
       "mcp__enhance-prompt__get_test_prompt",
       "mcp__enhance-prompt__submit_test_cases",
-      "Bash(grep -n \"^@.*post\\\\|^@.*get\\\\|^@.*put\\\\|^@.*delete\\\\|^@.*patch\" /c/Users/ArushSingh/Desktop/agentcore-agent/app.py /c/Users/ArushSingh/Desktop/agentcore-agent/routers/*.py)"
+      "Bash(grep -n \"^@.*post\\\\|^@.*get\\\\|^@.*put\\\\|^@.*delete\\\\|^@.*patch\" /c/Users/ArushSingh/Desktop/agentcore-agent/app.py /c/Users/ArushSingh/Desktop/agentcore-agent/routers/*.py)",
+      "Bash(grep -l \"github\\\\|integrations\\\\|service\" /c/Users/ArushSingh/Desktop/agentcore-agent/*.py)"
     ]
   }
 }

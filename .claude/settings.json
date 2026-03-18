@@ -3,7 +3,12 @@
     "allow": [
       "Bash(xargs grep:*)",
       "Bash(grep -E \"\\\\.py$\")",
-      "Bash(wc -l /c/Users/ArushSingh/Desktop/agentcore-agent/services/*.py)"
+      "Bash(wc -l /c/Users/ArushSingh/Desktop/agentcore-agent/services/*.py)",
+      "Bash(.venv/Scripts/python.exe -c \"from mcp.server.fastmcp import FastMCP; print\\(''mcp import OK''\\)\")",
+      "Bash(.venv/Scripts/python.exe -c \"import httpx; print\\(''httpx OK''\\)\")",
+      "Bash(AWS_ACCESS_KEY_ID=ASIAWQUOZLMMHO7B7WQU AWS_SECRET_ACCESS_KEY=\"Vo5ZmRv/uJFCbxwI2AaZxIQkOzBm/LBCowcUjlNz\" AWS_SESSION_TOKEN=\"IQoJb3JpZ2luX2VjECEaCXVzLWVhc3QtMSJHMEUCIAE53ZPioD24RpUM7hNL1hymVWhjW/8Jrr+eTfxq5ZCTAiEA2E59p7DpjVmE4nZV65ikC2pcrL9MUsKVpE50R4jXb7wqmQMI6v//////////ARAAGgw0NDgwNDk3OTc5MTIiDNTD+jo2vjr1vx0kuirtAkdqZ2hH3M5Pr5zYIn6oe7ykY6oFM1c+F1NXJNcgC9YApFt1q+JvyzIssnnjrc6TnUacz3gZ6cN2L/j6UPZvDjUv+/DjReSFuYoje0Yb7G6+jxCw791B0nhJ09w7mFVSyttJFj1UYw0NhwYwJt521NFv98nZCDK+TntUvIVzkSvXGnjnqJEvJoNXNF/Wv5rUlffV8IDgw/1aC5sUUMgJ0HbwbydKL2DSosf1UKwh0ozArmiu/vETeXCaGLUonDCOhW3781NRXnIRZGWf5Z5i00HFKj0ojJcRGhwJrJiRC7TksqXhQqILjOSbjBwLvkEMJv5ccrkuYaT5wp5VUW0HGoXJo8lvo2w286KIeSHldSEZgEFbRHRR8BjglKCwH89kcnEc4p/CcjGEtnh9JozjWZtGauzZptj0rKoWLCX3JdkgQ3hYZQSqRmgtKeR//9bIQEPOGQd7x6/asdRruHUC3XwlIhEw88SA6KtToP+rMI2g5M0GOqQBuw2oIIRwvUY6Z8Tbu3njOnWyVhLXwZGozsGjqZrYpx3gSi5TtNV/SQw+1jhmqOc881pAqneOMqjoeF9nUmgAeelNNYAjFXsq0YP6l58U+1UQAHP+kzJqFKsfMNeEEtJJX/XpNXFYtwLtFggzfezPrimmEBSHt5HAcNxM/I8Z1e5us+DfwRiGfv7plH32YrYx41wjEeTO+5ICAPQPYl0ZaEaaQZw=\" AWS_DEFAULT_REGION=us-east-1 aws sts get-caller-identity)",
+      "Bash(gh repo:*)",
+      "Read(//tmp/**)"
     ]
   }
 }
