@@ -9,6 +9,7 @@ import json
 import os
 import logging
 import boto3
+from botocore.config import Config as BotoConfig
 import re
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -29,7 +30,11 @@ def _get_bedrock():
     global _bedrock_client
     if _bedrock_client is None:
         region = os.getenv("AWS_REGION", os.getenv("BEDROCK_REGION", "us-east-1"))
-        _bedrock_client = boto3.client("bedrock-runtime", region_name=region)
+        _bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=region,
+            config=BotoConfig(read_timeout=300, retries={"max_attempts": 2}),
+        )
     return _bedrock_client
 
 PROMPT_MODEL_ID   = os.getenv("DESIGN_PROMPT_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
