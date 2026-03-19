@@ -17,7 +17,7 @@ class RAGService:
     """Service for RAG-based question answering with integrated semantic search"""
     
     def __init__(self):
-        self.model_id = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+        self.model_id = os.getenv('DLXAI_CHAT_MODEL', 'Claude-4.5-Sonnet')
     
     def semantic_search(
         self,
@@ -298,13 +298,13 @@ Optimized Prompt:"""
 
     def _build_rag_prompt(self, query: str, context_chunks: List[Dict]) -> str:
         """Build prompt for Claude with context"""
-        
+
         # Format context
         context_text = ""
         for i, chunk in enumerate(context_chunks, 1):
             context_text += f"\n\n--- Source {i}: {chunk['source']} ---\n"
             context_text += chunk['content']
-        
+
         # Build full prompt
         prompt = f"""You are a helpful AI assistant answering questions based on project documentation from Confluence and Jira.
 
@@ -321,12 +321,15 @@ Instructions:
 - Use markdown formatting for better readability
 
 Answer:"""
-        
+
         return prompt
     
     async def _stream_claude_response(self, prompt: str):
         """Generate response via gateway and emit as chunk events."""
         try:
+            prompt_len = len(prompt)
+            logger.info(f"Sending prompt to gateway: model={self.model_id}, prompt_length={prompt_len} chars (~{prompt_len // 4} tokens)")
+
             text = chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
@@ -338,9 +341,9 @@ Answer:"""
                     'type': 'chunk',
                     'content': text
                 }
-        
+
         except Exception as e:
-            logger.error(f"Error generating gateway response: {e}")
+            logger.error(f"Error generating gateway response (prompt={len(prompt)} chars): {e}")
             yield {
                 'type': 'error',
                 'message': f'Error generating response: {str(e)}'

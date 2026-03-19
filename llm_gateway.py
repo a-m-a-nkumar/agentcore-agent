@@ -31,4 +31,6 @@ def chat_completion(
         params["max_tokens"] = max_tokens
 
     response = client.chat.completions.create(**params)
+    if not response or not response.choices:
+        raise ValueError(f"Gateway returned empty response for model={params.get('model')}")
     return (response.choices[0].message.content or "").strip()

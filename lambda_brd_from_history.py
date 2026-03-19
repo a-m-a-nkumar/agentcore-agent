@@ -11,7 +11,6 @@ from typing import List, Dict
 
 import boto3
 from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
 
 # Import prompts from centralized prompts module
 from prompts import get_brd_from_history_prompt
@@ -164,7 +163,9 @@ def generate_brd_with_bedrock(template: str, conversation: str) -> str:
     try:
         brd_text = chat_completion(
             messages=[{"role": "user", "content": prompt}],
+            model=BEDROCK_MODEL_ID,
             temperature=TEMPERATURE,
+            top_p=0.95,
             max_tokens=MAX_TOKENS,
         )
         
@@ -309,19 +310,31 @@ def convert_brd_to_json(brd_text: str) -> Dict:
 
 def save_brd_to_s3(brd_text: str, brd_id: str) -> Dict[str, str]:
     """Save generated BRD to S3 in both text and JSON formats"""
+    s3_client = _get_s3_client()
+    
     try:
         # Save as text file
         txt_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
-        s3_put_object(key=txt_key, body=brd_text, content_type="text/plain")
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=txt_key,
+            Body=brd_text.encode('utf-8'),
+            ContentType='text/plain'
+        )
         txt_location = f"s3://{S3_BUCKET}/{txt_key}"
         logger.info(f"Saved BRD text to {txt_location}")
-
+        
         # Convert to JSON structure
         brd_json = convert_brd_to_json(brd_text)
-
+        
         # Save as JSON file
         json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
-        s3_put_object(key=json_key, body=json.dumps(brd_json, indent=2), content_type="application/json")
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=json_key,
+            Body=json.dumps(brd_json, indent=2).encode('utf-8'),
+            ContentType='application/json'
+        )
         json_location = f"s3://{S3_BUCKET}/{json_key}"
         logger.info(f"Saved BRD JSON to {json_location}")
         

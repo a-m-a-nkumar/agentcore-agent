@@ -125,8 +125,8 @@ print(f"[CONFIG] Analyst Agent ARN: {ANALYST_AGENT_ARN}")
 print(f"[CONFIG] Region: {REGION}\n")
 
 # Azure AD Configuration
-AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "10eda5db-4715-4e7b-bcd9-32dba3533084")
-AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "0575746d-c254-4eea-bfc6-10d0979d1e90")
+AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
+AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
 AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
 # Import authentication functions

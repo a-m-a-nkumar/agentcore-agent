@@ -173,19 +173,31 @@ def create_or_update_user(user_id: str, email: str, name: str = None) -> Dict[st
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
-            cursor.execute("""
-                INSERT INTO users (id, email, name, last_login)
-                VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
-                ON CONFLICT (id) DO UPDATE
-                SET last_login = CURRENT_TIMESTAMP,
-                    email = EXCLUDED.email,
-                    name = COALESCE(EXCLUDED.name, users.name)
-                RETURNING *
-            """, (user_id, email, name))
-            
+            # First, check if a user with this email already exists (possibly with a different id
+            # from a previous Azure AD SPN). If so, update their id to the new oid.
+            cursor.execute("SELECT id FROM users WHERE email = %s", (email,))
+            existing = cursor.fetchone()
+            if existing and existing['id'] != user_id:
+                logger.info(f"Updating user id for {email}: {existing['id']} -> {user_id}")
+                cursor.execute("""
+                    UPDATE users SET id = %s, name = COALESCE(%s, name), last_login = CURRENT_TIMESTAMP
+                    WHERE email = %s
+                    RETURNING *
+                """, (user_id, name, email))
+            else:
+                cursor.execute("""
+                    INSERT INTO users (id, email, name, last_login)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
+                    ON CONFLICT (id) DO UPDATE
+                    SET last_login = CURRENT_TIMESTAMP,
+                        email = EXCLUDED.email,
+                        name = COALESCE(EXCLUDED.name, users.name)
+                    RETURNING *
+                """, (user_id, email, name))
+
             user = dict(cursor.fetchone())
             conn.commit()
-            
+
             logger.debug(f"User created/updated: {user_id}")
             return user
     except Exception as e:
