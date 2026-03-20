@@ -326,17 +326,28 @@ def save_brd_to_s3(brd_text: str, brd_id: str) -> Dict[str, str]:
         
         # Convert to JSON structure
         brd_json = convert_brd_to_json(brd_text)
-        
+        json_body = json.dumps(brd_json, indent=2).encode('utf-8')
+
         # Save as JSON file
         json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
         s3_client.put_object(
             Bucket=S3_BUCKET,
             Key=json_key,
-            Body=json.dumps(brd_json, indent=2).encode('utf-8'),
+            Body=json_body,
             ContentType='application/json'
         )
         json_location = f"s3://{S3_BUCKET}/{json_key}"
         logger.info(f"Saved BRD JSON to {json_location}")
+
+        # Also save as brd_structure.json (used by Confluence upload endpoint)
+        structure_key = f"brds/{brd_id}/brd_structure.json"
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=structure_key,
+            Body=json_body,
+            ContentType='application/json'
+        )
+        logger.info(f"Saved BRD structure to s3://{S3_BUCKET}/{structure_key}")
         
         return {
             "txt": txt_location,

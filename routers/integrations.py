@@ -7,6 +7,8 @@ import json
 import os
 from datetime import datetime
 
+import re
+
 from auth import verify_azure_token
 from db_helper import (
     update_user_atlassian_credentials,
@@ -19,6 +21,100 @@ from services.confluence_service import ConfluenceService
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 logger = logging.getLogger(__name__)
+
+
+def _parse_brd_text_to_structure(brd_text: str) -> dict:
+    """Parse markdown BRD text into structured JSON with sections, bullets, and tables."""
+    sections = []
+    current_section = None
+    current_content = []
+
+    for line in brd_text.split('\n'):
+        stripped = line.strip()
+
+        # Skip markdown separator lines (e.g., ---)
+        if re.match(r'^[-=]{3,}$', stripped):
+            continue
+
+        # Detect headings (## or #)
+        heading_match = re.match(r'^(#{1,3})\s+(.*)', stripped)
+        if heading_match:
+            # Save previous section
+            if current_section:
+                if current_content:
+                    current_section['content'].append({
+                        "type": "paragraph",
+                        "text": '\n'.join(current_content).strip()
+                    })
+                    current_content = []
+                sections.append(current_section)
+
+            title = heading_match.group(2).strip()
+            current_section = {"title": title, "content": []}
+            continue
+
+        if not current_section:
+            # Create a default section if content appears before any heading
+            if stripped:
+                current_section = {"title": "Business Requirements Document", "content": []}
+            else:
+                continue
+
+        # Bullet points
+        if re.match(r'^[-*•]\s+', stripped):
+            bullet_text = re.sub(r'^[-*•]\s+', '', stripped)
+            if current_content:
+                current_section['content'].append({
+                    "type": "paragraph",
+                    "text": '\n'.join(current_content).strip()
+                })
+                current_content = []
+            if current_section['content'] and current_section['content'][-1].get('type') == 'bullet':
+                current_section['content'][-1]['items'].append(bullet_text)
+            else:
+                current_section['content'].append({"type": "bullet", "items": [bullet_text]})
+            continue
+
+        # Table rows
+        if '|' in stripped and stripped.startswith('|'):
+            cells = [c.strip() for c in stripped.split('|') if c.strip()]
+            # Skip separator rows like |---|---|
+            if cells and all(re.match(r'^[-:]+$', c) for c in cells):
+                continue
+            if cells and len(cells) > 1:
+                if current_content:
+                    current_section['content'].append({
+                        "type": "paragraph",
+                        "text": '\n'.join(current_content).strip()
+                    })
+                    current_content = []
+                if current_section['content'] and current_section['content'][-1].get('type') == 'table':
+                    current_section['content'][-1]['rows'].append(cells)
+                else:
+                    current_section['content'].append({"type": "table", "rows": [cells]})
+                continue
+
+        # Regular text
+        if stripped:
+            current_content.append(stripped)
+        elif current_content:
+            # Empty line = paragraph break
+            current_section['content'].append({
+                "type": "paragraph",
+                "text": '\n'.join(current_content).strip()
+            })
+            current_content = []
+
+    # Finalize last section
+    if current_section:
+        if current_content:
+            current_section['content'].append({
+                "type": "paragraph",
+                "text": '\n'.join(current_content).strip()
+            })
+        sections.append(current_section)
+
+    return {"sections": sections}
 
 
 # ============================================
@@ -336,24 +432,35 @@ def upload_brd_to_confluence(
         # Try to fetch JSON structure first
         json_key = f"brds/{request.brd_id}/brd_structure.json"
         
+        brd_json = None
+
+        # Try brd_structure.json first (created by lambda_brd_generator)
         try:
             logger.info(f"Fetching BRD from S3: s3://{bucket_name}/{json_key}")
             response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
             brd_json = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"Successfully loaded BRD JSON with {len(brd_json.get('sections', []))} sections")
+            logger.info(f"Successfully loaded brd_structure.json with {len(brd_json.get('sections', []))} sections")
         except Exception as e:
-            logger.warning(f"Could not load JSON structure: {e}. Trying text format...")
-            # Fallback to text format
+            logger.warning(f"Could not load brd_structure.json: {e}")
+
+        # Try BRD_{id}.json (created by lambda_brd_from_history)
+        if not brd_json or not brd_json.get('sections'):
+            try:
+                alt_json_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.json"
+                logger.info(f"Trying alternative JSON: s3://{bucket_name}/{alt_json_key}")
+                response = s3_client.get_object(Bucket=bucket_name, Key=alt_json_key)
+                brd_json = json.loads(response['Body'].read().decode('utf-8'))
+                logger.info(f"Successfully loaded BRD JSON with {len(brd_json.get('sections', []))} sections")
+            except Exception as e2:
+                logger.warning(f"Could not load BRD JSON: {e2}")
+
+        # Final fallback: parse text file into structured format
+        if not brd_json or not brd_json.get('sections'):
             txt_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.txt"
+            logger.info(f"Falling back to text: s3://{bucket_name}/{txt_key}")
             response = s3_client.get_object(Bucket=bucket_name, Key=txt_key)
             brd_text = response['Body'].read().decode('utf-8')
-            # Convert text to simple structure
-            brd_json = {
-                "sections": [{
-                    "title": "Business Requirements Document",
-                    "content": [{"type": "paragraph", "text": brd_text}]
-                }]
-            }
+            brd_json = _parse_brd_text_to_structure(brd_text)
     
     except Exception as e:
         logger.error(f"Error fetching BRD from S3: {e}")
