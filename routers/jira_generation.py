@@ -6,7 +6,8 @@ import json
 import os
 import re
 from html import unescape
-from llm_gateway import chat_completion
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 
 from auth import verify_azure_token
 from db_helper import (

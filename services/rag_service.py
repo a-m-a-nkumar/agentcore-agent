@@ -6,7 +6,8 @@ Combines semantic search with LLM responses for intelligent Q&A
 from typing import List, Dict, Optional, Any
 from services.search_service import search_service
 from langfuse_client import get_langfuse
-from llm_gateway import chat_completion
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 import os
 import logging
 

@@ -16,7 +16,8 @@ from typing import Dict, List, Optional, Any
 
 import boto3
 from botocore.exceptions import ClientError
-from llm_gateway import chat_completion
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 
 # Configure logging
 logger = logging.getLogger()

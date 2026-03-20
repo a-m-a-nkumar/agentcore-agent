@@ -31,7 +31,8 @@ from routers.orchestration import router as orchestration_router
 
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
-from services.s3_service import s3_put_object, get_s3_client
+# Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
+from environment import s3_put_object, get_s3_client  # noqa: F401
 
 load_dotenv(override=True)
 
@@ -114,9 +115,11 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Configuration (from .env)
-AGENT_ARN = os.getenv("AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/pm_agent-uDlkiNFagv")
-ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/analyst_agent-JAa3wMFKOK")
+# Configuration (from .env / environment switch)
+# ARN defaults come from environment.py — local account (448049797912) or VDI account (590184044598)
+from environment import DEFAULT_AGENT_ARN, DEFAULT_ANALYST_AGENT_ARN  # noqa: E402
+AGENT_ARN = os.getenv("AGENT_ARN", DEFAULT_AGENT_ARN)
+ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", DEFAULT_ANALYST_AGENT_ARN)
 REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Log agent ARNs on startup

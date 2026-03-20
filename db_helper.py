@@ -17,7 +17,8 @@ from typing import List, Dict, Optional, Any
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from db_config import get_db_params
+# Environment-specific DB params (local: direct password | VDI: Secrets Manager)
+from environment import get_db_params
 
 # Global pool variable
 _db_pool = None

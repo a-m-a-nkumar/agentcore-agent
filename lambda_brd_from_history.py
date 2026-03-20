@@ -10,8 +10,8 @@ import uuid
 from typing import List, Dict
 
 import boto3
-from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
+# Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
+from environment import chat_completion, s3_put_object
 
 # Import prompts from centralized prompts module
 from prompts import get_brd_from_history_prompt

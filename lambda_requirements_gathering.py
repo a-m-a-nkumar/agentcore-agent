@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 import boto3
-from llm_gateway import chat_completion
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 
 # Import prompts from centralized prompts module
 from prompts import get_requirements_gathering_prompt
