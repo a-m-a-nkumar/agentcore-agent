@@ -4,8 +4,24 @@
       "type": "stdio",
       "command": "c:/Users/ArushSingh/Desktop/agentcore-agent/.venv/Scripts/python.exe",
       "args": [
-        "c:/Users/ArushSingh/Desktop/agentcore-agent/src/prompt_enhancer_mcp/server.py"
+        "-m",
+        "src.prompt_enhancer_mcp.enhance_server"
       ],
+      "cwd": "c:/Users/ArushSingh/Desktop/agentcore-agent",
+      "env": {
+        "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
+        "API_KEY": "dev-key-arush",
+        "API_URL": "http://localhost:8000"
+      }
+    },
+    "test-workflow": {
+      "type": "stdio",
+      "command": "c:/Users/ArushSingh/Desktop/agentcore-agent/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "src.prompt_enhancer_mcp.test_server"
+      ],
+      "cwd": "c:/Users/ArushSingh/Desktop/agentcore-agent",
       "env": {
         "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
         "API_KEY": "dev-key-arush",
