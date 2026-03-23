@@ -19,5 +19,5 @@ What this controls:
 # Uncomment ONE of the two lines below:
 # ============================================================
 
-# from env_local import *   # LOCAL  — uncomment for local development      # noqa: F401, F403
-from env_vdi import *      # VDI    — uncomment for VDI / client deployment  # noqa: F401, F403
+from env_local import *    # LOCAL  — uncomment for local development      # noqa: F401, F403
+# from env_vdi import *    # VDI    — uncomment for VDI / client deployment  # noqa: F401, F403
