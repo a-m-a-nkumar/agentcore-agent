@@ -111,6 +111,25 @@ DEFAULT_LAMBDA_BRD_CHAT                = "brd_chat_lambda"
 DEFAULT_LAMBDA_REQUIREMENTS_GATHERING  = "requirements_gathering_lambda"
 DEFAULT_LAMBDA_BRD_FROM_HISTORY        = "brd_from_history_lambda"
 
+# ---------------------------------------------------------------------------
+# AgentCore defaults  (Local)
+# ---------------------------------------------------------------------------
+DEFAULT_AGENTCORE_MEMORY_ID  = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+DEFAULT_AGENTCORE_ACTOR_ID   = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
+DEFAULT_AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "testgatewayfbdd062d-e2eo4q0y09")
+
+# ---------------------------------------------------------------------------
+# Lambda ARN defaults  (Local — full ARN form for direct invocation)
+# ---------------------------------------------------------------------------
+DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
+    "LAMBDA_REQUIREMENTS_GATHERING_ARN",
+    "arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda",
+)
+DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
+    "LAMBDA_BRD_FROM_HISTORY_ARN",
+    "arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda",
+)
+
 
 def chat_completion(
     messages: List[Dict[str, str]],

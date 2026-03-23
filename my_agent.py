@@ -20,6 +20,8 @@ from environment import (
     DEFAULT_LAMBDA_BRD_GENERATOR,
     DEFAULT_LAMBDA_BRD_RETRIEVER,
     DEFAULT_LAMBDA_BRD_CHAT,
+    DEFAULT_AGENTCORE_MEMORY_ID,
+    DEFAULT_AGENTCORE_ACTOR_ID,
 )
 
 # Initialize the AgentCore Runtime app
@@ -37,8 +39,8 @@ DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', DEFAULT_DLXAI_GATEWAY_KEY)
 GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', DEFAULT_GATEWAY_MODEL)
 
 # AgentCore Memory configuration
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
-AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'brd-session')
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
 
 # Lazy loading of boto3 Lambda client
 _lambda_client = None

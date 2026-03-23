@@ -65,3 +65,22 @@ DEFAULT_LAMBDA_BRD_RETRIEVER           = "arn:aws:lambda:us-east-1:590184044598:
 DEFAULT_LAMBDA_BRD_CHAT                = "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-chat"
 DEFAULT_LAMBDA_REQUIREMENTS_GATHERING  = "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering"
 DEFAULT_LAMBDA_BRD_FROM_HISTORY        = "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history"
+
+# ---------------------------------------------------------------------------
+# 7. AgentCore defaults  (VDI)
+# ---------------------------------------------------------------------------
+DEFAULT_AGENTCORE_MEMORY_ID  = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
+DEFAULT_AGENTCORE_ACTOR_ID   = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+DEFAULT_AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "")
+
+# ---------------------------------------------------------------------------
+# 8. Lambda ARN defaults  (VDI — full ARN form for direct invocation)
+# ---------------------------------------------------------------------------
+DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
+    "LAMBDA_REQUIREMENTS_GATHERING_ARN",
+    "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering",
+)
+DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
+    "LAMBDA_BRD_FROM_HISTORY_ARN",
+    "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history",
+)

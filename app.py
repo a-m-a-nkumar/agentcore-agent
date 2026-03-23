@@ -125,10 +125,23 @@ async def log_requests(request: Request, call_next):
 
 # Configuration (from .env / environment switch)
 # ARN defaults come from environment.py — local account (448049797912) or VDI account (590184044598)
-from environment import DEFAULT_AGENT_ARN, DEFAULT_ANALYST_AGENT_ARN  # noqa: E402
+from environment import (  # noqa: E402
+    DEFAULT_AGENT_ARN, DEFAULT_ANALYST_AGENT_ARN,
+    DEFAULT_LAMBDA_BRD_CHAT, DEFAULT_LAMBDA_BRD_FROM_HISTORY,
+    DEFAULT_LAMBDA_REQUIREMENTS_GATHERING, DEFAULT_LAMBDA_BRD_GENERATOR,
+    DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN, DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN,
+    DEFAULT_AGENTCORE_MEMORY_ID, DEFAULT_AGENTCORE_ACTOR_ID,
+    S3_BUCKET_NAME,
+)
 AGENT_ARN = os.getenv("AGENT_ARN", DEFAULT_AGENT_ARN)
 ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", DEFAULT_ANALYST_AGENT_ARN)
 REGION = os.getenv("AWS_REGION", "us-east-1")
+LAMBDA_BRD_CHAT = os.getenv("LAMBDA_BRD_CHAT", DEFAULT_LAMBDA_BRD_CHAT)
+LAMBDA_BRD_FROM_HISTORY = os.getenv("LAMBDA_BRD_FROM_HISTORY", DEFAULT_LAMBDA_BRD_FROM_HISTORY)
+LAMBDA_REQUIREMENTS_GATHERING = os.getenv("LAMBDA_REQUIREMENTS_GATHERING", DEFAULT_LAMBDA_REQUIREMENTS_GATHERING)
+LAMBDA_BRD_GENERATOR = os.getenv("LAMBDA_BRD_GENERATOR", DEFAULT_LAMBDA_BRD_GENERATOR)
+AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", DEFAULT_AGENTCORE_MEMORY_ID)
+AGENTCORE_ACTOR_ID = os.getenv("AGENTCORE_ACTOR_ID", DEFAULT_AGENTCORE_ACTOR_ID)
 
 # Log agent ARNs on startup
 print(f"\n[CONFIG] Agent ARN: {AGENT_ARN}")
@@ -817,7 +830,7 @@ async def generate_brd(
                                     'transcript': transcript_text[:500]  # Truncate for session creation
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
+                                    FunctionName=LAMBDA_BRD_CHAT,
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -880,7 +893,7 @@ async def upload_transcript_to_s3(
         print(f"[UPLOAD] User: {current_user.get('email')} ({current_user.get('user_id')})")
         print("="*80)
 
-        bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+        bucket_name = S3_BUCKET_NAME
         uploaded_files = []
 
         for transcript in transcripts:
@@ -950,7 +963,7 @@ async def generate_brd_from_s3(
             return JSONResponse(status_code=400, content={"error": "No transcript S3 paths provided"})
 
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+        bucket_name = S3_BUCKET_NAME
 
         # Template path in S3
         template_s3_path_key = "templates/Deluxe_BRD_Template.docx"
@@ -1063,7 +1076,7 @@ async def generate_brd_from_s3(
                                     'transcript': transcript_text[:500]
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
+                                    FunctionName=LAMBDA_BRD_CHAT,
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -1372,14 +1385,8 @@ async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
     """
     import asyncio
 
-    LAMBDA_REQ = os.getenv(
-        'LAMBDA_REQUIREMENTS_GATHERING_ARN',
-        'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
-    )
-    LAMBDA_BRD = os.getenv(
-        'LAMBDA_BRD_FROM_HISTORY_ARN',
-        'arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda'
-    )
+    LAMBDA_REQ = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
+    LAMBDA_BRD = DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN
 
     ping_payload = json.dumps({"action": "ping", "warm": True}).encode("utf-8")
 
@@ -1877,10 +1884,7 @@ async def analyst_chat_stream(
 
     formatted_message = message.strip()
 
-    LAMBDA_REQ_ARN = os.getenv(
-        'LAMBDA_REQUIREMENTS_GATHERING_ARN',
-        'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
-    )
+    LAMBDA_REQ_ARN = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
 
     async def generate_sse():
         """Generate SSE stream — direct Lambda invocation (no AgentCore middleman)"""
@@ -2014,10 +2018,6 @@ async def get_analyst_history(
         print(f"\n[ANALYST-HISTORY] Fetching history for session: {session_id}")
         print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
 
-        # Get AgentCore Memory configuration
-        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
-        AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
-
         # Get AgentCore client
         agentcore_client = get_agent_core_client()
 
@@ -2091,8 +2091,8 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         # Get conversation history from AgentCore Memory
         print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
@@ -2192,7 +2192,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+            lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2305,8 +2305,8 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         # If session_id is "none" or empty, try to find the most recent session
         if not session_id or session_id == "none":
@@ -2437,7 +2437,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+            lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2550,8 +2550,8 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         # Get conversation history from AgentCore Memory
         print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
@@ -2651,7 +2651,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+            lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2686,7 +2686,7 @@ async def analyst_generate_brd(
         brd_id = str(uuid.uuid4())
         
         # Get S3 bucket and template path
-        s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+        s3_bucket = S3_BUCKET_NAME
         template_s3_key = "templates/Deluxe_BRD_Template.docx"
         
         # Get Lambda client with increased timeout for long-running BRD generation
@@ -2698,7 +2698,7 @@ async def analyst_generate_brd(
         )
         lambda_client = boto3.client('lambda', region_name=REGION, config=lambda_config)
         # Use lambda_brd_from_history for analyst agent BRD generation
-        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+        lambda_function_name = LAMBDA_BRD_FROM_HISTORY
         
         # Prepare Lambda payload for lambda_brd_from_history
         # This Lambda expects: conversation_history (list of messages)
@@ -2818,7 +2818,7 @@ async def download_brd(
         
         # Get S3 client
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+        bucket_name = S3_BUCKET_NAME
         
         # BRD is stored as: brds/{brd_id}/BRD_{brd_id}.txt
         s3_key_txt = f"brds/{brd_id}/BRD_{brd_id}.txt"
@@ -3058,8 +3058,8 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         messages = []
         
@@ -3161,8 +3161,8 @@ async def get_brd_chat_history(
         print(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
 
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
 
         print(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
 
@@ -3297,7 +3297,7 @@ async def revoke_brd_access(
 def _load_brd_structure_from_s3(brd_id: str) -> dict:
     """Load the latest BRD structure JSON from S3."""
     s3_client = get_s3_client()
-    bucket_name = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+    bucket_name = S3_BUCKET_NAME
     key = f"brds/{brd_id}/brd_structure.json"
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=key)

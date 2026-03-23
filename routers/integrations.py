@@ -360,7 +360,8 @@ def upload_brd_to_confluence(
     # 3. Fetch BRD from S3
     try:
         s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-        bucket_name = os.getenv('S3_BUCKET_NAME', 'sdlc-orch-dev-us-east-1-app-data')
+        from environment import S3_BUCKET_NAME
+        bucket_name = S3_BUCKET_NAME
         
         # Try to fetch JSON structure first
         json_key = f"brds/{request.brd_id}/brd_structure.json"
