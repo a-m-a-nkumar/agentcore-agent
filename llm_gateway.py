@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 from openai import OpenAI
 
@@ -20,7 +20,8 @@ def chat_completion(
     model: Optional[str] = None,
     temperature: float = 0.9,
     max_tokens: Optional[int] = None,
-) -> str:
+    return_metadata: bool = False,
+) -> Union[str, Dict]:
     client = _get_client()
     params = {
         "model": model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL),
@@ -33,4 +34,11 @@ def chat_completion(
     response = client.chat.completions.create(**params)
     if not response or not response.choices:
         raise ValueError(f"Gateway returned empty response for model={params.get('model')}")
-    return (response.choices[0].message.content or "").strip()
+
+    content = (response.choices[0].message.content or "").strip()
+    if return_metadata:
+        return {
+            "content": content,
+            "finish_reason": getattr(response.choices[0], "finish_reason", None),
+        }
+    return content

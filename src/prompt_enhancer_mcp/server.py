@@ -1,9 +1,14 @@
 import os
+import sys
 import httpx
 import json
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("enhance-prompt")
+
+def log(msg: str):
+    """Write logs to stderr so they don't corrupt the MCP stdio protocol."""
+    print(msg, file=sys.stderr, flush=True)
 
 @mcp.prompt()
 async def enhance(task: str, project_id: str = None) -> str:
@@ -15,13 +20,13 @@ async def enhance(task: str, project_id: str = None) -> str:
     if not project_id or not api_key:
         return "Error: PROJECT_ID and API_KEY must be set (via env var or argument)."
 
-    print(f"[MCP] Enhancing task: {task} (Project: {project_id})")
+    log(f"[MCP] Enhancing task: {task} (Project: {project_id})")
 
     result = ""
     try:
-        print("[MCP] Connecting to backend...")
+        log("[MCP] Connecting to backend...")
         verify_ssl = os.environ.get("VERIFY_SSL", "false").lower() not in ("false", "0", "no")
-        async with httpx.AsyncClient(timeout=30.0, verify=verify_ssl) as client:
+        async with httpx.AsyncClient(timeout=120.0, verify=verify_ssl) as client:
             async with client.stream(
                 "POST",
                 f"{api_url}/api/orchestration/query-internal",
@@ -29,7 +34,8 @@ async def enhance(task: str, project_id: str = None) -> str:
                 json={"project_id": project_id, "query": task, "max_chunks": 5, "return_prompt": True}
             ) as r:
                 if r.status_code != 200:
-                    print(f"[MCP] Error: Backend returned {r.status_code}")
+                    body = await r.aread()
+                    log(f"[MCP] Error: Backend returned {r.status_code}: {body.decode()}")
                     return f"Error: Backend returned {r.status_code}"
 
                 async for line in r.aiter_lines():
@@ -38,19 +44,23 @@ async def enhance(task: str, project_id: str = None) -> str:
                             data = json.loads(line[6:])
                             if data.get("type") == "enhanced_prompt":
                                 result = data.get("content", "")
-                                print(f"[MCP] Received enhanced prompt ({len(result)} chars)")
+                                log(f"[MCP] Received enhanced prompt ({len(result)} chars)")
                             elif data.get("type") == "chunk":
                                 result += data.get("content", "")
                             elif data.get("type") == "error":
                                 result += f"\n[Remote Error: {data.get('message')}]"
-                                print(f"[MCP] Remote error: {data.get('message')}")
+                                log(f"[MCP] Remote error: {data.get('message')}")
                         except json.JSONDecodeError:
                             continue
     except Exception as e:
-        print(f"[MCP] Exception: {str(e)}")
-        return f"Error calling backend: {str(e)}"
+        log(f"[MCP] Exception ({type(e).__name__}): {str(e)}")
+        return f"Error calling backend ({type(e).__name__}): {str(e)}"
 
-    print("[MCP] Enhancement complete.")
+    if not result:
+        log("[MCP] Warning: result is empty after streaming")
+        return "Error: Backend returned empty response"
+
+    log(f"[MCP] Enhancement complete ({len(result)} chars).")
     return f"Here is the enhanced prompt. Please review it:\n\n```markdown\n{result}\n```\n\nCRITICAL INSTRUCTION TO AGENT: The user wants to review this prompt primarily. Do NOT proceed with implementation. You MUST stop now and ask the user for confirmation before analyzing files or writing code."
 
 @mcp.tool()
