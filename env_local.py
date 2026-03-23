@@ -11,6 +11,8 @@ Local settings:
   - Database uses a direct password from DATABASE_PASSWORD env var
   - LLM calls go directly to AWS Bedrock (no API Gateway proxy)
   - Agent ARNs point to the local AWS account (448049797912)
+  - Strands agents use BedrockModel directly (no Deluxe gateway)
+  - Lambda names use local account (448049797912)
 """
 
 import os
@@ -84,6 +86,24 @@ DEFAULT_BEDROCK_MODEL = os.getenv(
     "BEDROCK_MODEL_ID",
     "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
 )
+
+
+# ---------------------------------------------------------------------------
+# Agent Model — Strands agents use Bedrock directly (Local)
+# ---------------------------------------------------------------------------
+AGENT_MODEL_PROVIDER = "bedrock"
+DEFAULT_DLXAI_GATEWAY_URL = ""   # Not used locally
+DEFAULT_DLXAI_GATEWAY_KEY = ""   # Not used locally
+DEFAULT_GATEWAY_MODEL = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+
+# ---------------------------------------------------------------------------
+# Lambda name defaults  (Local AWS account: 448049797912)
+# ---------------------------------------------------------------------------
+DEFAULT_LAMBDA_BRD_GENERATOR           = "brd_generator_lambda"
+DEFAULT_LAMBDA_BRD_RETRIEVER           = "brd_retriever_lambda"
+DEFAULT_LAMBDA_BRD_CHAT                = "brd_chat_lambda"
+DEFAULT_LAMBDA_REQUIREMENTS_GATHERING  = "requirements_gathering_lambda"
+DEFAULT_LAMBDA_BRD_FROM_HISTORY        = "brd_from_history_lambda"
 
 
 def chat_completion(
