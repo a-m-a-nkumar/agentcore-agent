@@ -140,8 +140,12 @@ class RAGService:
         """
         langfuse = get_langfuse()
         try:
+            # Auto-detect source filter from query keywords
+            if not source_filter:
+                source_filter = self._detect_source_filter(user_query)
+
             # Step 1 & 2: Use centralized search service (eliminates duplication and uses batch operations)
-            logger.info(f"Querying search service for: {user_query[:50]}...")
+            logger.info(f"Querying search service for: {user_query[:50]}... (source_filter={source_filter})")
             with langfuse.start_as_current_observation(
                 as_type="span",
                 name="rag.search",
@@ -296,6 +300,20 @@ Optimized Prompt:"""
         except Exception as e:
             logger.error(f"Error building enhanced prompt: {e}")
             return f"Error retrieving context: {str(e)}"
+
+    @staticmethod
+    def _detect_source_filter(query: str) -> Optional[str]:
+        """Auto-detect source type from query keywords."""
+        q = query.lower()
+        jira_keywords = ['jira', 'ticket', 'issue', 'sprint', 'story', 'stories', 'epic', 'bug', 'backlog', 'assignee']
+        confluence_keywords = ['confluence', 'wiki', 'page', 'documentation', 'brd', 'requirement']
+        jira_hits = sum(1 for kw in jira_keywords if kw in q)
+        confluence_hits = sum(1 for kw in confluence_keywords if kw in q)
+        if jira_hits > 0 and confluence_hits == 0:
+            return 'jira'
+        if confluence_hits > 0 and jira_hits == 0:
+            return 'confluence'
+        return None
 
     def _build_rag_prompt(self, query: str, context_chunks: List[Dict]) -> str:
         """Build prompt for Claude with context"""

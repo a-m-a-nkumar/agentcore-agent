@@ -97,6 +97,12 @@ DEFAULT_DLXAI_GATEWAY_KEY = ""   # Not used locally
 DEFAULT_GATEWAY_MODEL = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 # ---------------------------------------------------------------------------
+# Embedding config  (Local: Titan v1 at 1536 dimensions)
+# ---------------------------------------------------------------------------
+EMBEDDING_DIMENSIONS = 1536
+BEDROCK_EMBEDDING_MODEL = "amazon.titan-embed-text-v1"
+
+# ---------------------------------------------------------------------------
 # Lambda name defaults  (Local AWS account: 448049797912)
 # ---------------------------------------------------------------------------
 DEFAULT_LAMBDA_BRD_GENERATOR           = "brd_generator_lambda"

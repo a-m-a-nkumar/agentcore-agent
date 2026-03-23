@@ -52,6 +52,12 @@ DEFAULT_DLXAI_GATEWAY_KEY = "sk-2cdb551cf35f418ea88b36"
 DEFAULT_GATEWAY_MODEL = "Claude-4.5-Sonnet"
 
 # ---------------------------------------------------------------------------
+# Embedding config  (VDI: gateway Titan-v2 at 1024 dimensions)
+# ---------------------------------------------------------------------------
+EMBEDDING_DIMENSIONS = 1024
+BEDROCK_EMBEDDING_MODEL = "amazon.titan-embed-text-v2:0"
+
+# ---------------------------------------------------------------------------
 # 6. Lambda ARN defaults  (VDI AWS account: 590184044598)
 # ---------------------------------------------------------------------------
 DEFAULT_LAMBDA_BRD_GENERATOR           = "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-generator"

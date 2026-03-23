@@ -19,11 +19,23 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-EMBEDDING_PROVIDER  = os.getenv('EMBEDDING_PROVIDER', 'gateway')   # 'gateway' or 'bedrock'
+# Respect the environment switch: if EMBEDDING_PROVIDER is not explicitly set,
+# fall back to AGENT_MODEL_PROVIDER / EMBEDDING_DIMENSIONS from environment.py.
+try:
+    from environment import AGENT_MODEL_PROVIDER as _ENV_PROVIDER
+    from environment import EMBEDDING_DIMENSIONS as _ENV_DIMENSIONS
+    from environment import BEDROCK_EMBEDDING_MODEL as _ENV_BEDROCK_MODEL
+except ImportError:
+    _ENV_PROVIDER = 'gateway'
+    _ENV_DIMENSIONS = 1024
+    _ENV_BEDROCK_MODEL = 'amazon.titan-embed-text-v1'
+
+EMBEDDING_PROVIDER  = os.getenv('EMBEDDING_PROVIDER', _ENV_PROVIDER)   # 'gateway' or 'bedrock'
+EMBEDDING_DIMS      = int(os.getenv('EMBEDDING_DIMENSIONS', str(_ENV_DIMENSIONS)))  # 1536 local, 1024 VDI
 GATEWAY_URL         = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
 GATEWAY_KEY         = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
 EMBEDDING_MODEL     = os.getenv('EMBEDDING_MODEL', 'Titan-v2')
-BEDROCK_EMBED_MODEL = os.getenv('BEDROCK_EMBEDDING_MODEL', 'amazon.titan-embed-text-v2:0')
+BEDROCK_EMBED_MODEL = os.getenv('BEDROCK_EMBEDDING_MODEL', _ENV_BEDROCK_MODEL)
 AWS_REGION          = os.getenv('AWS_REGION', 'us-east-1')
 
 class EmbeddingService:
@@ -83,7 +95,7 @@ class EmbeddingService:
             logger.info(f"[EmbeddingService] generate_embedding: input_length={input_length} chars, {word_count} words")
 
             if self.provider == 'bedrock':
-                logger.info(f"[EmbeddingService] Calling Bedrock embeddings (model={self.embedding_model_id})...")
+                logger.info(f"[EmbeddingService] Calling Bedrock embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
                 body = json.dumps({"inputText": text})
                 response = self.bedrock_client.invoke_model(
                     modelId=self.embedding_model_id,
@@ -94,10 +106,11 @@ class EmbeddingService:
                 result = json.loads(response['body'].read())
                 embedding = result['embedding']
             else:
-                logger.info(f"[EmbeddingService] Calling gateway embeddings (model={self.embedding_model_id})...")
+                logger.info(f"[EmbeddingService] Calling gateway embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
                 response = self.client.embeddings.create(
                     model=self.embedding_model_id,
                     input=text,
+                    dimensions=EMBEDDING_DIMS,
                 )
                 if not response or not response.data:
                     raise ValueError("No embedding returned from gateway")
