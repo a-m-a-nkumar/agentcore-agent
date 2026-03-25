@@ -98,31 +98,32 @@ class ConfluenceService:
             logger.error(f"Error fetching Confluence pages: {e}")
             raise Exception(f"Failed to fetch Confluence pages: {str(e)}")
 
-    def get_content_pages(self, space_key: str, limit: int = 50) -> List[Dict]:
+    def get_content_pages(self, space_key: str, limit: int = 50, max_pages: int = 200) -> List[Dict]:
         """
-        Fetch ALL pages from a space using Content API, paginating automatically.
-        The `limit` param controls page size per request, not the total cap.
+        Fetch pages from a space using Content API, paginating automatically up to max_pages.
+        Uses minimal expand fields to keep responses fast.
         """
         try:
             url = f"{self.base_url}/rest/api/content"
             all_pages = []
             start = 0
-            while True:
+            batch_size = min(limit, 50)  # Confluence Cloud hard cap is 50
+            while len(all_pages) < max_pages:
                 params = {
                     "spaceKey": space_key,
                     "type": "page",
-                    "limit": limit,
+                    "limit": batch_size,
                     "start": start,
-                    "expand": "version,history,_links"
+                    "expand": "version"  # removed history — was very slow
                 }
                 response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
                 response.raise_for_status()
                 data = response.json()
                 batch = data.get("results", [])
                 all_pages.extend(batch)
-                if len(batch) < limit:
+                if len(batch) < batch_size:
                     break
-                start += limit
+                start += batch_size
             logger.info(f"Fetched {len(all_pages)} pages from space {space_key}")
             return all_pages
         except requests.exceptions.RequestException as e:
@@ -131,33 +132,37 @@ class ConfluenceService:
 
     def search_pages_by_title_prefix(self, space_key: str, title_prefix: str) -> List[Dict]:
         """
-        Use Confluence CQL to find pages whose title starts with a given prefix.
-        Paginates automatically — returns ALL matching pages with no cap.
+        Find all pages in a space whose title contains title_prefix.
+        Uses two separate word tokens in CQL for maximum compatibility,
+        then filters in Python to ensure the prefix is actually present.
         """
         try:
             url = f"{self.base_url}/rest/api/content/search"
             all_results = []
             start = 0
             limit = 50
-            cql = f'space="{space_key}" AND title ~ "\\"{title_prefix}\\"" AND type=page'
+            # Split prefix into individual words so CQL tokenisation can't miss it
+            words = title_prefix.split()
+            word_clauses = " AND ".join(f'title ~ "{w}"' for w in words)
+            cql = f'space = "{space_key}" AND ({word_clauses}) AND type = page'
             while True:
                 params = {
                     "cql": cql,
                     "limit": limit,
                     "start": start,
-                    "expand": "version,history,_links"
+                    "expand": "version,_links"
                 }
                 response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
                 response.raise_for_status()
                 data = response.json()
                 batch = data.get("results", [])
-                # CQL ~ is "contains", filter exactly to startswith
-                filtered = [p for p in batch if p["title"].startswith(title_prefix)]
+                # Keep only pages whose title actually contains the full prefix string
+                filtered = [p for p in batch if title_prefix.lower() in p["title"].lower()]
                 all_results.extend(filtered)
                 if len(batch) < limit:
                     break
                 start += limit
-            logger.info(f"CQL search found {len(all_results)} pages with prefix '{title_prefix}' in space {space_key}")
+            logger.info(f"CQL search found {len(all_results)} pages containing '{title_prefix}' in space {space_key}")
             return all_results
         except requests.exceptions.RequestException as e:
             logger.error(f"Error searching Confluence pages by title prefix: {e}")
