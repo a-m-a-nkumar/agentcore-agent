@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 
 import boto3
 from llm_gateway import chat_completion
+from services.s3_service import s3_put_object
 
 # Import prompt templates from separate module
 from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig
@@ -254,19 +255,15 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None) -> str:
         prompt: The full prompt text
         max_tokens: Maximum tokens to generate. If None, uses MAX_TOKENS env var.
     """
-    model_id = BEDROCK_MODEL_ID
     effective_max_tokens = max_tokens if max_tokens is not None else MAX_TOKENS
 
-    # Log configuration
-    logger.info(f"Using model: {model_id}")
+    # Log configuration (model is resolved by llm_gateway from DLXAI_CHAT_MODEL env var)
     logger.info(f"Max tokens: {effective_max_tokens}, Temperature: {TEMPERATURE}")
     logger.info(f"Prompt length: {len(prompt)} characters (~{len(prompt)//4} tokens estimated)")
 
     brd_text = chat_completion(
         messages=[{"role": "user", "content": prompt}],
-        model=model_id,
         temperature=TEMPERATURE,
-        top_p=0.95,
         max_tokens=effective_max_tokens,
     )
 
@@ -599,7 +596,7 @@ def lambda_handler(event, context):
         # RuntimeError usually means token limit or model issue
         error_msg = str(exc)
         logger.error(f"RuntimeError generating BRD: {error_msg}", exc_info=True)
-        
+
         # Save error message as BRD content to S3 if brd_id provided
         error_brd_content = f"[BRD Generation Error]\n\n{error_msg}\n\nPlease check the input parameters and try again."
         brd_id = None
@@ -609,21 +606,12 @@ def lambda_handler(event, context):
                 params = evt["parameters"]
                 if isinstance(params, dict):
                     brd_id = params.get("brd_id") or params.get("brdId")
-        
+
         if brd_id:
             try:
-                s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-                s3_region = os.getenv("AWS_REGION", "us-east-1")
-                s3_client = boto3.client("s3", region_name=s3_region)
                 brd_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
-                
-                s3_client.put_object(
-                    Bucket=s3_bucket,
-                    Key=brd_key,
-                    Body=error_brd_content.encode("utf-8"),
-                    ContentType="text/plain"
-                )
-                logger.info(f"Saved error message as BRD to S3: s3://{s3_bucket}/{brd_key}")
+                s3_put_object(key=brd_key, body=error_brd_content, content_type="text/plain")
+                logger.info(f"Saved error message as BRD to S3: {brd_key}")
             except Exception as e:
                 logger.error(f"Failed to save error BRD to S3: {e}", exc_info=True)
         
@@ -644,7 +632,7 @@ def lambda_handler(event, context):
         return error_response
     except Exception as exc:  # noqa: BLE001
         logger.error(f"Unexpected error generating BRD: {str(exc)}", exc_info=True)
-        
+
         # Save error message as BRD content to S3 if brd_id provided
         error_brd_content = f"[BRD Generation Error]\n\nUnexpected error: {str(exc)}\n\nPlease check the logs and try again."
         brd_id = None
@@ -654,21 +642,12 @@ def lambda_handler(event, context):
                 params = evt["parameters"]
                 if isinstance(params, dict):
                     brd_id = params.get("brd_id") or params.get("brdId")
-        
+
         if brd_id:
             try:
-                s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-                s3_region = os.getenv("AWS_REGION", "us-east-1")
-                s3_client = boto3.client("s3", region_name=s3_region)
                 brd_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
-                
-                s3_client.put_object(
-                    Bucket=s3_bucket,
-                    Key=brd_key,
-                    Body=error_brd_content.encode("utf-8"),
-                    ContentType="text/plain"
-                )
-                logger.info(f"Saved error message as BRD to S3: s3://{s3_bucket}/{brd_key}")
+                s3_put_object(key=brd_key, body=error_brd_content, content_type="text/plain")
+                logger.info(f"Saved error message as BRD to S3: {brd_key}")
             except Exception as e:
                 logger.error(f"Failed to save error BRD to S3: {e}", exc_info=True)
         
@@ -722,32 +701,21 @@ def lambda_handler(event, context):
     # Always save to S3 now (since we have brd_id)
     if brd_id:
         try:
-            s3_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-            s3_region = os.getenv("AWS_REGION", "us-east-1")
-            s3_client = boto3.client("s3", region_name=s3_region)
             brd_key = f"brds/{brd_id}/BRD_{brd_id}.txt"
-            
-            # Save text file
-            s3_client.put_object(
-                Bucket=s3_bucket,
-                Key=brd_key,
-                Body=brd_text.encode("utf-8"),
-                ContentType="text/plain"
-            )
-            logger.info(f"Saved BRD text to S3: s3://{s3_bucket}/{brd_key}")
-            
+            s3_put_object(key=brd_key, body=brd_text, content_type="text/plain")
+            logger.info(f"Saved BRD text to S3: {brd_key}")
+
             # Also save structure JSON file (for chat Lambda to use)
             try:
                 brd_structure = _convert_brd_text_to_structure(brd_text)
                 if brd_structure:
                     structure_key = f"brds/{brd_id}/brd_structure.json"
-                    s3_client.put_object(
-                        Bucket=s3_bucket,
-                        Key=structure_key,
-                        Body=json.dumps(brd_structure, indent=2, ensure_ascii=False).encode("utf-8"),
-                        ContentType="application/json"
+                    s3_put_object(
+                        key=structure_key,
+                        body=json.dumps(brd_structure, indent=2, ensure_ascii=False),
+                        content_type="application/json",
                     )
-                    logger.info(f"Saved BRD structure to S3: s3://{s3_bucket}/{structure_key}")
+                    logger.info(f"Saved BRD structure to S3: {structure_key}")
                 else:
                     logger.warning("Could not convert BRD text to structure, skipping structure file save")
             except Exception as structure_err:

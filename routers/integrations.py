@@ -373,12 +373,44 @@ def get_jira_issues(
         )
         
         logger.info(f"Using Jira domain: {credentials['atlassian_domain']}")
-        issues = jira_service.get_project_issues(project_key, max_results=100)
+        issues = jira_service.get_project_issues(project_key)
         logger.info(f"Successfully fetched {len(issues)} issues for project {project_key}")
         return {"issues": issues, "total": len(issues)}
     
     except Exception as e:
         logger.error(f"Error fetching Jira issues for project {project_key}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/jira/boards/{project_key}")
+def get_jira_boards(
+    project_key: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Fetch Jira boards for a specific project"""
+    logger.info(f"Fetching Jira boards for project_key: '{project_key}' (user: {current_user['id']})")
+
+    credentials = get_user_atlassian_credentials(current_user['id'])
+
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first."
+        )
+
+    try:
+        jira_service = JiraService(
+            credentials['atlassian_domain'],
+            credentials['atlassian_email'],
+            credentials['atlassian_api_token']
+        )
+
+        boards = jira_service.get_boards(project_key)
+        logger.info(f"Successfully fetched {len(boards)} boards for project {project_key}")
+        return {"boards": boards, "total": len(boards)}
+
+    except Exception as e:
+        logger.error(f"Error fetching Jira boards for project {project_key}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

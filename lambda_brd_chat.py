@@ -17,6 +17,7 @@ from typing import Dict, List, Optional, Any
 import boto3
 from botocore.exceptions import ClientError
 from llm_gateway import chat_completion
+from services.s3_service import s3_put_object
 
 # Configure logging
 logger = logging.getLogger()
@@ -335,15 +336,13 @@ def _normalize_brd_sections(brd_data: Dict) -> Dict:
 def save_brd_to_s3(brd_id: str, brd_data: Dict) -> str:
     """Save BRD JSON to S3. Normalizes structure (merges Scope subsections) before saving."""
     brd_data = _normalize_brd_sections(brd_data)
-    s3_client = _get_s3_client()
     key = f"brds/{brd_id}/brd_structure.json"
 
     try:
-        s3_client.put_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=key,
-            Body=json.dumps(brd_data, indent=2, ensure_ascii=False),
-            ContentType="application/json"
+        s3_put_object(
+            key=key,
+            body=json.dumps(brd_data, indent=2, ensure_ascii=False),
+            content_type="application/json",
         )
         logger.info(f"Saved BRD structure to S3: {key}")
         return key
@@ -435,16 +434,14 @@ def render_brd_to_text(brd_data: Dict) -> str:
 
 def save_brd_text_to_s3(brd_id: str, brd_data: Dict) -> str:
     """Save rendered BRD text file to S3 for download."""
-    s3_client = _get_s3_client()
     key = f"brds/{brd_id}/BRD_{brd_id}.txt"
     body = render_brd_to_text(brd_data)
 
     try:
-        s3_client.put_object(
-            Bucket=S3_BUCKET_NAME,
-            Key=key,
-            Body=body.encode("utf-8"),
-            ContentType="text/plain"
+        s3_put_object(
+            key=key,
+            body=body,
+            content_type="text/plain",
         )
         logger.info(f"Saved BRD text to S3: {key}")
         return key
@@ -826,9 +823,7 @@ def invoke_claude_for_chat(
     try:
         text = chat_completion(
             messages=[{"role": "user", "content": full_prompt}],
-            model=model_id,
             temperature=0,
-            top_p=0.95,
             max_tokens=BEDROCK_MAX_TOKENS,
         )
         logger.info(f"Gateway response length: {len(text)} characters")

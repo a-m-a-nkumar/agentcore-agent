@@ -84,6 +84,7 @@ class CreateJiraItemsRequest(BaseModel):
     project_id: str
     jira_project_key: str
     epics: List[Dict]  # Contains epic_id, create_epic, and selected user_stories
+    board_id: Optional[int] = None  # Selected Jira board
 
 
 # ============================================
