@@ -41,7 +41,7 @@ if os.getenv("AWS_PROFILE"):
     for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
         os.environ.pop(key, None)
 
-app = FastAPI()
+app = FastAPI(root_path=os.getenv("ROOT_PATH", ""))
 
 # Load BMAD config (optional prompt overlay)
 def _load_bmad_config():

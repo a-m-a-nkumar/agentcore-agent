@@ -9,9 +9,9 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-KMS_KEY_ARN = os.getenv("KMS_KEY_ARN", "arn:aws:kms:us-east-1:590184044598:key/mrk-29bf4d8d90604305976882df6c91149e")
+S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
+AWS_REGION = os.environ["AWS_REGION"]
+KMS_KEY_ARN = os.environ["KMS_KEY_ARN"]
 
 _s3_client = None
 

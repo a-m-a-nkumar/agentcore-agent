@@ -20,15 +20,15 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Configuration
-BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
 BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
-AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
-AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
-MAX_TOKENS = 2000
-TEMPERATURE = 0.7
-MAX_HISTORY_MESSAGES = 20
+AWS_REGION = os.environ['AWS_REGION']
+AGENTCORE_MEMORY_ID = os.environ['AGENTCORE_MEMORY_ID']
+AGENTCORE_ACTOR_ID = os.environ['AGENTCORE_ACTOR_ID']
+MAX_TOKENS = int(os.environ['BEDROCK_MAX_TOKENS'])
+TEMPERATURE = float(os.environ['BEDROCK_TEMPERATURE'])
+MAX_HISTORY_MESSAGES = int(os.getenv('MAX_HISTORY_MESSAGES', '50'))
 
 # Lazy loading
 _agentcore_memory_client = None

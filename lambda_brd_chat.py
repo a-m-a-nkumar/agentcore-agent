@@ -24,15 +24,15 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Environment variables
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
-BEDROCK_REGION = os.getenv("BEDROCK_REGION", "us-east-1")
-BEDROCK_MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "4000"))
+BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
+BEDROCK_REGION = os.environ["BEDROCK_REGION"]
+BEDROCK_MAX_TOKENS = int(os.environ["BEDROCK_MAX_TOKENS"])
 BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
-AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "sdlc-dev-agentcore-gateway-z8tkb0pspy")
-AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-AGENTCORE_ACTOR_ID = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
+S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
+AGENTCORE_GATEWAY_ID = os.environ["AGENTCORE_GATEWAY_ID"]
+AGENTCORE_MEMORY_ID = os.environ["AGENTCORE_MEMORY_ID"]
+AGENTCORE_ACTOR_ID = os.environ["AGENTCORE_ACTOR_ID"]
 
 def _get_s3_client():
     """Get S3 client"""
