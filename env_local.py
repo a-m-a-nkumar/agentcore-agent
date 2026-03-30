@@ -131,11 +131,21 @@ DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
 )
 
 
+def _get_bedrock_config():
+    from botocore.config import Config
+    return Config(
+        connect_timeout=60,
+        read_timeout=300,
+        retries={"max_attempts": 3, "mode": "standard"},
+    )
+
+
 def chat_completion(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
     temperature: float = 0.9,
     max_tokens: Optional[int] = None,
+    system_prompt: Optional[str] = None,
 ) -> str:
     """
     Send a chat request directly to AWS Bedrock (local dev — no gateway).
@@ -143,17 +153,10 @@ def chat_completion(
     Accepts the same interface as llm_gateway.chat_completion so that the
     lambda files work unchanged when switching environments.
     """
-    from botocore.config import Config
-
-    bedrock_config = Config(
-        connect_timeout=60,
-        read_timeout=300,
-        retries={"max_attempts": 3, "mode": "standard"},
-    )
     client = boto3.client(
         "bedrock-runtime",
         region_name=AWS_REGION,
-        config=bedrock_config,
+        config=_get_bedrock_config(),
     )
 
     model_id = model or DEFAULT_BEDROCK_MODEL
@@ -163,6 +166,8 @@ def chat_completion(
         "max_tokens": max_tokens or 4000,
         "temperature": temperature,
     }
+    if system_prompt:
+        body["system"] = system_prompt
 
     logger.info(f"[LOCAL LLM] Invoking Bedrock model: {model_id}")
     response = client.invoke_model(
@@ -172,3 +177,46 @@ def chat_completion(
     )
     result = json.loads(response["body"].read())
     return (result.get("content", [{}])[0].get("text", "") or "").strip()
+
+
+def chat_completion_stream(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    temperature: float = 0.5,
+    max_tokens: Optional[int] = None,
+    system_prompt: Optional[str] = None,
+):
+    """
+    Stream a chat request directly to AWS Bedrock (local dev — no gateway).
+    Yields SSE-formatted data strings: { type: 'chunk', text: '...' } and a final { type: 'done' }.
+    """
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        config=_get_bedrock_config(),
+    )
+
+    model_id = model or DEFAULT_BEDROCK_MODEL
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": messages,
+        "max_tokens": max_tokens or 8192,
+        "temperature": temperature,
+    }
+    if system_prompt:
+        body["system"] = system_prompt
+
+    logger.info(f"[LOCAL LLM STREAM] Invoking Bedrock model: {model_id}")
+    response = client.invoke_model_with_response_stream(
+        modelId=model_id,
+        body=json.dumps(body),
+        contentType="application/json",
+        accept="application/json",
+    )
+    for event in response["body"]:
+        chunk = json.loads(event["chunk"]["bytes"])
+        if chunk.get("type") == "content_block_delta":
+            text = chunk.get("delta", {}).get("text", "")
+            if text:
+                yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"

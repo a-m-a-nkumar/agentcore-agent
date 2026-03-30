@@ -5,28 +5,26 @@ Supports pushing the result back to Confluence as a new page.
 """
 
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
 import logging
-import boto3
 import json
 import os
 import re
 from datetime import datetime
 from html import unescape
-from botocore.config import Config
 
 from auth import verify_azure_token
 from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
 from services.confluence_service import ConfluenceService
 from services.github_service import GitHubService
+from environment import chat_completion, chat_completion_stream
 
 router = APIRouter(prefix="/api/test", tags=["test"])
 logger = logging.getLogger(__name__)
 
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
-BEDROCK_READ_TIMEOUT = int(os.getenv("BEDROCK_READ_TIMEOUT", "300"))
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 
 # ============================================
@@ -95,16 +93,6 @@ def strip_html_tags(html_content: str) -> str:
     text = unescape(text)
     text = re.sub(r'\s+', ' ', text)
     return text.strip()
-
-
-def _get_bedrock_client():
-    """Get Bedrock runtime client with extended read timeout"""
-    config = Config(
-        read_timeout=BEDROCK_READ_TIMEOUT,
-        connect_timeout=30,
-        retries={"max_attempts": 2, "mode": "standard"},
-    )
-    return boto3.client("bedrock-runtime", region_name=AWS_REGION, config=config)
 
 
 def markdown_to_confluence_storage(markdown: str) -> str:
@@ -239,14 +227,9 @@ def _strip_trailing_notes(content: str) -> str:
     return result.rstrip()
 
 
-def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str) -> str:
-    """
-    Use Bedrock (Claude) to generate a Test Scenario document from BRD content.
-    Returns a markdown string.
-    """
-    plain_text = strip_html_tags(brd_content)
-
-    prompt = f"""You are a senior QA analyst with 10+ years of experience writing test documentation for enterprise software.
+def _build_test_scenario_prompt(plain_text: str, page_title: str) -> str:
+    """Build the prompt for test scenario generation."""
+    return f"""You are a senior QA analyst with 10+ years of experience writing test documentation for enterprise software.
 You have been given a Business Requirements Document (BRD) and must produce a professional Test Scenario document.
 
 BRD Title: {page_title}
@@ -346,23 +329,25 @@ RULES — follow all of these strictly:
 9. Output ONLY the markdown document — no preamble, no commentary, nothing outside the document
 10. NEVER truncate, summarise, or add placeholder notes like "[Continue with...]" or "[Due to length...]" — you MUST complete every single scenario fully
 11. Be concise in each scenario — short, precise sentences only. Do not pad with unnecessary explanation.
+12. Cover ALL business requirements from the BRD — do not skip, merge, or add any requirement not present in the BRD. The number of scenarios must be consistent and complete every time this BRD is processed.
 """
 
-    bedrock_client = _get_bedrock_client()
-    request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 8192,
-        "temperature": 0.3,
-        "messages": [{"role": "user", "content": prompt}]
-    }
 
-    logger.info(f"Calling Bedrock to generate test scenarios for: {page_title}")
-    response = bedrock_client.invoke_model(
-        modelId=BEDROCK_MODEL_ID,
-        body=json.dumps(request_body)
+def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str) -> str:
+    """
+    Use Bedrock (Claude) to generate a Test Scenario document from BRD content.
+    Returns a markdown string.
+    """
+    plain_text = strip_html_tags(brd_content)
+    prompt = _build_test_scenario_prompt(plain_text, page_title)
+
+    logger.info(f"Calling LLM to generate test scenarios for: {page_title}")
+    content = chat_completion(
+        messages=[{"role": "user", "content": prompt}],
+        model=BEDROCK_MODEL_ID,
+        temperature=0,
+        max_tokens=16000,
     )
-    response_body = json.loads(response['body'].read())
-    content = response_body['content'][0]['text']
     content = _strip_trailing_notes(content)
     logger.info(f"Bedrock response received, length: {len(content)} characters")
     return content
@@ -413,6 +398,61 @@ async def generate_test_scenarios(
     except Exception as e:
         logger.error(f"Error generating test scenarios: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to generate test scenarios: {str(e)}")
+
+
+@router.post("/generate-from-confluence-stream")
+async def generate_test_scenarios_stream(
+    request: GenerateTestScenariosRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Streaming version of generate-from-confluence.
+    Sends SSE chunks as Claude generates — user sees text appear in real time.
+    First event: { type: 'title', page_title: '...' }
+    Content events: { type: 'chunk', text: '...' }
+    Final event: { type: 'done' }
+    """
+    credentials = get_user_atlassian_credentials(current_user['id'])
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+
+    project = get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    try:
+        confluence_service = ConfluenceService(
+            credentials['atlassian_domain'],
+            credentials['atlassian_email'],
+            credentials['atlassian_api_token']
+        )
+        page_data = confluence_service.get_page_content(request.confluence_page_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch Confluence page: {str(e)}")
+
+    plain_text = strip_html_tags(page_data['content'])
+    prompt = _build_test_scenario_prompt(plain_text, page_data['title'])
+
+    def stream_generator():
+        # Send page title first so frontend can set the title immediately
+        yield f"data: {json.dumps({'type': 'title', 'page_title': page_data['title']})}\n\n"
+
+        try:
+            yield from chat_completion_stream(
+                messages=[{"role": "user", "content": prompt}],
+                model=BEDROCK_MODEL_ID,
+                temperature=0,
+                max_tokens=16000,
+            )
+        except Exception as e:
+            logger.error(f"Streaming error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+    )
 
 
 def extract_scenarios_with_bedrock(raw_content: str, page_title: str) -> dict:
@@ -471,21 +511,13 @@ RULES:
 - Output ONLY valid JSON, nothing else
 """
 
-    bedrock_client = _get_bedrock_client()
-    request_body = {
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": 8000,
-        "temperature": 0.1,
-        "messages": [{"role": "user", "content": extraction_prompt}]
-    }
-
-    logger.info(f"Calling Bedrock to extract scenarios from: {page_title}")
-    response = bedrock_client.invoke_model(
-        modelId=BEDROCK_MODEL_ID,
-        body=json.dumps(request_body)
+    logger.info(f"Calling LLM to extract scenarios from: {page_title}")
+    content_text = chat_completion(
+        messages=[{"role": "user", "content": extraction_prompt}],
+        model=BEDROCK_MODEL_ID,
+        temperature=0.1,
+        max_tokens=8000,
     )
-    response_body = json.loads(response['body'].read())
-    content_text = response_body['content'][0]['text']
     logger.info(f"Bedrock extraction response length: {len(content_text)} chars")
 
     # Parse JSON response — strip markdown fences if present

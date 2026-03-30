@@ -37,6 +37,24 @@ from db_config import get_db_params  # noqa: F401
 # llm_gateway.py wraps the OpenAI-compatible Deluxe endpoint.
 from llm_gateway import chat_completion  # noqa: F401
 
+import json
+import logging as _logging
+
+_logger = _logging.getLogger(__name__)
+
+
+def chat_completion_stream(messages, model=None, temperature=0.5, max_tokens=None, system_prompt=None):
+    """
+    VDI streaming shim — llm_gateway does not support SSE streaming yet.
+    Falls back to a single blocking call and yields the response as one chunk + done.
+    """
+    if system_prompt:
+        messages = [{"role": "system", "content": system_prompt}] + list(messages)
+    _logger.info("[VDI LLM STREAM] Falling back to non-streaming chat_completion")
+    result = chat_completion(messages=messages, model=model, temperature=temperature, max_tokens=max_tokens)
+    yield f"data: {json.dumps({'type': 'chunk', 'text': result})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+
 # ---------------------------------------------------------------------------
 # 4. AWS Bedrock ARNs  (VDI AWS account: 590184044598)
 # ---------------------------------------------------------------------------
