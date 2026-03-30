@@ -84,7 +84,7 @@ DEFAULT_ANALYST_AGENT_ARN = os.getenv(
 # ---------------------------------------------------------------------------
 DEFAULT_BEDROCK_MODEL = os.getenv(
     "BEDROCK_MODEL_ID",
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
 )
 
 

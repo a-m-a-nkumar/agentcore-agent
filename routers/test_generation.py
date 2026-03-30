@@ -24,7 +24,7 @@ from environment import chat_completion, chat_completion_stream
 router = APIRouter(prefix="/api/test", tags=["test"])
 logger = logging.getLogger(__name__)
 
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
 
 # ============================================
@@ -217,9 +217,12 @@ def markdown_to_confluence_storage(markdown: str) -> str:
 def _strip_trailing_notes(content: str) -> str:
     """Remove trailing placeholder/continuation notes Claude adds when hitting token limit."""
     patterns = [
-        r'\n+\[[^\]]{10,}\]\s*$',
-        r'\n+\([^)]{10,}\)\s*$',
-        r'\n+[^\n]{0,300}(continue|remaining|length limit|token limit|same format|same detailed format|subsequent scenario|following the same|proceed with|would you like|I can add|I have covered)[^\n]*\s*$',
+        # Bracketed notes like [Continue with TS-005...]
+        r'\n+\[(?:Continue|Due to|Remaining|Additional)[^\]]{5,}\]\s*$',
+        # Parenthesised notes like (continuing in next response...)
+        r'\n+\((?:continue|due to|remaining|additional)[^)]{5,}\)\s*$',
+        # Explicit token/length limit apology lines
+        r'\n+[^\n]{0,300}(token limit|length limit|character limit|response limit)[^\n]*\s*$',
     ]
     result = content
     for pattern in patterns:
