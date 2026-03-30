@@ -131,17 +131,6 @@ def revoke_brd_access_via_agentcore(user_id: str) -> bool:
 from fastapi import Header, HTTPException
 
 
-# ── DEV BYPASS — remove once nonprod SSO is fully configured ──
-DEV_BYPASS_TOKEN = "dev-bypass-T479888"
-DEV_BYPASS_USER = {
-    "oid": "dev-bypass-T479888",
-    "sub": "dev-bypass-T479888",
-    "preferred_username": "T479888@deluxe.com",
-    "email": "T479888@deluxe.com",
-    "name": "Dev User (T479888)",
-}
-# ──────────────────────────────────────────────────────────────
-
 def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     """Verify Azure AD JWT token and return decoded claims"""
     if not authorization:
@@ -154,12 +143,6 @@ def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
         # Assume it's a raw token if no Bearer prefix
         token = authorization.strip()
 
-    # ── DEV BYPASS — remove once nonprod SSO is fully configured ──
-    if token == DEV_BYPASS_TOKEN:
-        print(f"[AUTH] Dev bypass login for {DEV_BYPASS_USER['email']}")
-        return DEV_BYPASS_USER
-    # ──────────────────────────────────────────────────────────────
-    
     try:
         # Decode header to get key ID (kid)
         try:
