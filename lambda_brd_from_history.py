@@ -10,8 +10,8 @@ import uuid
 from typing import List, Dict
 
 import boto3
-from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
+# Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
+from environment import chat_completion, s3_put_object
 
 # Import prompts from centralized prompts module
 from prompts import get_brd_from_history_prompt
@@ -21,10 +21,11 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Configuration
-AWS_REGION = os.environ['AWS_REGION']
-AGENTCORE_MEMORY_ID = os.environ['AGENTCORE_MEMORY_ID']
-AGENTCORE_ACTOR_ID = os.environ['AGENTCORE_ACTOR_ID']
-S3_BUCKET = os.environ['S3_BUCKET_NAME']
+AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+from environment import S3_BUCKET_NAME, DEFAULT_AGENTCORE_MEMORY_ID, DEFAULT_AGENTCORE_ACTOR_ID
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
+S3_BUCKET = S3_BUCKET_NAME
 TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template.docx'
 BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')

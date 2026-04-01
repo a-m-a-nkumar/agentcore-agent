@@ -14,7 +14,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Environment variables
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+from environment import S3_BUCKET_NAME
 REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # S3 client

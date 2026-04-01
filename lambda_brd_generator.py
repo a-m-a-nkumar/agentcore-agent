@@ -5,8 +5,8 @@ import uuid
 from typing import Any, Dict, Optional
 
 import boto3
-from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
+# Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
+from environment import chat_completion, s3_put_object
 
 # Import prompt templates from separate module
 from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig

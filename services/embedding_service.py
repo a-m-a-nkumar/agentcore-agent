@@ -1,12 +1,17 @@
 """
-Embedding Service - Generate and store vector embeddings via Deluxe gateway proxy
-Uses the OpenAI-compatible embeddings endpoint with Titan model
+Embedding Service - Generate and store vector embeddings.
+VDI:   Uses the Deluxe OpenAI-compatible gateway proxy (Titan-v2).
+Local: Uses AWS Bedrock directly (amazon.titan-embed-text-v2:0).
+
+Set EMBEDDING_PROVIDER=bedrock in .env to use local Bedrock mode.
 """
 
 import re
+import json
 from typing import List
 import os
 import logging
+import boto3
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -14,16 +19,38 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
-GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
-EMBEDDING_MODEL = os.getenv('EMBEDDING_MODEL', 'Titan-v2')
+# Respect the environment switch: if EMBEDDING_PROVIDER is not explicitly set,
+# fall back to AGENT_MODEL_PROVIDER / EMBEDDING_DIMENSIONS from environment.py.
+try:
+    from environment import AGENT_MODEL_PROVIDER as _ENV_PROVIDER
+    from environment import EMBEDDING_DIMENSIONS as _ENV_DIMENSIONS
+    from environment import BEDROCK_EMBEDDING_MODEL as _ENV_BEDROCK_MODEL
+except ImportError:
+    _ENV_PROVIDER = 'gateway'
+    _ENV_DIMENSIONS = 1024
+    _ENV_BEDROCK_MODEL = 'amazon.titan-embed-text-v1'
+
+EMBEDDING_PROVIDER  = os.getenv('EMBEDDING_PROVIDER', _ENV_PROVIDER)   # 'gateway' or 'bedrock'
+EMBEDDING_DIMS      = int(os.getenv('EMBEDDING_DIMENSIONS', str(_ENV_DIMENSIONS)))  # 1536 local, 1024 VDI
+GATEWAY_URL         = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
+GATEWAY_KEY         = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
+EMBEDDING_MODEL     = os.getenv('EMBEDDING_MODEL', 'Titan-v2')
+BEDROCK_EMBED_MODEL = os.getenv('BEDROCK_EMBEDDING_MODEL', _ENV_BEDROCK_MODEL)
+AWS_REGION          = os.getenv('AWS_REGION', 'us-east-1')
 
 class EmbeddingService:
     def __init__(self):
-        self.client = OpenAI(base_url=GATEWAY_URL, api_key=GATEWAY_KEY)
-        self.embedding_model_id = EMBEDDING_MODEL
         self.chunk_size = 500  # words per chunk
-        logger.info(f"[EmbeddingService] Ready. Gateway: {GATEWAY_URL}, Model: {self.embedding_model_id}, chunk_size: {self.chunk_size}")
+        if EMBEDDING_PROVIDER == 'bedrock':
+            self.provider = 'bedrock'
+            self.bedrock_client = boto3.client('bedrock-runtime', region_name=AWS_REGION)
+            self.embedding_model_id = BEDROCK_EMBED_MODEL
+            logger.info(f"[EmbeddingService] Ready. Provider: Bedrock, Model: {self.embedding_model_id}, chunk_size: {self.chunk_size}")
+        else:
+            self.provider = 'gateway'
+            self.client = OpenAI(base_url=GATEWAY_URL, api_key=GATEWAY_KEY)
+            self.embedding_model_id = EMBEDDING_MODEL
+            logger.info(f"[EmbeddingService] Ready. Gateway: {GATEWAY_URL}, Model: {self.embedding_model_id}, chunk_size: {self.chunk_size}")
     
     def chunk_text(self, text: str, chunk_size: int = None) -> List[str]:
         """
@@ -58,30 +85,38 @@ class EmbeddingService:
     
     def generate_embedding(self, text: str) -> List[float]:
         """
-        Generate embedding vector for text via gateway proxy (Titan model)
-        
-        Args:
-            text: Text to embed
-            
-        Returns:
-            1024-dimensional embedding vector
+        Generate embedding vector for text.
+        VDI:   calls the Deluxe gateway (OpenAI-compatible).
+        Local: calls AWS Bedrock Titan Embeddings directly.
         """
         try:
             input_length = len(text)
             word_count = len(text.split())
             logger.info(f"[EmbeddingService] generate_embedding: input_length={input_length} chars, {word_count} words")
 
-            logger.info(f"[EmbeddingService] Calling gateway embeddings (model={self.embedding_model_id})...")
-            response = self.client.embeddings.create(
-                model=self.embedding_model_id,
-                input=text,
-            )
+            if self.provider == 'bedrock':
+                logger.info(f"[EmbeddingService] Calling Bedrock embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
+                body = json.dumps({"inputText": text})
+                response = self.bedrock_client.invoke_model(
+                    modelId=self.embedding_model_id,
+                    body=body,
+                    contentType='application/json',
+                    accept='application/json',
+                )
+                result = json.loads(response['body'].read())
+                embedding = result['embedding']
+            else:
+                logger.info(f"[EmbeddingService] Calling gateway embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
+                response = self.client.embeddings.create(
+                    model=self.embedding_model_id,
+                    input=text,
+                    dimensions=EMBEDDING_DIMS,
+                )
+                if not response or not response.data:
+                    raise ValueError("No embedding returned from gateway")
+                embedding = response.data[0].embedding
 
-            if not response or not response.data:
-                raise ValueError("No embedding returned from gateway")
-
-            embedding = response.data[0].embedding
-            logger.info(f"[EmbeddingService] Gateway returned embedding: dimension={len(embedding)}")
+            logger.info(f"[EmbeddingService] Embedding generated: dimension={len(embedding)}")
             return embedding
 
         except Exception as e:

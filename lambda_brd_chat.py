@@ -16,8 +16,8 @@ from typing import Dict, List, Optional, Any
 
 import boto3
 from botocore.exceptions import ClientError
-from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
+# Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
+from environment import chat_completion, s3_put_object
 
 # Configure logging
 logger = logging.getLogger()
@@ -29,10 +29,10 @@ BEDROCK_REGION = os.environ["BEDROCK_REGION"]
 BEDROCK_MAX_TOKENS = int(os.environ["BEDROCK_MAX_TOKENS"])
 BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
-S3_BUCKET_NAME = os.environ["S3_BUCKET_NAME"]
-AGENTCORE_GATEWAY_ID = os.environ["AGENTCORE_GATEWAY_ID"]
-AGENTCORE_MEMORY_ID = os.environ["AGENTCORE_MEMORY_ID"]
-AGENTCORE_ACTOR_ID = os.environ["AGENTCORE_ACTOR_ID"]
+from environment import S3_BUCKET_NAME, DEFAULT_AGENTCORE_MEMORY_ID, DEFAULT_AGENTCORE_ACTOR_ID, DEFAULT_AGENTCORE_GATEWAY_ID
+AGENTCORE_GATEWAY_ID = DEFAULT_AGENTCORE_GATEWAY_ID
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
 
 def _get_s3_client():
     """Get S3 client"""

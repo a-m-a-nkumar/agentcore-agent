@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../FRONTEND1_new"
+		}
+	],
+	"settings": {
+		"claudeCode.disableLoginPrompt": true
+	}
+}
