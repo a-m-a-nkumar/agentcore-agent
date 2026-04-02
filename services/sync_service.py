@@ -220,7 +220,7 @@ async def sync_jira_project(
     
     # Fetch all issues (offload blocking HTTP call)
     logger.info(f"Fetching issues from Jira project {project_key}...")
-    issues = await asyncio.to_thread(jira.get_project_issues, project_key, 1000)
+    issues = await asyncio.to_thread(jira.get_project_issues, project_key)
     logger.info(f"Found {len(issues)} issues in project {project_key}")
 
     synced_count = 0

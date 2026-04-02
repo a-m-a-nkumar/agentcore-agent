@@ -1,11 +1,31 @@
 {
   "mcpServers": {
     "enhance-prompt": {
-      "command": "C:\\Users\\Aman1Kumar\\OneDrive - Sirius AI\\Documents\\agentcore-starter 3\\agentcore-starter\\.venv\\Scripts\\prompt-enhancer-mcp.exe",
+      "type": "stdio",
+      "command": "c:/Users/ArushSingh/Desktop/agentcore-agent/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "src.prompt_enhancer_mcp.enhance_server"
+      ],
+      "cwd": "c:/Users/ArushSingh/Desktop/agentcore-agent",
       "env": {
-        "PROJECT_ID": "26cad2fc-972e-40bf-a9d7-e44fd170058d",
-        "API_URL": "https://sdlc.siriusai.com",
-        "API_KEY": "dev-key-aman"
+        "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
+        "API_KEY": "dev-key-arush",
+        "API_URL": "http://localhost:8000"
+      }
+    },
+    "test-workflow": {
+      "type": "stdio",
+      "command": "c:/Users/ArushSingh/Desktop/agentcore-agent/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "src.prompt_enhancer_mcp.test_server"
+      ],
+      "cwd": "c:/Users/ArushSingh/Desktop/agentcore-agent",
+      "env": {
+        "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
+        "API_KEY": "dev-key-arush",
+        "API_URL": "http://localhost:8000"
       }
     }
   }

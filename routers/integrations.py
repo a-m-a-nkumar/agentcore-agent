@@ -5,7 +5,9 @@ import logging
 import boto3
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+
+import re
 
 from auth import verify_azure_token
 from db_helper import (
@@ -19,6 +21,104 @@ from services.confluence_service import ConfluenceService
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 logger = logging.getLogger(__name__)
+
+# Cache for token validation results: { user_id: (is_valid: bool, expires_at: datetime) }
+_token_validation_cache: Dict[str, tuple] = {}
+TOKEN_CACHE_TTL_MINUTES = 5
+
+
+def _parse_brd_text_to_structure(brd_text: str) -> dict:
+    """Parse markdown BRD text into structured JSON with sections, bullets, and tables."""
+    sections = []
+    current_section = None
+    current_content = []
+
+    for line in brd_text.split('\n'):
+        stripped = line.strip()
+
+        # Skip markdown separator lines (e.g., ---)
+        if re.match(r'^[-=]{3,}$', stripped):
+            continue
+
+        # Detect headings (## or #)
+        heading_match = re.match(r'^(#{1,3})\s+(.*)', stripped)
+        if heading_match:
+            # Save previous section
+            if current_section:
+                if current_content:
+                    current_section['content'].append({
+                        "type": "paragraph",
+                        "text": '\n'.join(current_content).strip()
+                    })
+                    current_content = []
+                sections.append(current_section)
+
+            title = heading_match.group(2).strip()
+            current_section = {"title": title, "content": []}
+            continue
+
+        if not current_section:
+            # Create a default section if content appears before any heading
+            if stripped:
+                current_section = {"title": "Business Requirements Document", "content": []}
+            else:
+                continue
+
+        # Bullet points
+        if re.match(r'^[-*•]\s+', stripped):
+            bullet_text = re.sub(r'^[-*•]\s+', '', stripped)
+            if current_content:
+                current_section['content'].append({
+                    "type": "paragraph",
+                    "text": '\n'.join(current_content).strip()
+                })
+                current_content = []
+            if current_section['content'] and current_section['content'][-1].get('type') == 'bullet':
+                current_section['content'][-1]['items'].append(bullet_text)
+            else:
+                current_section['content'].append({"type": "bullet", "items": [bullet_text]})
+            continue
+
+        # Table rows
+        if '|' in stripped and stripped.startswith('|'):
+            cells = [c.strip() for c in stripped.split('|') if c.strip()]
+            # Skip separator rows like |---|---|
+            if cells and all(re.match(r'^[-:]+$', c) for c in cells):
+                continue
+            if cells and len(cells) > 1:
+                if current_content:
+                    current_section['content'].append({
+                        "type": "paragraph",
+                        "text": '\n'.join(current_content).strip()
+                    })
+                    current_content = []
+                if current_section['content'] and current_section['content'][-1].get('type') == 'table':
+                    current_section['content'][-1]['rows'].append(cells)
+                else:
+                    current_section['content'].append({"type": "table", "rows": [cells]})
+                continue
+
+        # Regular text
+        if stripped:
+            current_content.append(stripped)
+        elif current_content:
+            # Empty line = paragraph break
+            current_section['content'].append({
+                "type": "paragraph",
+                "text": '\n'.join(current_content).strip()
+            })
+            current_content = []
+
+    # Finalize last section
+    if current_section:
+        if current_content:
+            current_section['content'].append({
+                "type": "paragraph",
+                "text": '\n'.join(current_content).strip()
+            })
+        sections.append(current_section)
+
+    return {"sections": sections}
 
 
 # ============================================
@@ -93,7 +193,10 @@ def link_atlassian_account(
             email=request.email,
             api_token=request.api_token
         )
-        
+
+        # Clear cached validation so status reflects new token immediately
+        _token_validation_cache.pop(current_user['id'], None)
+
         return {
             "status": "success",
             "message": "Atlassian account linked successfully"
@@ -107,24 +210,46 @@ def link_atlassian_account(
 def get_atlassian_status(current_user: dict = Depends(get_current_user)):
     """
     Check if user has linked their Atlassian account
-    
+
     Returns:
         - linked: bool - Whether account is linked
+        - token_expired: bool - Whether the stored token is expired/invalid
         - domain: str (optional) - Atlassian domain
         - email: str (optional) - Email used for authentication
         - linked_at: timestamp (optional) - When the account was linked
     """
     credentials = get_user_atlassian_credentials(current_user['id'])
-    
+
     if credentials and credentials.get('atlassian_api_token'):
+        user_id = current_user['id']
+
+        # Use cached validation result if still fresh
+        cached = _token_validation_cache.get(user_id)
+        if cached and datetime.utcnow() < cached[1]:
+            token_valid = cached[0]
+        else:
+            # Validate token against Atlassian — only mark expired on 401, not on network errors
+            try:
+                jira_service = JiraService(
+                    credentials['atlassian_domain'],
+                    credentials['atlassian_email'],
+                    credentials['atlassian_api_token']
+                )
+                token_valid, _ = jira_service.test_connection()
+            except Exception:
+                # Network/timeout errors — assume token is still valid, don't disconnect user
+                token_valid = True
+            _token_validation_cache[user_id] = (token_valid, datetime.utcnow() + timedelta(minutes=TOKEN_CACHE_TTL_MINUTES))
+
         return {
             "linked": True,
+            "token_expired": not token_valid,
             "domain": credentials.get('atlassian_domain'),
             "email": credentials.get('atlassian_email'),
             "linked_at": int(credentials['atlassian_linked_at'].timestamp() * 1000) if credentials.get('atlassian_linked_at') else None
         }
-    
-    return {"linked": False}
+
+    return {"linked": False, "token_expired": False}
 
 
 @router.get("/jira/projects")
@@ -192,12 +317,12 @@ def list_confluence_spaces(current_user: dict = Depends(get_current_user)):
 @router.get("/confluence/pages")
 def list_confluence_pages(
     space_key: str = "SO",
-    limit: int = 100,
+    limit: int = 500,
     current_user: dict = Depends(get_current_user),
 ):
     """
     List pages in a Confluence space using the current user's linked Atlassian credentials.
-    Replaces frontend calling /confluence-api/ with hardcoded auth.
+    Paginates through all results (Confluence Cloud may return max 25 per request).
     """
     credentials = get_user_atlassian_credentials(current_user["id"])
     if not credentials or not credentials.get("atlassian_api_token"):
@@ -277,12 +402,44 @@ def get_jira_issues(
         )
         
         logger.info(f"Using Jira domain: {credentials['atlassian_domain']}")
-        issues = jira_service.get_project_issues(project_key, max_results=100)
+        issues = jira_service.get_project_issues(project_key)
         logger.info(f"Successfully fetched {len(issues)} issues for project {project_key}")
         return {"issues": issues, "total": len(issues)}
     
     except Exception as e:
         logger.error(f"Error fetching Jira issues for project {project_key}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/jira/boards/{project_key}")
+def get_jira_boards(
+    project_key: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Fetch Jira boards for a specific project"""
+    logger.info(f"Fetching Jira boards for project_key: '{project_key}' (user: {current_user['id']})")
+
+    credentials = get_user_atlassian_credentials(current_user['id'])
+
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first."
+        )
+
+    try:
+        jira_service = JiraService(
+            credentials['atlassian_domain'],
+            credentials['atlassian_email'],
+            credentials['atlassian_api_token']
+        )
+
+        boards = jira_service.get_boards(project_key)
+        logger.info(f"Successfully fetched {len(boards)} boards for project {project_key}")
+        return {"boards": boards, "total": len(boards)}
+
+    except Exception as e:
+        logger.error(f"Error fetching Jira boards for project {project_key}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -331,29 +488,41 @@ def upload_brd_to_confluence(
     # 3. Fetch BRD from S3
     try:
         s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-        bucket_name = os.getenv('S3_BUCKET_NAME', 'test-development-bucket-siriusai')
+        from environment import S3_BUCKET_NAME
+        bucket_name = S3_BUCKET_NAME
         
         # Try to fetch JSON structure first
         json_key = f"brds/{request.brd_id}/brd_structure.json"
         
+        brd_json = None
+
+        # Try brd_structure.json first (created by lambda_brd_generator)
         try:
             logger.info(f"Fetching BRD from S3: s3://{bucket_name}/{json_key}")
             response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
             brd_json = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"Successfully loaded BRD JSON with {len(brd_json.get('sections', []))} sections")
+            logger.info(f"Successfully loaded brd_structure.json with {len(brd_json.get('sections', []))} sections")
         except Exception as e:
-            logger.warning(f"Could not load JSON structure: {e}. Trying text format...")
-            # Fallback to text format
+            logger.warning(f"Could not load brd_structure.json: {e}")
+
+        # Try BRD_{id}.json (created by lambda_brd_from_history)
+        if not brd_json or not brd_json.get('sections'):
+            try:
+                alt_json_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.json"
+                logger.info(f"Trying alternative JSON: s3://{bucket_name}/{alt_json_key}")
+                response = s3_client.get_object(Bucket=bucket_name, Key=alt_json_key)
+                brd_json = json.loads(response['Body'].read().decode('utf-8'))
+                logger.info(f"Successfully loaded BRD JSON with {len(brd_json.get('sections', []))} sections")
+            except Exception as e2:
+                logger.warning(f"Could not load BRD JSON: {e2}")
+
+        # Final fallback: parse text file into structured format
+        if not brd_json or not brd_json.get('sections'):
             txt_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.txt"
+            logger.info(f"Falling back to text: s3://{bucket_name}/{txt_key}")
             response = s3_client.get_object(Bucket=bucket_name, Key=txt_key)
             brd_text = response['Body'].read().decode('utf-8')
-            # Convert text to simple structure
-            brd_json = {
-                "sections": [{
-                    "title": "Business Requirements Document",
-                    "content": [{"type": "paragraph", "text": brd_text}]
-                }]
-            }
+            brd_json = _parse_brd_text_to_structure(brd_text)
     
     except Exception as e:
         logger.error(f"Error fetching BRD from S3: {e}")

@@ -1,5 +1,6 @@
 """
 Centralized S3 Service - All S3 write operations go through here.
+Enforces SSE-KMS encryption on every upload as required by the bucket policy.
 """
 
 import os
@@ -8,8 +9,12 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+from dotenv import load_dotenv
+load_dotenv()
+
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+KMS_KEY_ARN = os.getenv("KMS_KEY_ARN", "")
 
 _s3_client = None
 
@@ -44,8 +49,10 @@ def s3_put_object(key: str, body, content_type: str = "application/octet-stream"
         Key=key,
         Body=body,
         ContentType=content_type,
+        ServerSideEncryption="aws:kms",
+        SSEKMSKeyId=KMS_KEY_ARN,
     )
-    logger.info(f"[S3] Uploaded s3://{bucket}/{key} ({len(body)} bytes)")
+    logger.info(f"[S3] Uploaded s3://{bucket}/{key} ({len(body)} bytes, KMS encrypted)")
 
 
 def s3_get_object(key: str, bucket: str = None):

@@ -25,6 +25,15 @@ except ImportError:
 
 from strands import Agent, tool
 from strands.models.openai import OpenAIModel
+from strands.models import BedrockModel
+from environment import (
+    AGENT_MODEL_PROVIDER,
+    DEFAULT_DLXAI_GATEWAY_URL,
+    DEFAULT_DLXAI_GATEWAY_KEY,
+    DEFAULT_GATEWAY_MODEL,
+    DEFAULT_LAMBDA_REQUIREMENTS_GATHERING,
+    DEFAULT_LAMBDA_BRD_FROM_HISTORY,
+)
 
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
@@ -32,24 +41,14 @@ app = BedrockAgentCoreApp()
 # Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 
-# Deluxe gateway proxy (OpenAI-compatible wrapper for Bedrock)
-DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
-DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
-GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', 'Claude-4.5-Sonnet')
+# LLM gateway/model — defaults come from environment switch (VDI vs local)
+DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', DEFAULT_DLXAI_GATEWAY_URL)
+DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', DEFAULT_DLXAI_GATEWAY_KEY)
+GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', DEFAULT_GATEWAY_MODEL)
 
-# Lambda Function ARNs (can also use function names, but ARNs are more explicit)
-LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
-    'LAMBDA_REQUIREMENTS_GATHERING_ARN',
-    'arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda'
-)
-LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
-    'LAMBDA_BRD_FROM_HISTORY_ARN',
-    'arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda'
-)
-
-# For backward compatibility, also support function names
-LAMBDA_REQUIREMENTS_GATHERING = os.getenv('LAMBDA_REQUIREMENTS_GATHERING', LAMBDA_REQUIREMENTS_GATHERING_ARN)
-LAMBDA_BRD_FROM_HISTORY = os.getenv('LAMBDA_BRD_FROM_HISTORY', LAMBDA_BRD_FROM_HISTORY_ARN)
+# Lambda ARNs — defaults come from environment switch (VDI vs local)
+LAMBDA_REQUIREMENTS_GATHERING = os.getenv('LAMBDA_REQUIREMENTS_GATHERING', DEFAULT_LAMBDA_REQUIREMENTS_GATHERING)
+LAMBDA_BRD_FROM_HISTORY = os.getenv('LAMBDA_BRD_FROM_HISTORY', DEFAULT_LAMBDA_BRD_FROM_HISTORY)
 
 # Lazy loading of boto3 Lambda client
 _lambda_client = None
@@ -237,14 +236,17 @@ def _get_agent(fresh=False):
     
     if fresh or _agent_instance is None:
         try:
-            # Initialize OpenAI model via Deluxe gateway proxy
-            model = OpenAIModel(
-                model_id=GATEWAY_MODEL,
-                client_args={
-                    "base_url": DLXAI_GATEWAY_URL,
-                    "api_key": DLXAI_GATEWAY_KEY,
-                },
-            )
+            # Initialize model — gateway (VDI) or Bedrock directly (local)
+            if AGENT_MODEL_PROVIDER == "bedrock":
+                model = BedrockModel(model_id=GATEWAY_MODEL)
+            else:
+                model = OpenAIModel(
+                    model_id=GATEWAY_MODEL,
+                    client_args={
+                        "base_url": DLXAI_GATEWAY_URL,
+                        "api_key": DLXAI_GATEWAY_KEY,
+                    },
+                )
             
             # System prompt for the agent
             system_prompt = """You are Mary, a Strategic Business Analyst and Requirements Expert.

@@ -10,8 +10,8 @@ import uuid
 from typing import List, Dict
 
 import boto3
-from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
+# Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
+from environment import chat_completion, s3_put_object
 
 # Import prompts from centralized prompts module
 from prompts import get_brd_from_history_prompt
@@ -22,15 +22,16 @@ logger.setLevel(logging.INFO)
 
 # Configuration
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
-AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
-S3_BUCKET = os.getenv('S3_BUCKET_NAME', 'test-development-bucket-siriusai')
+from environment import S3_BUCKET_NAME, DEFAULT_AGENTCORE_MEMORY_ID, DEFAULT_AGENTCORE_ACTOR_ID
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
+S3_BUCKET = S3_BUCKET_NAME
 TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template.docx'
-BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
 BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
-MAX_TOKENS = 8192
-TEMPERATURE = 0.0
+MAX_TOKENS = int(os.environ['BEDROCK_MAX_TOKENS'])
+TEMPERATURE = float(os.environ['BEDROCK_TEMPERATURE'])
 
 # Lazy loading
 _agentcore_memory_client = None

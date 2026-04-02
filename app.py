@@ -18,13 +18,6 @@ import jwt
 from jwt import PyJWKClient
 from functools import wraps
 from typing import Optional, List
-import asyncio
-from functools import partial as _partial
-
-async def run_sync(func, *args, **kwargs):
-    """Run a synchronous function in a thread pool without blocking the event loop."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _partial(func, *args, **kwargs))
 import requests
 from datetime import datetime
 
@@ -35,10 +28,14 @@ from routers.integrations import router as integrations_router
 from routers.sync import router as sync_router
 from routers.jira_generation import router as jira_generation_router
 from routers.orchestration import router as orchestration_router
-
+from routers.orchestration_internal import router as orchestration_internal_router
+from routers.test_generation import router as test_generation_router
+from routers.test_internal import router as test_internal_router
+from routers.design import router as design_router
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
-from services.s3_service import s3_put_object, get_s3_client
+# Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
+from environment import s3_put_object, get_s3_client  # noqa: F401
 
 load_dotenv(override=True)
 
@@ -48,7 +45,7 @@ if os.getenv("AWS_PROFILE"):
     for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
         os.environ.pop(key, None)
 
-app = FastAPI()
+app = FastAPI(root_path=os.getenv("ROOT_PATH", ""))
 
 # Load BMAD config (optional prompt overlay)
 def _load_bmad_config():
@@ -88,7 +85,7 @@ def _build_bmad_prompt(base_prompt: str, workflow_key: str = "create-prd") -> st
 # Add CORS middleware to allow frontend on localhost:8080
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://localhost:5173", "http://127.0.0.1:8080", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:8080", "http://localhost:8081", "http://localhost:5173", "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:5173"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*", "Authorization", "Content-Type"],
@@ -101,15 +98,20 @@ app.include_router(sessions_router)
 app.include_router(integrations_router)
 app.include_router(sync_router)
 app.include_router(orchestration_router)
+app.include_router(orchestration_internal_router)
 app.include_router(jira_generation_router)
+app.include_router(test_generation_router)
+app.include_router(test_internal_router)
+app.include_router(design_router)
 
 # Add request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all incoming requests for debugging"""
-    if (request.url.path.startswith("/api/upload-transcript") or 
-        request.url.path.startswith("/api/chat") or 
-        request.url.path.startswith("/api/analyst-chat")):
+    if (request.url.path.startswith("/api/upload-transcript") or
+        request.url.path.startswith("/api/chat") or
+        request.url.path.startswith("/api/analyst-chat") or
+        request.url.path.startswith("/api/analyst-chat-stream")):
         auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
         print(f"\n[REQUEST] {request.method} {request.url.path}")
         print(f"[REQUEST] Authorization header present: {bool(auth_header)}")
@@ -121,10 +123,25 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     return response
 
-# Configuration (from .env)
-AGENT_ARN = os.getenv("AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK")
-ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/Analyst_agent-kCoE8v38c0")
+# Configuration (from .env / environment switch)
+# ARN defaults come from environment.py — local account (448049797912) or VDI account (590184044598)
+from environment import (  # noqa: E402
+    DEFAULT_AGENT_ARN, DEFAULT_ANALYST_AGENT_ARN,
+    DEFAULT_LAMBDA_BRD_CHAT, DEFAULT_LAMBDA_BRD_FROM_HISTORY,
+    DEFAULT_LAMBDA_REQUIREMENTS_GATHERING, DEFAULT_LAMBDA_BRD_GENERATOR,
+    DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN, DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN,
+    DEFAULT_AGENTCORE_MEMORY_ID, DEFAULT_AGENTCORE_ACTOR_ID,
+    S3_BUCKET_NAME,
+)
+AGENT_ARN = os.getenv("AGENT_ARN", DEFAULT_AGENT_ARN)
+ANALYST_AGENT_ARN = os.getenv("ANALYST_AGENT_ARN", DEFAULT_ANALYST_AGENT_ARN)
 REGION = os.getenv("AWS_REGION", "us-east-1")
+LAMBDA_BRD_CHAT = os.getenv("LAMBDA_BRD_CHAT", DEFAULT_LAMBDA_BRD_CHAT)
+LAMBDA_BRD_FROM_HISTORY = os.getenv("LAMBDA_BRD_FROM_HISTORY", DEFAULT_LAMBDA_BRD_FROM_HISTORY)
+LAMBDA_REQUIREMENTS_GATHERING = os.getenv("LAMBDA_REQUIREMENTS_GATHERING", DEFAULT_LAMBDA_REQUIREMENTS_GATHERING)
+LAMBDA_BRD_GENERATOR = os.getenv("LAMBDA_BRD_GENERATOR", DEFAULT_LAMBDA_BRD_GENERATOR)
+AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", DEFAULT_AGENTCORE_MEMORY_ID)
+AGENTCORE_ACTOR_ID = os.getenv("AGENTCORE_ACTOR_ID", DEFAULT_AGENTCORE_ACTOR_ID)
 
 # Log agent ARNs on startup
 print(f"\n[CONFIG] Agent ARN: {AGENT_ARN}")
@@ -132,8 +149,8 @@ print(f"[CONFIG] Analyst Agent ARN: {ANALYST_AGENT_ARN}")
 print(f"[CONFIG] Region: {REGION}\n")
 
 # Azure AD Configuration
-AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "10eda5db-4715-4e7b-bcd9-32dba3533084")
-AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "0575746d-c254-4eea-bfc6-10d0979d1e90")
+AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
+AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
 AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
 # Import authentication functions
@@ -749,7 +766,7 @@ async def generate_brd(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = await run_sync(agent_core_client.invoke_agent_runtime,
+            response = agent_core_client.invoke_agent_runtime(
                 agentRuntimeArn=AGENT_ARN,
                 runtimeSessionId=session_id,
                 payload=payload_bytes,
@@ -813,7 +830,7 @@ async def generate_brd(
                                     'transcript': transcript_text[:500]  # Truncate for session creation
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
+                                    FunctionName=LAMBDA_BRD_CHAT,
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -876,7 +893,7 @@ async def upload_transcript_to_s3(
         print(f"[UPLOAD] User: {current_user.get('email')} ({current_user.get('user_id')})")
         print("="*80)
 
-        bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        bucket_name = S3_BUCKET_NAME
         uploaded_files = []
 
         for transcript in transcripts:
@@ -946,7 +963,7 @@ async def generate_brd_from_s3(
             return JSONResponse(status_code=400, content={"error": "No transcript S3 paths provided"})
 
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        bucket_name = S3_BUCKET_NAME
 
         # Template path in S3
         template_s3_path_key = "templates/Deluxe_BRD_Template.docx"
@@ -1002,7 +1019,7 @@ async def generate_brd_from_s3(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = await run_sync(agent_core_client.invoke_agent_runtime,
+                        response = agent_core_client.invoke_agent_runtime(
                 agentRuntimeArn=AGENT_ARN,
                 runtimeSessionId=session_id,
                 payload=payload_bytes,
@@ -1059,7 +1076,7 @@ async def generate_brd_from_s3(
                                     'transcript': transcript_text[:500]
                                 }
                                 session_response = lambda_client.invoke(
-                                    FunctionName=os.getenv("LAMBDA_BRD_CHAT", "sdlc-dev-brd-chat"),
+                                    FunctionName=LAMBDA_BRD_CHAT,
                                     InvocationType='RequestResponse',
                                     Payload=json.dumps(session_payload)
                                 )
@@ -1168,7 +1185,7 @@ async def chat_with_agent(
         # retrieved later by /api/brd-history.
         print(f"[CHAT] Using runtimeSessionId: {session_id}")
 
-        response = await run_sync(agent_core_client.invoke_agent_runtime,
+        response = agent_core_client.invoke_agent_runtime(
             agentRuntimeArn=AGENT_ARN,
             runtimeSessionId=session_id,
             payload=payload_bytes,
@@ -1354,6 +1371,58 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
     
     return None, None
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Lambda Warm-Up endpoint
+# Called silently when the BRD Analyst page opens to pre-warm Lambda containers
+# before the user sends their first message.
+# ─────────────────────────────────────────────────────────────────────────────
+@app.post("/api/analyst-warm")
+async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
+    """
+    Pre-warm Lambda functions used by the BRD Analyst Agent.
+    Sends a lightweight 'ping' payload to both Lambdas in parallel.
+    Responds immediately with status — Lambda errors are non-fatal.
+    """
+    import asyncio
+
+    LAMBDA_REQ = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
+    LAMBDA_BRD = DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN
+
+    ping_payload = json.dumps({"action": "ping", "warm": True}).encode("utf-8")
+
+    def _invoke_lambda(function_name: str) -> dict:
+        try:
+            from botocore.config import Config
+            config = Config(read_timeout=10, connect_timeout=5, retries={"max_attempts": 0})
+            lc = boto3.client("lambda", region_name=os.getenv("AWS_REGION", "us-east-1"), config=config)
+            resp = lc.invoke(
+                FunctionName=function_name,
+                InvocationType="RequestResponse",
+                Payload=ping_payload
+            )
+            status = resp.get("StatusCode", 0)
+            print(f"[WARM-UP] ✅ {function_name.split(':')[-1]} → HTTP {status}", flush=True)
+            return {"function": function_name.split(":")[-1], "status": status, "warmed": True}
+        except Exception as e:
+            print(f"[WARM-UP] ⚠️  {function_name.split(':')[-1]} ping failed (non-fatal): {e}", flush=True)
+            return {"function": function_name.split(":")[-1], "status": "error", "warmed": False}
+
+    print("[WARM-UP] Warming Lambda containers in parallel...", flush=True)
+
+    loop = asyncio.get_event_loop()
+    results = await asyncio.gather(
+        loop.run_in_executor(None, _invoke_lambda, LAMBDA_REQ),
+        loop.run_in_executor(None, _invoke_lambda, LAMBDA_BRD),
+    )
+
+    print(f"[WARM-UP] Done. Results: {results}", flush=True)
+
+    return JSONResponse(content={
+        "status": "warmed",
+        "lambdas": list(results)
+    })
+
+
 @app.post("/api/analyst-chat")
 async def analyst_chat(
     message: str = Form(...),
@@ -1409,7 +1478,7 @@ async def analyst_chat(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = await run_sync(agent_core_client.invoke_agent_runtime,
+            response = agent_core_client.invoke_agent_runtime(
                 agentRuntimeArn=ANALYST_AGENT_ARN,
                 runtimeSessionId=runtime_session_id,
                 payload=payload_bytes,
@@ -1787,11 +1856,6 @@ async def analyst_chat(
             "type": "AccessDeniedException" if "AccessDeniedException" in str(e) else "UnknownError"
         })
 
-@app.post("/api/analyst-warm")
-async def analyst_warm():
-    """No-op warm-up endpoint for frontend to call on page load"""
-    return JSONResponse(content={"status": "ok"})
-
 
 @app.post("/api/analyst-chat-stream")
 async def analyst_chat_stream(
@@ -1800,37 +1864,138 @@ async def analyst_chat_stream(
     project_id: str = Form(None),
     current_user: dict = Depends(get_current_user)
 ):
-    """SSE streaming wrapper around analyst_chat for frontend compatibility"""
-    SSE_END = chr(10) + chr(10)  # two newline chars for SSE event separator
+    """
+    Streaming SSE analyst chat — calls requirements_gathering Lambda directly,
+    bypassing AgentCore Runtime for faster responses.
+    """
+    # Normalize project_id
+    if project_id:
+        project_id = project_id.strip() if isinstance(project_id, str) else str(project_id)
+        if not project_id or project_id == "none":
+            project_id = None
+
+    # Validate session_id
+    if not session_id or session_id == "none":
+        runtime_session_id = str(uuid.uuid4())
+        print(f"[ANALYST-STREAM] No session_id provided, created new: {runtime_session_id}")
+    else:
+        runtime_session_id = session_id
+        print(f"[ANALYST-STREAM] Using session ID: {runtime_session_id}")
+
+    formatted_message = message.strip()
+
+    LAMBDA_REQ_ARN = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
 
     async def generate_sse():
+        """Generate SSE stream — direct Lambda invocation (no AgentCore middleman)"""
+        import asyncio
+
         try:
-            result = await analyst_chat(
-                message=message,
-                session_id=session_id,
-                project_id=project_id,
-                current_user=current_user
-            )
-            result_body = json.loads(result.body.decode("utf-8"))
+            print(f"[ANALYST-STREAM] Direct Lambda call: session={runtime_session_id}, message={formatted_message[:100]}...")
 
-            response_text = result_body.get("result") or result_body.get("response") or ""
-            resp_session_id = result_body.get("session_id", session_id)
-            resp_brd_id = result_body.get("brd_id")
+            # Call requirements_gathering Lambda directly in a thread
+            def _call_lambda():
+                from botocore.config import Config
+                config = Config(
+                    read_timeout=900,
+                    connect_timeout=60,
+                    retries={'max_attempts': 0}
+                )
+                lambda_client = boto3.client('lambda', region_name=os.getenv('AWS_REGION', 'us-east-1'), config=config)
 
-            chunk_event = {"type": "chunk", "content": response_text}
-            yield "data: " + json.dumps(chunk_event) + SSE_END
+                payload = {
+                    'session_id': runtime_session_id,
+                    'user_message': formatted_message
+                }
 
-            meta = {"type": "metadata", "session_id": resp_session_id}
-            if resp_brd_id:
-                meta["brd_id"] = resp_brd_id
-            yield "data: " + json.dumps(meta) + SSE_END
+                response = lambda_client.invoke(
+                    FunctionName=LAMBDA_REQ_ARN,
+                    InvocationType='RequestResponse',
+                    Payload=json.dumps(payload)
+                )
 
-            done_event = {"type": "done"}
-            yield "data: " + json.dumps(done_event) + SSE_END
+                response_payload = json.loads(response['Payload'].read())
+
+                if 'FunctionError' in response:
+                    error_msg = response_payload.get('errorMessage', 'Unknown Lambda error')
+                    raise Exception(f"Lambda error: {error_msg}")
+
+                return response_payload
+
+            try:
+                result = await asyncio.get_running_loop().run_in_executor(None, _call_lambda)
+            except Exception as invoke_error:
+                print(f"[ANALYST-STREAM] Lambda invoke error: {invoke_error}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(invoke_error)})}\n\n"
+                return
+
+            print(f"[ANALYST-STREAM] Lambda response received: {type(result)}")
+
+            # Extract text from Lambda response
+            # Lambda returns: {"statusCode": 200, "body": {"response": "..."}}
+            # or directly: {"response": "...", "message": "..."}
+            final_text = None
+            extracted_brd_id = None
+
+            if isinstance(result, dict):
+                if 'statusCode' in result:
+                    body = result.get('body', {})
+                    if isinstance(body, str):
+                        try:
+                            body = json.loads(body)
+                        except json.JSONDecodeError:
+                            final_text = body
+                    if isinstance(body, dict):
+                        final_text = body.get('response') or body.get('message') or body.get('result')
+                else:
+                    final_text = result.get('response') or result.get('message') or result.get('result')
+
+            if not final_text:
+                final_text = str(result)
+
+            # Clean up if still JSON string
+            if isinstance(final_text, str) and final_text.strip().startswith('{'):
+                try:
+                    parsed = json.loads(final_text.strip())
+                    if isinstance(parsed, dict):
+                        final_text = parsed.get('response') or parsed.get('message') or parsed.get('result') or final_text
+                except (json.JSONDecodeError, Exception):
+                    pass
+
+            print(f"[ANALYST-STREAM] Extracted text: {len(final_text)} chars")
+
+            # Check for BRD ID
+            if final_text:
+                brd_match = re.search(r'BRD ID:\s*([a-f0-9-]+)', final_text, re.IGNORECASE)
+                if brd_match:
+                    extracted_brd_id = brd_match.group(1)
+
+            # Stream in small chunks with delay for natural typing feel
+            if final_text:
+                words = final_text.split(' ')
+                chunk = ''
+                for i, word in enumerate(words):
+                    chunk += word + ' '
+                    # Send every 3 words
+                    if (i + 1) % 3 == 0 or i == len(words) - 1:
+                        yield f"data: {json.dumps({'type': 'chunk', 'content': chunk})}\n\n"
+                        await asyncio.sleep(0.02)
+                        chunk = ''
+
+            # Send metadata
+            metadata = {'type': 'metadata', 'session_id': runtime_session_id}
+            if extracted_brd_id:
+                metadata['brd_id'] = extracted_brd_id
+            yield f"data: {json.dumps(metadata)}\n\n"
+
+            # Done
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
-            error_event = {"type": "error", "message": str(e)}
-            yield "data: " + json.dumps(error_event) + SSE_END
+            print(f"[ANALYST-STREAM] Error: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(
         generate_sse(),
@@ -1842,6 +2007,7 @@ async def analyst_chat_stream(
         }
     )
 
+
 @app.get("/api/analyst-history/{session_id}")
 async def get_analyst_history(
     session_id: str,
@@ -1852,10 +2018,6 @@ async def get_analyst_history(
         print(f"\n[ANALYST-HISTORY] Fetching history for session: {session_id}")
         print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
 
-        # Get AgentCore Memory configuration
-        AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'sdlc_dev_agentcore_memory-VF74Yf64ZB')
-        AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'analyst-session')
-
         # Get AgentCore client
         agentcore_client = get_agent_core_client()
 
@@ -1865,7 +2027,7 @@ async def get_analyst_history(
         print(f"[ANALYST-HISTORY] Actor ID: {AGENTCORE_ACTOR_ID}")
 
         # Fetch events from AgentCore Memory
-        response = await run_sync(agentcore_client.list_events,
+        response = agentcore_client.list_events(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
             actorId=AGENTCORE_ACTOR_ID,
@@ -1929,8 +2091,8 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         # Get conversation history from AgentCore Memory
         print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
@@ -1980,7 +2142,7 @@ async def analyst_generate_brd(
                         print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not initialize actor: {init_err}")
             
             # List events from AgentCore Memory for this session
-            events_response = await run_sync(agentcore_client.list_events,
+            events_response = agentcore_client.list_events(
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2030,7 +2192,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+            lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2143,8 +2305,8 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         # If session_id is "none" or empty, try to find the most recent session
         if not session_id or session_id == "none":
@@ -2178,7 +2340,7 @@ async def analyst_generate_brd(
                     print(f"[ANALYST-GENERATE-BRD] Attempting fallback: listing events to find sessions...")
                     try:
                         # List recent events to find session IDs
-                        events_response = await run_sync(agentcore_client.list_events,
+                        events_response = agentcore_client.list_events(
                             memoryId=memory_id,
                             actorId=actor_id,
                             includePayloads=False,
@@ -2225,7 +2387,7 @@ async def analyst_generate_brd(
         
         # List events from AgentCore Memory for this session
         try:
-            events_response = await run_sync(agentcore_client.list_events,
+            events_response = agentcore_client.list_events(
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2275,7 +2437,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+            lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2388,8 +2550,8 @@ async def analyst_generate_brd(
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         # Get conversation history from AgentCore Memory
         print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
@@ -2439,7 +2601,7 @@ async def analyst_generate_brd(
                         print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not initialize actor: {init_err}")
             
             # List events from AgentCore Memory for this session
-            events_response = await run_sync(agentcore_client.list_events,
+            events_response = agentcore_client.list_events(
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2489,7 +2651,7 @@ async def analyst_generate_brd(
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
-            lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+            lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
             print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
@@ -2524,7 +2686,7 @@ async def analyst_generate_brd(
         brd_id = str(uuid.uuid4())
         
         # Get S3 bucket and template path
-        s3_bucket = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        s3_bucket = S3_BUCKET_NAME
         template_s3_key = "templates/Deluxe_BRD_Template.docx"
         
         # Get Lambda client with increased timeout for long-running BRD generation
@@ -2536,7 +2698,7 @@ async def analyst_generate_brd(
         )
         lambda_client = boto3.client('lambda', region_name=REGION, config=lambda_config)
         # Use lambda_brd_from_history for analyst agent BRD generation
-        lambda_function_name = os.getenv("LAMBDA_BRD_FROM_HISTORY", "sdlc-dev-brd-from-history")
+        lambda_function_name = LAMBDA_BRD_FROM_HISTORY
         
         # Prepare Lambda payload for lambda_brd_from_history
         # This Lambda expects: conversation_history (list of messages)
@@ -2656,7 +2818,7 @@ async def download_brd(
         
         # Get S3 client
         s3_client = get_s3_client()
-        bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+        bucket_name = S3_BUCKET_NAME
         
         # BRD is stored as: brds/{brd_id}/BRD_{brd_id}.txt
         s3_key_txt = f"brds/{brd_id}/BRD_{brd_id}.txt"
@@ -2677,11 +2839,11 @@ async def download_brd(
             json_key = f"brds/{brd_id}/brd_structure.json"
             try:
                 try:
-                    json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
+                    json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
                 except ClientError as e:
                     if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
                         json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
-                        json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
+                        json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
                     else:
                         raise e
                 
@@ -2714,7 +2876,7 @@ async def download_brd(
                 if json_error_code == 'NoSuchKey':
                     print(f"[DOWNLOAD] ⚠️  BRD JSON not found, trying text file...")
                     # Fallback to text file and convert to DOCX
-                    response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=s3_key_txt)
+                    response = s3_client.get_object(Bucket=bucket_name, Key=s3_key_txt)
                     # Read with explicit UTF-8 encoding and error handling
                     text_body = response['Body'].read()
                     print(f"[DOWNLOAD] Read {len(text_body)} bytes from text file")
@@ -2790,11 +2952,11 @@ async def download_brd(
                     json_key = f"brds/{brd_id}/brd_structure.json"
                     try:
                         try:
-                            json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
+                            json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
                         except ClientError as e:
                             if e.response.get('Error', {}).get('Code') == 'NoSuchKey':
                                 json_key = f"brds/{brd_id}/BRD_{brd_id}.json"
-                                json_response = await run_sync(s3_client.get_object, Bucket=bucket_name, Key=json_key)
+                                json_response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
                             else:
                                 raise e
                         
@@ -2896,14 +3058,14 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "analyst-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
         
         messages = []
         
         try:
             # List events from AgentCore Memory
-            response = await run_sync(agentcore_client.list_events,
+            response = agentcore_client.list_events(
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -2999,15 +3161,15 @@ async def get_brd_chat_history(
         print(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
 
         agentcore_client = get_agent_core_client()
-        memory_id = os.getenv("AGENTCORE_MEMORY_ID", "sdlc_dev_agentcore_memory-VF74Yf64ZB")
-        actor_id = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
+        memory_id = AGENTCORE_MEMORY_ID
+        actor_id = AGENTCORE_ACTOR_ID
 
         print(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
 
         messages = []
 
         try:
-            response = await run_sync(agentcore_client.list_events,
+            response = agentcore_client.list_events(
                 memoryId=memory_id,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -3135,7 +3297,7 @@ async def revoke_brd_access(
 def _load_brd_structure_from_s3(brd_id: str) -> dict:
     """Load the latest BRD structure JSON from S3."""
     s3_client = get_s3_client()
-    bucket_name = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+    bucket_name = S3_BUCKET_NAME
     key = f"brds/{brd_id}/brd_structure.json"
     try:
         response = s3_client.get_object(Bucket=bucket_name, Key=key)
@@ -3158,8 +3320,10 @@ def _is_doc_title_section(title: str) -> bool:
     t = (title or "").strip()
     if not t:
         return False
+    # If the first section starts with a digit it is a real numbered section.
     if re.match(r"^\d+\.", t):
         return False
+    # Everything else (project names, headings without numbers) is a doc title.
     return True
 
 

@@ -6,7 +6,8 @@ import json
 import os
 import re
 from html import unescape
-from llm_gateway import chat_completion
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 
 from auth import verify_azure_token
 from db_helper import (
@@ -84,11 +85,61 @@ class CreateJiraItemsRequest(BaseModel):
     project_id: str
     jira_project_key: str
     epics: List[Dict]  # Contains epic_id, create_epic, and selected user_stories
+    board_id: Optional[int] = None  # Selected Jira board
 
 
 # ============================================
 # HELPER FUNCTIONS
 # ============================================
+
+def _repair_truncated_json(json_text: str) -> dict:
+    """
+    Attempt to repair truncated JSON by trimming to the last complete element
+    and closing any open brackets/braces.
+    """
+    # Trim back to the last complete object (last '}' that ends a story or epic)
+    # Walk backwards to find a good cut point
+    last_good = -1
+    for i in range(len(json_text) - 1, -1, -1):
+        if json_text[i] == '}':
+            # Try closing from here
+            candidate = json_text[:i + 1]
+            # Count open brackets/braces still needed
+            opens = {'[': 0, '{': 0}
+            in_string = False
+            escape = False
+            for ch in candidate:
+                if escape:
+                    escape = False
+                    continue
+                if ch == '\\' and in_string:
+                    escape = True
+                    continue
+                if ch == '"' and not escape:
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == '{':
+                    opens['{'] += 1
+                elif ch == '}':
+                    opens['{'] -= 1
+                elif ch == '[':
+                    opens['['] += 1
+                elif ch == ']':
+                    opens['['] -= 1
+
+            # Close any remaining open brackets/braces
+            suffix = ']' * opens['['] + '}' * opens['{']
+            try:
+                result = json.loads(candidate + suffix)
+                logger.info(f"Repaired truncated JSON by trimming to position {i + 1} and appending '{suffix}'")
+                return result
+            except json.JSONDecodeError:
+                continue
+
+    raise ValueError("Could not repair truncated JSON response")
+
 
 def strip_html_tags(html_content: str) -> str:
     """Remove HTML tags and extract plain text from Confluence content"""
@@ -277,69 +328,85 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
         logger.info("Calling gateway model to generate comprehensive Epics and User Stories...")
         logger.info(f"BRD content length: {len(plain_text)} characters")
 
-        generated_text = chat_completion(
+        response = chat_completion(
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
-            max_tokens=16384,
+            max_tokens=32768,
+            return_metadata=True,
         )
-        
-        logger.info(f"Gateway response received, length: {len(generated_text)} characters")
-        
+
+        generated_text = response["content"]
+        finish_reason = response.get("finish_reason")
+        was_truncated = finish_reason == "length"
+
+        logger.info(f"Gateway response received, length: {len(generated_text)} characters, finish_reason: {finish_reason}")
+        if was_truncated:
+            logger.warning("LLM response was TRUNCATED (hit max_tokens). Will attempt JSON repair.")
+
         # Parse JSON response
         # Remove markdown code blocks if present
         generated_text = re.sub(r'```json\s*', '', generated_text)
         generated_text = re.sub(r'```\s*$', '', generated_text)
         generated_text = generated_text.strip()
-        
+
         # Extract JSON object - find the first { and matching }
         # This handles cases where AI adds explanatory text before or after the JSON
-        try:
-            # Find the start of JSON
-            json_start = generated_text.find('{')
-            if json_start == -1:
-                raise ValueError("No JSON object found in response")
-            
-            # Find the matching closing brace
-            brace_count = 0
-            json_end = -1
-            for i in range(json_start, len(generated_text)):
-                if generated_text[i] == '{':
-                    brace_count += 1
-                elif generated_text[i] == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        json_end = i + 1
-                        break
-            
-            if json_end == -1:
-                raise ValueError("No matching closing brace found")
-            
-            # Extract only the JSON part
+        json_start = generated_text.find('{')
+        if json_start == -1:
+            raise ValueError("No JSON object found in response")
+
+        # Find the matching closing brace
+        brace_count = 0
+        json_end = -1
+        for i in range(json_start, len(generated_text)):
+            if generated_text[i] == '{':
+                brace_count += 1
+            elif generated_text[i] == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    json_end = i + 1
+                    break
+
+        if json_end != -1:
+            # Complete JSON found
             json_text = generated_text[json_start:json_end]
-            
-            logger.info(f"Extracted JSON length: {len(json_text)} characters")
-            
+            logger.info(f"Extracted complete JSON, length: {len(json_text)} characters")
             result = json.loads(json_text)
-            
-        except ValueError as e:
-            logger.error(f"JSON extraction error: {e}")
-            logger.error(f"Response text (first 2000 chars): {generated_text[:2000]}")
-            raise Exception(f"Failed to extract JSON from AI response: {str(e)}")
-        
+        else:
+            # JSON is truncated — attempt repair
+            logger.warning("JSON is truncated (no matching closing brace). Attempting repair...")
+            json_text = generated_text[json_start:]
+            result = _repair_truncated_json(json_text)
+
         # Validate structure
         if "epics" not in result:
             raise ValueError("Invalid response: missing 'epics' field")
-        
+
+        # Remove any incomplete epics (missing required fields)
+        valid_epics = []
+        for epic in result['epics']:
+            if epic.get('title') and epic.get('epic_id'):
+                # Remove incomplete stories from this epic
+                valid_stories = [
+                    s for s in epic.get('user_stories', [])
+                    if s.get('title') and s.get('story_id')
+                ]
+                epic['user_stories'] = valid_stories
+                valid_epics.append(epic)
+        result['epics'] = valid_epics
+
         # Log statistics
         total_stories = sum(len(epic.get('user_stories', [])) for epic in result['epics'])
         logger.info(f"Successfully generated {len(result['epics'])} epics with {total_stories} total user stories")
-        
+        if was_truncated:
+            logger.warning(f"Note: Response was truncated. Some epics/stories may have been lost.")
+
         # Log each epic summary
         for epic in result['epics']:
             logger.info(f"  Epic: {epic.get('title')} - {len(epic.get('user_stories', []))} stories")
-        
+
         return result
-        
+
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse gateway response as JSON: {e}")
         logger.error(f"Response text (first 2000 chars): {generated_text[:2000]}")

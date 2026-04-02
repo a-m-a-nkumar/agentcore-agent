@@ -5,8 +5,8 @@ import uuid
 from typing import Any, Dict, Optional
 
 import boto3
-from llm_gateway import chat_completion
-from services.s3_service import s3_put_object
+# Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
+from environment import chat_completion, s3_put_object
 
 # Import prompt templates from separate module
 from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig
@@ -15,16 +15,12 @@ from prompts.brd_generator_prompts import get_full_brd_generation_prompt, Prompt
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
-BEDROCK_REGION = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION", "us-east-1")
+BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
+BEDROCK_REGION = os.environ.get("BEDROCK_REGION") or os.environ["AWS_REGION"]
 BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
-# Claude Sonnet 4.5 has 200K token context window TOTAL (input + output)
-# Reserve ~50K tokens for prompt (instructions + template + transcript)
-# This leaves ~150K tokens for generation
-# IMPORTANT: Can set higher for longer BRDs, but 8192 is a safe default
-MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "8192"))
-TEMPERATURE = float(os.getenv("BEDROCK_TEMPERATURE", "0"))
+MAX_TOKENS = int(os.environ["BEDROCK_MAX_TOKENS"])
+TEMPERATURE = float(os.environ["BEDROCK_TEMPERATURE"])
 
 def _coerce_event(event: Any) -> Dict[str, Any]:
     if isinstance(event, dict):

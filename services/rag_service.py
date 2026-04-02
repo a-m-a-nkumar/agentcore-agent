@@ -5,19 +5,11 @@ Combines semantic search with LLM responses for intelligent Q&A
 
 from typing import List, Dict, Optional, Any
 from services.search_service import search_service
-from services.embedding_service import embedding_service
-from db_helper_vector import search_embeddings, get_surrounding_chunks_batch
 from langfuse_client import get_langfuse
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 import os
-import json
 import logging
-import asyncio
-import boto3
-from functools import partial as _partial
-
-async def run_sync(func, *args, **kwargs):
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _partial(func, *args, **kwargs))
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +18,7 @@ class RAGService:
     """Service for RAG-based question answering with integrated semantic search"""
     
     def __init__(self):
-        self.model_id = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
+        self.model_id = os.getenv('DLXAI_CHAT_MODEL', 'Claude-4.5-Sonnet')
     
     def semantic_search(
         self,
@@ -148,14 +140,18 @@ class RAGService:
         """
         langfuse = get_langfuse()
         try:
+            # Auto-detect source filter from query keywords
+            if not source_filter:
+                source_filter = self._detect_source_filter(user_query)
+
             # Step 1 & 2: Use centralized search service (eliminates duplication and uses batch operations)
-            logger.info(f"Querying search service for: {user_query[:50]}...")
+            logger.info(f"Querying search service for: {user_query[:50]}... (source_filter={source_filter})")
             with langfuse.start_as_current_observation(
                 as_type="span",
                 name="rag.search",
                 metadata={"query_length": len(user_query), "project_id": project_id, "max_chunks": max_chunks, "source_filter": source_filter or ""},
             ):
-                results = await run_sync(search_service.semantic_search,
+                results = search_service.semantic_search(
                     project_id=project_id,
                     query=user_query,
                     limit=max_chunks,
@@ -248,7 +244,7 @@ class RAGService:
         """
         try:
             # 1. Search
-            results = await run_sync(search_service.semantic_search,
+            results = search_service.semantic_search(
                 project_id=project_id,
                 query=user_query,
                 limit=max_chunks,
@@ -305,15 +301,29 @@ Optimized Prompt:"""
             logger.error(f"Error building enhanced prompt: {e}")
             return f"Error retrieving context: {str(e)}"
 
+    @staticmethod
+    def _detect_source_filter(query: str) -> Optional[str]:
+        """Auto-detect source type from query keywords."""
+        q = query.lower()
+        jira_keywords = ['jira', 'ticket', 'issue', 'sprint', 'story', 'stories', 'epic', 'bug', 'backlog', 'assignee']
+        confluence_keywords = ['confluence', 'wiki', 'page', 'documentation', 'brd', 'requirement']
+        jira_hits = sum(1 for kw in jira_keywords if kw in q)
+        confluence_hits = sum(1 for kw in confluence_keywords if kw in q)
+        if jira_hits > 0 and confluence_hits == 0:
+            return 'jira'
+        if confluence_hits > 0 and jira_hits == 0:
+            return 'confluence'
+        return None
+
     def _build_rag_prompt(self, query: str, context_chunks: List[Dict]) -> str:
         """Build prompt for Claude with context"""
-        
+
         # Format context
         context_text = ""
         for i, chunk in enumerate(context_chunks, 1):
             context_text += f"\n\n--- Source {i}: {chunk['source']} ---\n"
             context_text += chunk['content']
-        
+
         # Build full prompt
         prompt = f"""You are a helpful AI assistant answering questions based on project documentation from Confluence and Jira.
 
@@ -330,48 +340,29 @@ Instructions:
 - Use markdown formatting for better readability
 
 Answer:"""
-        
+
         return prompt
     
     async def _stream_claude_response(self, prompt: str):
-        """Generate response via Bedrock and emit as chunk events."""
+        """Generate response via gateway and emit as chunk events."""
         try:
-            bedrock_runtime = boto3.client(
-                'bedrock-runtime',
-                region_name=os.getenv('BEDROCK_REGION', os.getenv('AWS_REGION', 'us-east-1'))
+            prompt_len = len(prompt)
+            logger.info(f"Sending prompt to gateway: model={self.model_id}, prompt_length={prompt_len} chars (~{prompt_len // 4} tokens)")
+
+            text = chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7,
+                max_tokens=4096,
             )
 
-            request_body = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4096,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                "temperature": 0.7
-            }
-
-            response = await run_sync(bedrock_runtime.invoke_model_with_response_stream,
-                modelId=self.model_id,
-                body=json.dumps(request_body)
-            )
-
-            stream = response.get('body')
-            if stream:
-                for event in stream:
-                    chunk_data = json.loads(event['chunk']['bytes'].decode())
-                    if chunk_data['type'] == 'content_block_delta':
-                        text = chunk_data['delta'].get('text', '')
-                        if text:
-                            yield {
-                                'type': 'chunk',
-                                'content': text
-                            }
+            if text:
+                yield {
+                    'type': 'chunk',
+                    'content': text
+                }
 
         except Exception as e:
-            logger.error(f"Error generating Bedrock response: {e}")
+            logger.error(f"Error generating gateway response (prompt={len(prompt)} chars): {e}")
             yield {
                 'type': 'error',
                 'message': f'Error generating response: {str(e)}'

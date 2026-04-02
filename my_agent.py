@@ -11,24 +11,36 @@ from typing import Optional
 from bedrock_agentcore import BedrockAgentCoreApp
 from strands import Agent, tool
 from strands.models.openai import OpenAIModel
+from strands.models import BedrockModel
+from environment import (
+    AGENT_MODEL_PROVIDER,
+    DEFAULT_DLXAI_GATEWAY_URL,
+    DEFAULT_DLXAI_GATEWAY_KEY,
+    DEFAULT_GATEWAY_MODEL,
+    DEFAULT_LAMBDA_BRD_GENERATOR,
+    DEFAULT_LAMBDA_BRD_RETRIEVER,
+    DEFAULT_LAMBDA_BRD_CHAT,
+    DEFAULT_AGENTCORE_MEMORY_ID,
+    DEFAULT_AGENTCORE_ACTOR_ID,
+)
 
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
 
-# Lambda function names (configurable via environment variables)
-LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', 'brd_generator_lambda')
-LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', 'brd_retriever_lambda')
-LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', 'brd_chat_lambda')
+# Lambda function names — defaults come from environment switch (VDI vs local)
+LAMBDA_GENERATOR = os.getenv('LAMBDA_BRD_GENERATOR', DEFAULT_LAMBDA_BRD_GENERATOR)
+LAMBDA_RETRIEVER = os.getenv('LAMBDA_BRD_RETRIEVER', DEFAULT_LAMBDA_BRD_RETRIEVER)
+LAMBDA_CHAT = os.getenv('LAMBDA_BRD_CHAT', DEFAULT_LAMBDA_BRD_CHAT)
 AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
 
-# Deluxe gateway proxy (OpenAI-compatible wrapper for Bedrock)
-DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', 'https://dlxai-dev.deluxe.com/proxy')
-DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', 'sk-2cdb551cf35f418ea88b36')
-GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', 'Claude-4.5-Sonnet')
+# LLM gateway/model — defaults come from environment switch (VDI vs local)
+DLXAI_GATEWAY_URL = os.getenv('DLXAI_GATEWAY_URL', DEFAULT_DLXAI_GATEWAY_URL)
+DLXAI_GATEWAY_KEY = os.getenv('DLXAI_GATEWAY_KEY', DEFAULT_DLXAI_GATEWAY_KEY)
+GATEWAY_MODEL = os.getenv('GATEWAY_MODEL', DEFAULT_GATEWAY_MODEL)
 
 # AgentCore Memory configuration
-AGENTCORE_MEMORY_ID = os.getenv('AGENTCORE_MEMORY_ID', 'Test-DGwqpP7Rvj')
-AGENTCORE_ACTOR_ID = os.getenv('AGENTCORE_ACTOR_ID', 'brd-session')
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
 
 # Lazy loading of boto3 Lambda client
 _lambda_client = None
@@ -385,14 +397,17 @@ def _get_agent(fresh=False):
     # For chat requests, always create a fresh agent to avoid tool block conflicts
     if fresh or _agent_instance is None:
         try:
-            # Initialize OpenAI model via Deluxe gateway proxy
-            model = OpenAIModel(
-                model_id=GATEWAY_MODEL,
-                client_args={
-                    "base_url": DLXAI_GATEWAY_URL,
-                    "api_key": DLXAI_GATEWAY_KEY,
-                },
-            )
+            # Initialize model — gateway (VDI) or Bedrock directly (local)
+            if AGENT_MODEL_PROVIDER == "bedrock":
+                model = BedrockModel(model_id=GATEWAY_MODEL)
+            else:
+                model = OpenAIModel(
+                    model_id=GATEWAY_MODEL,
+                    client_args={
+                        "base_url": DLXAI_GATEWAY_URL,
+                        "api_key": DLXAI_GATEWAY_KEY,
+                    },
+                )
             
             # Create list of tools
             tools = [generate_brd, fetch_brd, chat_with_brd, get_brd_conversation_history]

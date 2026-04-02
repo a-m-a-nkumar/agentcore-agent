@@ -25,27 +25,29 @@ except ImportError:
 # Lambda functions and their required env vars
 # NOTE: AWS_REGION is reserved by Lambda - do not include it (Lambda provides it automatically)
 LAMBDA_CONFIG = {
-    "brd_chat_lambda": [
+    "sdlc-dev-brd-chat": [
         "BEDROCK_MODEL_ID", "BEDROCK_REGION", "BEDROCK_MAX_TOKENS", "BEDROCK_TEMPERATURE",
         "BEDROCK_GUARDRAIL_ARN", "BEDROCK_GUARDRAIL_VERSION",
         "S3_BUCKET_NAME", "AGENTCORE_GATEWAY_ID", "AGENTCORE_MEMORY_ID", "AGENTCORE_ACTOR_ID",
-        "BRD_STRUCTURE_MAX_CHARS",
+        "KMS_KEY_ARN",
     ],
-    "brd_generator_lambda": [
+    "sdlc-dev-brd-generator": [
         "BEDROCK_MODEL_ID", "BEDROCK_REGION", "BEDROCK_MAX_TOKENS", "BEDROCK_TEMPERATURE",
         "BEDROCK_GUARDRAIL_ARN", "BEDROCK_GUARDRAIL_VERSION",
-        "S3_BUCKET_NAME",
+        "S3_BUCKET_NAME", "KMS_KEY_ARN",
     ],
-    "brd_from_history_lambda": [
-        "BEDROCK_MODEL_ID", "BEDROCK_GUARDRAIL_ARN", "BEDROCK_GUARDRAIL_VERSION",
-        "S3_BUCKET_NAME", "AGENTCORE_MEMORY_ID", "AGENTCORE_ACTOR_ID",
+    "sdlc-dev-brd-from-history": [
+        "BEDROCK_MODEL_ID", "BEDROCK_MAX_TOKENS", "BEDROCK_TEMPERATURE",
+        "BEDROCK_GUARDRAIL_ARN", "BEDROCK_GUARDRAIL_VERSION",
+        "S3_BUCKET_NAME", "AGENTCORE_MEMORY_ID", "AGENTCORE_ACTOR_ID", "KMS_KEY_ARN",
     ],
-    "requirements_gathering_lambda": [
-        "BEDROCK_MODEL_ID", "BEDROCK_GUARDRAIL_ARN", "BEDROCK_GUARDRAIL_VERSION",
-        "AGENTCORE_MEMORY_ID", "AGENTCORE_ACTOR_ID",
+    "sdlc-dev-requirements-gathering": [
+        "BEDROCK_MODEL_ID", "BEDROCK_MAX_TOKENS", "BEDROCK_TEMPERATURE",
+        "BEDROCK_GUARDRAIL_ARN", "BEDROCK_GUARDRAIL_VERSION",
+        "AGENTCORE_MEMORY_ID", "AGENTCORE_ACTOR_ID", "KMS_KEY_ARN",
     ],
-    "brd_retriever_lambda": [
-        "S3_BUCKET_NAME",
+    "sdlc-dev-brd-retriever": [
+        "S3_BUCKET_NAME", "KMS_KEY_ARN",
     ],
 }
 
