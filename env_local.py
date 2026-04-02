@@ -19,7 +19,7 @@ import os
 import json
 import logging
 import boto3
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -146,7 +146,8 @@ def chat_completion(
     temperature: float = 0.9,
     max_tokens: Optional[int] = None,
     system_prompt: Optional[str] = None,
-) -> str:
+    return_metadata: bool = False,
+) -> Union[str, Dict]:
     """
     Send a chat request directly to AWS Bedrock (local dev — no gateway).
 
@@ -176,7 +177,12 @@ def chat_completion(
         contentType="application/json",
     )
     result = json.loads(response["body"].read())
-    return (result.get("content", [{}])[0].get("text", "") or "").strip()
+    content = (result.get("content", [{}])[0].get("text", "") or "").strip()
+    if return_metadata:
+        stop_reason = result.get("stop_reason")
+        finish_reason = "length" if stop_reason == "max_tokens" else stop_reason
+        return {"content": content, "finish_reason": finish_reason}
+    return content
 
 
 def chat_completion_stream(
