@@ -1,17 +1,95 @@
 
 import os
 import json
+import logging
 import jwt
 import boto3
 import binascii
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends, Header
 from jwt import PyJWKClient
 from functools import wraps
-from typing import Optional
+from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 # Azure AD Configuration
 AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
+
+# -------------------------
+# Azure AD Group-Based RBAC
+# -------------------------
+BUSINESS_GROUP_OID = "be88c38e-8a45-4026-ac85-f0f850b8cc03"
+TECH_GROUP_OID = "670e52fc-59cc-4a13-b89c-c91367c7060c"
+
+GROUP_MODULE_MAP = {
+    BUSINESS_GROUP_OID: ["brd", "confluence", "jira"],
+    TECH_GROUP_OID: ["design", "pair-programming", "testing"],
+}
+
+ALL_MODULES = {"brd", "confluence", "jira", "design", "pair-programming", "testing"}
+
+
+def extract_user_groups(decoded_token: dict) -> List[str]:
+    groups = decoded_token.get("groups", [])
+    if groups:
+        known = {BUSINESS_GROUP_OID, TECH_GROUP_OID}
+        return [g for g in groups if g in known]
+    claim_names = decoded_token.get("_claim_names", {})
+    if "groups" in claim_names:
+        logger.warning("[RBAC] Group overage detected — falling back to Graph API.")
+        return resolve_groups_via_graph(decoded_token)
+    return []
+
+
+def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
+    import requests as http_requests
+    client_secret = os.getenv("AZURE_CLIENT_SECRET", "")
+    if not client_secret:
+        logger.error("[RBAC] AZURE_CLIENT_SECRET not set — cannot resolve groups via Graph API.")
+        return []
+    try:
+        token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+        token_resp = http_requests.post(token_url, data={
+            "client_id": AZURE_CLIENT_ID, "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default", "grant_type": "client_credentials",
+        }, timeout=10)
+        token_resp.raise_for_status()
+        graph_token = token_resp.json()["access_token"]
+        user_oid = decoded_token.get("oid", "")
+        if not user_oid:
+            return []
+        check_resp = http_requests.post(
+            f"https://graph.microsoft.com/v1.0/users/{user_oid}/checkMemberGroups",
+            headers={"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"},
+            json={"groupIds": [BUSINESS_GROUP_OID, TECH_GROUP_OID]}, timeout=10,
+        )
+        check_resp.raise_for_status()
+        return check_resp.json().get("value", [])
+    except Exception as e:
+        logger.error(f"[RBAC] Graph API group resolution failed: {e}")
+        return []
+
+
+def compute_allowed_modules(groups: List[str]) -> List[str]:
+    modules = set()
+    for group_oid in groups:
+        modules.update(GROUP_MODULE_MAP.get(group_oid, []))
+    return sorted(modules)
+
+
+def require_module(module_name: str):
+    async def _check(authorization: Optional[str] = Header(None)) -> dict:
+        user_info = verify_azure_token(authorization)
+        groups = extract_user_groups(user_info)
+        allowed = compute_allowed_modules(groups)
+        if module_name not in allowed:
+            raise HTTPException(status_code=403, detail=f"Access denied: '{module_name}' module")
+        user_id = user_info.get("oid") or user_info.get("sub", "")
+        email = user_info.get("preferred_username") or user_info.get("email") or user_info.get("upn", "")
+        name = user_info.get("name", email)
+        return {"user_id": user_id, "email": email, "name": name, "groups": groups, "allowed_modules": allowed, "token_claims": user_info}
+    return _check
 
 # Azure AD JWKS URLs (support both v1.0 and v2.0)
 AZURE_JWKS_URL_V2 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys"

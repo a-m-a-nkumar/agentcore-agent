@@ -155,11 +155,14 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
 # Import authentication functions
 from auth import (
-    verify_azure_token, 
-    store_user_identity_in_agentcore, 
+    verify_azure_token,
+    store_user_identity_in_agentcore,
     check_brd_access_via_agentcore,
     grant_brd_access_via_agentcore,
-    revoke_brd_access_via_agentcore
+    revoke_brd_access_via_agentcore,
+    extract_user_groups,
+    compute_allowed_modules,
+    require_module,
 )
 
 # Setup templates
@@ -260,36 +263,26 @@ async def get_current_user(request: Request) -> dict:
     user_id = user_info.get("oid") or user_info.get("sub")
     email = user_info.get("email") or user_info.get("preferred_username")
     name = user_info.get("name")
-    
+
     print(f"[AUTH] User ID: {user_id}, Email: {email}")
-    
-    # Check BRD access via AgentCore Identity
-    try:
-        has_access = check_brd_access_via_agentcore(user_id)
-        print(f"[AUTH] BRD access check result: {has_access}")
-    except Exception as e:
-        print(f"[AUTH] Error checking BRD access: {e}, defaulting to allow")
-        has_access = True  # Default to allow on error
-    
-    if not has_access:
-        raise HTTPException(status_code=403, detail="Access denied: You do not have permission to access BRD features")
-    
+
+    groups = extract_user_groups(user_info)
+    allowed_modules = compute_allowed_modules(groups)
+    print(f"[AUTH] Groups: {groups}, Allowed modules: {allowed_modules}")
+
     # Store user identity in AgentCore if not exists
     try:
-        store_user_identity_in_agentcore(
-            user_id=user_id,
-            email=email,
-            name=name or ""
-        )
+        store_user_identity_in_agentcore(user_id=user_id, email=email, name=name or "")
     except Exception as e:
         print(f"[AUTH] Warning: Failed to store user identity in AgentCore: {e}")
-        # Don't fail the request if identity storage fails
-    
+
     return {
         "user_id": user_id,
         "email": email,
         "name": name,
-        "token": token
+        "token": token,
+        "groups": groups,
+        "allowed_modules": allowed_modules,
     }
 
 def render_brd_json_to_text(brd_data: dict) -> str:
@@ -3261,15 +3254,92 @@ async def check_brd_access(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/user/info")
 async def get_user_info(current_user: dict = Depends(get_current_user)):
-    """Get current user information"""
+    """Get current user information including group-based module access"""
     user_id = current_user["user_id"]
     identity_arn = get_user_identity_arn(user_id)
-    
     return JSONResponse(content={
         "user_id": user_id,
         "email": current_user["email"],
-        "identity_arn": identity_arn
+        "name": current_user.get("name", ""),
+        "identity_arn": identity_arn,
+        "groups": current_user.get("groups", []),
+        "allowed_modules": current_user.get("allowed_modules", []),
     })
+
+
+@app.get("/api/support/user-guide")
+async def get_support_user_guide(current_user: dict = Depends(get_current_user)):
+    """Return the user guide HTML extracted from the MHTML .doc in S3."""
+    import email as email_lib
+    import base64 as b64
+
+    s3_client = get_s3_client()
+    try:
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET_NAME,
+            Key="support/SDLC_Orchestrator_Userguide_ForTesting.doc",
+        )
+        raw = response["Body"].read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load user guide from S3: {e}")
+
+    msg = email_lib.message_from_string(raw)
+    image_map: dict[str, str] = {}
+    html_content = ""
+
+    for part in msg.walk():
+        ct = part.get_content_type()
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        if "html" in ct:
+            html_content = payload.decode("utf-8", errors="ignore")
+            continue
+        if ct.startswith("multipart/"):
+            continue
+        mime = ct
+        if ct == "application/octet-stream":
+            if payload[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif payload[:2] == b"\xff\xd8":
+                mime = "image/jpeg"
+            elif payload[:4] == b"GIF8":
+                mime = "image/gif"
+            else:
+                mime = "image/png"
+        data_uri = f"data:{mime};base64,{b64.b64encode(payload).decode()}"
+        loc = part.get("Content-Location", "")
+        if loc:
+            image_map[loc] = data_uri
+            fname = loc.rsplit("/", 1)[-1] if "/" in loc else loc
+            if fname:
+                image_map[fname] = data_uri
+        cid = part.get("Content-ID", "").strip("<>")
+        if cid:
+            image_map[f"cid:{cid}"] = data_uri
+
+    if not html_content:
+        raise HTTPException(status_code=500, detail="Could not extract HTML from user guide")
+
+    for ref in sorted(image_map, key=len, reverse=True):
+        html_content = html_content.replace(ref, image_map[ref])
+
+    style_block = """
+    <style>
+      body, .WordSection1 { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1a1a1a; }
+      h1, h2, h3 { color: #0f4c81; margin-top: 1.5em; margin-bottom: 0.5em; }
+      p { margin: 0.6em 0; }
+      img { max-width: 100%; height: auto; border-radius: 6px; margin: 12px 0; box-shadow: 0 1px 4px rgba(0,0,0,0.12); }
+      table { border-collapse: collapse; width: 100%; margin: 1em 0; }
+      td, th { border: 1px solid #ddd; padding: 8px 12px; }
+      a { color: #0078d4; }
+      ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
+      li { margin: 0.3em 0; }
+    </style>
+    """
+    html_content = style_block + html_content
+    return JSONResponse(content={"html": html_content})
+
 
 @app.post("/api/admin/grant-brd-access")
 async def grant_brd_access(
