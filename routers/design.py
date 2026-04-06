@@ -15,14 +15,14 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import List, Optional
-from auth import verify_azure_token, require_module
+from auth import verify_azure_token
 from db_helper import create_or_update_user, get_user_atlassian_credentials, get_project
 from services.confluence_service import ConfluenceService
 from environment import chat_completion, chat_completion_stream
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/design", tags=["design"], dependencies=[Depends(require_module("design"))])
+router = APIRouter(prefix="/api/design", tags=["design"])
 
 PROMPT_MODEL_ID    = os.getenv("DESIGN_PROMPT_MODEL_ID",    "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
 XML_MODEL_ID       = os.getenv("DESIGN_XML_MODEL_ID",       "global.anthropic.claude-sonnet-4-5-20250929-v1:0")

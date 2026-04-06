@@ -15,13 +15,13 @@ import re
 from datetime import datetime
 from html import unescape
 
-from auth import verify_azure_token, require_module
+from auth import verify_azure_token
 from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
 from services.confluence_service import ConfluenceService
 from services.github_service import GitHubService
 from environment import chat_completion, chat_completion_stream
 
-router = APIRouter(prefix="/api/test", tags=["test"], dependencies=[Depends(require_module("testing"))])
+router = APIRouter(prefix="/api/test", tags=["test"])
 logger = logging.getLogger(__name__)
 
 BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")

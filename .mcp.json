@@ -1,12 +1,32 @@
 {
-    "mcpServers": {
-        "enhance-prompt": {
-            "command": "C:\\Users\\T479888\\OneDrive - Deluxe Corporation\\Documents\\GitHub\\agentcore-agent\\venv\\Scripts\\prompt-enhancer-mcp.exe",
-            "env": {
-                "PROJECT_ID": "d3b75139-3804-46c9-9ae7-84a0d3950163",
-                "API_URL": "https://sdlc-dev.deluxe.com",
-                "API_KEY": "dev-key-aman"
-            }
-        }
+  "mcpServers": {
+    "enhance-prompt": {
+      "type": "stdio",
+      "command": "c:/Users/ArushSingh/Desktop/agentcore-agent/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "src.prompt_enhancer_mcp.enhance_server"
+      ],
+      "cwd": "c:/Users/ArushSingh/Desktop/agentcore-agent",
+      "env": {
+        "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
+        "API_KEY": "dev-key-arush",
+        "API_URL": "http://localhost:8000"
+      }
+    },
+    "test-workflow": {
+      "type": "stdio",
+      "command": "c:/Users/ArushSingh/Desktop/agentcore-agent/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "src.prompt_enhancer_mcp.test_server"
+      ],
+      "cwd": "c:/Users/ArushSingh/Desktop/agentcore-agent",
+      "env": {
+        "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
+        "API_KEY": "dev-key-arush",
+        "API_URL": "http://localhost:8000"
+      }
     }
+  }
 }

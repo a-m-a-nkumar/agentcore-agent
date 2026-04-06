@@ -9,6 +9,7 @@ import os
 import json
 import logging
 import time
+import threading
 from psycopg2 import pool
 from datetime import datetime
 from typing import List, Dict, Optional, Any
@@ -17,15 +18,22 @@ from typing import List, Dict, Optional, Any
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-from db_config import get_db_params
+# Environment-specific DB params (local: direct password | VDI: Secrets Manager)
+from environment import get_db_params
 
-# Global pool variable
+# Global pool variable + lock to prevent race conditions during init
 _db_pool = None
+_db_pool_lock = threading.Lock()
 
 def get_db_pool():
     """Get or initialize the connection pool using centralized db_config"""
     global _db_pool
-    if _db_pool is None:
+    if _db_pool is not None:
+        return _db_pool
+    with _db_pool_lock:
+        # Double-check after acquiring lock
+        if _db_pool is not None:
+            return _db_pool
         try:
             db_params = get_db_params()
             sslmode = db_params.get("sslmode", "require")
@@ -44,17 +52,27 @@ def get_db_pool():
                 keepalives_count=5       # give up after 5 missed replies
             )
             logger.info("Database connection pool initialized")
-            # Run auto-migrations on first pool init
-            _run_migrations()
+            # Run auto-migrations with a standalone connection (not from the pool)
+            # to avoid ThreadedConnectionPool thread-keying issues
+            _run_migrations(db_params, sslmode)
         except Exception as e:
             logger.error(f"Failed to initialize database pool: {e}")
+            _db_pool = None
             raise
     return _db_pool
 
 
-def _run_migrations():
-    """Run safe ALTER TABLE migrations (idempotent — skips if columns already exist)"""
-    conn = _db_pool.getconn()
+def _run_migrations(db_params: dict, sslmode: str):
+    """Run safe ALTER TABLE migrations (idempotent — skips if columns already exist).
+    Uses a standalone connection to avoid pool thread-keying issues."""
+    conn = psycopg2.connect(
+        host=db_params["host"],
+        port=db_params["port"],
+        database=db_params["database"],
+        user=db_params["user"],
+        password=db_params["password"],
+        sslmode=sslmode,
+    )
     try:
         with conn.cursor() as cursor:
             # Add brd_id column to projects table
@@ -87,7 +105,7 @@ def _run_migrations():
         conn.rollback()
         logger.error(f"Migration error (non-fatal): {e}")
     finally:
-        _db_pool.putconn(conn)
+        conn.close()
 
 def get_db_connection():
     """
@@ -119,11 +137,12 @@ def get_db_connection():
                 # Last attempt: reset the entire pool
                 global _db_pool
                 logger.warning("[DB] Resetting connection pool after stale connections")
-                try:
-                    _db_pool.closeall()
-                except Exception:
-                    pass
-                _db_pool = None
+                with _db_pool_lock:
+                    try:
+                        _db_pool.closeall()
+                    except Exception:
+                        pass
+                    _db_pool = None
                 conn = get_db_pool().getconn()
             
             duration = (time.time() - start_time) * 1000

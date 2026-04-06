@@ -10,7 +10,8 @@ from datetime import datetime
 from typing import List, Dict, Optional
 
 import boto3
-from llm_gateway import chat_completion
+# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+from environment import chat_completion
 
 # Import prompts from centralized prompts module
 from prompts import get_requirements_gathering_prompt
@@ -23,11 +24,12 @@ logger.setLevel(logging.INFO)
 BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
 BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
-AWS_REGION = os.environ['AWS_REGION']
-AGENTCORE_MEMORY_ID = os.environ['AGENTCORE_MEMORY_ID']
-AGENTCORE_ACTOR_ID = os.environ['AGENTCORE_ACTOR_ID']
-MAX_TOKENS = int(os.environ['BEDROCK_MAX_TOKENS'])
-TEMPERATURE = float(os.environ['BEDROCK_TEMPERATURE'])
+AWS_REGION = os.getenv('AWS_REGION', 'us-east-1')
+from environment import DEFAULT_AGENTCORE_MEMORY_ID, DEFAULT_AGENTCORE_ACTOR_ID
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
+MAX_TOKENS = int(os.getenv('BEDROCK_MAX_TOKENS', '2000'))
+TEMPERATURE = float(os.getenv('BEDROCK_TEMPERATURE', '0.7'))
 MAX_HISTORY_MESSAGES = int(os.getenv('MAX_HISTORY_MESSAGES', '50'))
 
 # Lazy loading

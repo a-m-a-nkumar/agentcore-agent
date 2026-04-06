@@ -9,6 +9,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+try:
+    from environment import EMBEDDING_DIMENSIONS
+except ImportError:
+    EMBEDDING_DIMENSIONS = 1024
+
 def run_migration():
     """Create vector database tables"""
     
@@ -115,7 +120,7 @@ def run_migration():
         
         # Create document_embeddings table
         print("\n🔍 Creating document_embeddings table...")
-        cursor.execute("""
+        cursor.execute(f"""
             CREATE TABLE IF NOT EXISTS document_embeddings (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                 project_id VARCHAR(255) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -125,10 +130,10 @@ def run_migration():
                 title TEXT NOT NULL,
                 content_chunk TEXT NOT NULL,
                 chunk_index INTEGER DEFAULT 0,
-                embedding vector(1024) NOT NULL,
+                embedding vector({EMBEDDING_DIMENSIONS}) NOT NULL,
                 url TEXT,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                metadata JSONB DEFAULT '{}'::jsonb
+                metadata JSONB DEFAULT '{{}}'::jsonb
             );
         """)
         
