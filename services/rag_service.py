@@ -9,9 +9,17 @@ from langfuse_client import get_langfuse
 # Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
 from environment import chat_completion
 import os
+import re
 import logging
 
 logger = logging.getLogger(__name__)
+
+
+def _strip_html(text: str) -> str:
+    """Remove HTML/Confluence XML tags and normalize whitespace."""
+    text = re.sub(r'<[^>]+>', ' ', text)
+    text = re.sub(r'\s{2,}', ' ', text)
+    return text.strip()
 
 
 class RAGService:
@@ -236,7 +244,9 @@ class RAGService:
         project_id: str,
         user_query: str,
         max_chunks: int = 5,
-        source_filter: Optional[str] = None
+        source_filter: Optional[str] = None,
+        frontend_requirements: str = "",
+        backend_requirements: str = "",
     ) -> str:
         """
         Retrieve context and build an enhanced prompt for IDE use (MCP)
@@ -255,39 +265,69 @@ class RAGService:
             if not results:
                 return f"No relevant documentation found for: {user_query}"
             
-            # 2. Format context
+            # 2. Format context (strip HTML from Confluence/Jira raw content)
             context_chunks = []
             for result in results:
                 context_chunks.append({
                     'source': f"[{result['source_type'].capitalize()}] {result['title']}",
-                    'content': result['content']
+                    'content': _strip_html(result['content'])
                 })
             
             # 3. Build optimized prompt for IDE
             context_text = ""
             for i, chunk in enumerate(context_chunks, 1):
                 context_text += f"\n<source_{i}>\nTitle: {chunk['source']}\nContent:\n{chunk['content']}\n</source_{i}>\n"
-            
+
+            # ── DEBUG: show what RAG retrieved and what tech stack was passed in ──
+            print("\n" + "="*70)
+            print("[RAG ENHANCE] === CONTEXT SENT TO CLAUDE ===")
+            print(f"[RAG ENHANCE] User Query     : {user_query}")
+            print(f"[RAG ENHANCE] Frontend Reqs  : {frontend_requirements or '(not specified)'}")
+            print(f"[RAG ENHANCE] Backend Reqs   : {backend_requirements or '(not specified)'}")
+            print(f"[RAG ENHANCE] RAG chunks ({len(context_chunks)}):")
+            for i, chunk in enumerate(context_chunks, 1):
+                snippet = chunk['content'][:300].replace('\n', ' ')
+                print(f"  [{i}] {chunk['source']}")
+                print(f"      {snippet}{'...' if len(chunk['content']) > 300 else ''}")
+            print("="*70 + "\n")
+            # ── END DEBUG ──
+
             # 4. Ask Claude to generate the Perfect Prompt
             meta_prompt = f"""You are an expert AI prompt engineer. Your goal is to create a highly optimized prompt for an AI coding assistant.
 
 I will provide you with:
 1. A User Request (what the developer wants to do)
 2. Relevant Context from documentation (Confluence/Jira)
+3. Tech Stack Requirements (if provided by the developer)
 
 Your task:
-Write a new, comprehensive prompt that I can send to the AI coding assistant. 
-- The prompt should explicitly incorporate the relevant information from the context.
-- It should be clear, step-by-step, and specific.
-- Do NOT answer the user request yourself. Just write the PROMPT for the AI to answer it.
-- Start directly with the prompt text. Do not add "Here is the prompt:" or similar meta-talk.
+Write a new, comprehensive prompt that I can send to the AI coding assistant.
+- Incorporate relevant information from the Confluence/Jira context (flows, requirements, architecture details).
+- If Frontend Requirements are provided, you MUST reference those specific frontend technologies in the generated prompt.
+- If Backend Requirements are provided, you MUST reference those specific backend technologies in the generated prompt.
+- IMPORTANT: If the Confluence/Jira context mentions tech stack details that conflict with the developer-specified Frontend or Backend Requirements, always prefer the developer-specified values — treat the documentation as potentially outdated for tech stack specifics.
+- Be clear, step-by-step, and specific.
+- Do NOT answer the user request yourself — just write the PROMPT.
+- Start directly with the prompt text, no meta-talk.
 
 User Request: {user_query}
 
-Relevant Context:
+--- Tech Stack (developer-specified) ---
+Frontend: {frontend_requirements if frontend_requirements else "Not specified"}
+Backend:  {backend_requirements if backend_requirements else "Not specified"}
+-----------------------------------------
+
+Relevant Context (from Confluence/Jira):
 {context_text}
 
 Optimized Prompt:"""
+
+            # ── DEBUG: full meta-prompt sent to Claude ──
+            print("\n" + "="*70)
+            print("[RAG ENHANCE] === FULL META-PROMPT SENT TO CLAUDE ===")
+            print(meta_prompt)
+            print("="*70 + "\n")
+            # ── END DEBUG ──
 
             # 5. Call LLM to generate the prompt
             generated_prompt = ""

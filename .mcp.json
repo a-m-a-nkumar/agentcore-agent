@@ -11,7 +11,9 @@
       "env": {
         "PROJECT_ID": "b89aaffc-fab1-4f48-bd2a-68fb03851794",
         "API_KEY": "dev-key-arush",
-        "API_URL": "http://localhost:8000"
+        "API_URL": "http://localhost:8000",
+        "FRONTEND_REQUIREMENTS": "react18",
+        "BACKEND_REQUIREMENTS": "redis,postgresql,express"
       }
     },
     "test-workflow": {
