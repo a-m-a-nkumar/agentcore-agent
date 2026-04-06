@@ -8,7 +8,7 @@ import re
 from html import unescape
 from llm_gateway import chat_completion
 
-from auth import verify_azure_token
+from auth import verify_azure_token, require_module
 from db_helper import (
     get_user_atlassian_credentials,
     create_or_update_user,
@@ -17,7 +17,7 @@ from db_helper import (
 from services.confluence_service import ConfluenceService
 from services.jira_service import JiraService
 
-router = APIRouter(prefix="/api/jira", tags=["jira"])
+router = APIRouter(prefix="/api/jira", tags=["jira"], dependencies=[Depends(require_module("jira"))])
 logger = logging.getLogger(__name__)
 
 # LLM gateway configuration

@@ -1,17 +1,149 @@
 
 import os
 import json
+import logging
 import jwt
 import boto3
 import binascii
-from fastapi import HTTPException
+from fastapi import HTTPException, Depends, Header
 from jwt import PyJWKClient
 from functools import wraps
-from typing import Optional
+from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 # Azure AD Configuration
 AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
 AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
+
+# -------------------------
+# Azure AD Group-Based RBAC
+# -------------------------
+
+# Group OIDs from Azure AD
+BUSINESS_GROUP_OID = "be88c38e-8a45-4026-ac85-f0f850b8cc03"  # BRD, Confluence, Jira
+TECH_GROUP_OID = "670e52fc-59cc-4a13-b89c-c91367c7060c"       # Design, Pair Programming, Testing
+
+# Map group OIDs to module access
+GROUP_MODULE_MAP = {
+    BUSINESS_GROUP_OID: ["brd", "confluence", "jira"],
+    TECH_GROUP_OID: ["design", "pair-programming", "testing"],
+}
+
+# All known module IDs (for validation)
+ALL_MODULES = {"brd", "confluence", "jira", "design", "pair-programming", "testing"}
+
+
+def extract_user_groups(decoded_token: dict) -> List[str]:
+    """Extract group OIDs from decoded Azure AD token.
+
+    If the user belongs to too many groups (>150), Azure AD sends an
+    overage indicator instead of the groups claim. In that case we
+    fall back to checking only our two known group OIDs via Graph API.
+    """
+    groups = decoded_token.get("groups", [])
+    if groups:
+        # Filter to only our known RBAC groups
+        known = {BUSINESS_GROUP_OID, TECH_GROUP_OID}
+        return [g for g in groups if g in known]
+
+    # Check for group overage indicator
+    claim_names = decoded_token.get("_claim_names", {})
+    if "groups" in claim_names:
+        logger.warning("[RBAC] Group overage detected — groups claim missing from token. "
+                       "Falling back to Graph API.")
+        return resolve_groups_via_graph(decoded_token)
+
+    return []
+
+
+def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
+    """Call Microsoft Graph to check membership of specific groups (overage fallback).
+
+    Uses the checkMemberGroups endpoint which only needs GroupMember.Read.All
+    and avoids enumerating all groups.
+    """
+    import requests as http_requests
+
+    # We need an access token for Graph. The token we have is an ID token,
+    # so we use client credentials flow (requires AZURE_CLIENT_SECRET).
+    client_secret = os.getenv("AZURE_CLIENT_SECRET", "")
+    if not client_secret:
+        logger.error("[RBAC] AZURE_CLIENT_SECRET not set — cannot resolve groups via Graph API. "
+                     "Defaulting to no groups.")
+        return []
+
+    try:
+        # Get app-only token via client credentials
+        token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
+        token_resp = http_requests.post(token_url, data={
+            "client_id": AZURE_CLIENT_ID,
+            "client_secret": client_secret,
+            "scope": "https://graph.microsoft.com/.default",
+            "grant_type": "client_credentials",
+        }, timeout=10)
+        token_resp.raise_for_status()
+        graph_token = token_resp.json()["access_token"]
+
+        # Check if user is member of our two known groups
+        user_oid = decoded_token.get("oid", "")
+        if not user_oid:
+            return []
+
+        check_url = f"https://graph.microsoft.com/v1.0/users/{user_oid}/checkMemberGroups"
+        check_resp = http_requests.post(check_url, headers={
+            "Authorization": f"Bearer {graph_token}",
+            "Content-Type": "application/json",
+        }, json={
+            "groupIds": [BUSINESS_GROUP_OID, TECH_GROUP_OID]
+        }, timeout=10)
+        check_resp.raise_for_status()
+        return check_resp.json().get("value", [])
+
+    except Exception as e:
+        logger.error(f"[RBAC] Graph API group resolution failed: {e}")
+        return []
+
+
+def compute_allowed_modules(groups: List[str]) -> List[str]:
+    """Compute the union of all modules the user can access based on group memberships."""
+    modules = set()
+    for group_oid in groups:
+        modules.update(GROUP_MODULE_MAP.get(group_oid, []))
+    return sorted(modules)
+
+
+def require_module(module_name: str):
+    """FastAPI dependency factory: checks if the current user has access to a specific module.
+
+    Usage in routers:
+        @router.get("/some-endpoint")
+        async def endpoint(current_user: dict = Depends(require_module("design"))):
+            ...
+    """
+    async def _check_module_access(authorization: Optional[str] = Header(None)) -> dict:
+        user_info = verify_azure_token(authorization)
+        groups = extract_user_groups(user_info)
+        allowed = compute_allowed_modules(groups)
+        if module_name not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied: you do not have permission to access the '{module_name}' module"
+            )
+        # Return enriched user info
+        user_id = user_info.get("oid") or user_info.get("sub", "")
+        email = (user_info.get("preferred_username") or user_info.get("email")
+                 or user_info.get("upn", ""))
+        name = user_info.get("name", email)
+        return {
+            "user_id": user_id,
+            "email": email,
+            "name": name,
+            "groups": groups,
+            "allowed_modules": allowed,
+            "token_claims": user_info,
+        }
+    return _check_module_access
 
 # Azure AD JWKS URLs (support both v1.0 and v2.0)
 AZURE_JWKS_URL_V2 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys"
@@ -127,9 +259,6 @@ def revoke_brd_access_via_agentcore(user_id: str) -> bool:
 # -------------------------
 # Azure AD Token Verification
 # -------------------------
-
-from fastapi import Header, HTTPException
-
 
 def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     """Verify Azure AD JWT token and return decoded claims"""
