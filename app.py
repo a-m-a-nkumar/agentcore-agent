@@ -726,12 +726,18 @@ async def generate_brd(
         
         # 2. Extract text (supports .docx, .pdf, .txt)
         transcript_text = extract_text(transcript_content, transcript.filename)
-            
+
         template_text = read_docx(template_content)
-        
+
         print(f"[APP] Transcript text: {len(transcript_text)} chars")
         print(f"[APP] Template text: {len(template_text)} chars")
-        
+
+        # Validate transcript is not empty
+        if not transcript_text or len(transcript_text.strip()) < 50:
+            return JSONResponse(status_code=400, content={
+                "error": "Transcript is empty or too short. Please upload a transcript with meaningful content."
+            })
+
         # 3. Prepare Payload (with BMAD persona/workflow overlay if available)
         base_prompt = "Generate a BRD based on the provided template and transcript."
         bmad_prompt = _build_bmad_prompt(base_prompt, workflow_key="create-prd")
@@ -986,7 +992,13 @@ async def generate_brd_from_s3(
 
         print(f"[APP] Transcript text: {len(transcript_text)} chars")
         print(f"[APP] Template text: {len(template_text)} chars")
-        
+
+        # Validate transcript is not empty
+        if not transcript_text or len(transcript_text.strip()) < 50:
+            return JSONResponse(status_code=400, content={
+                "error": "Transcript is empty or too short. Please upload a transcript with meaningful content."
+            })
+
         # 4. Prepare Payload (same as /generate endpoint, with BMAD overlay if available)
         base_prompt = "Generate a BRD based on the provided template and transcript."
         bmad_prompt = _build_bmad_prompt(base_prompt, workflow_key="create-prd")

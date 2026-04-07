@@ -268,20 +268,31 @@ def create_project(
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Check for duplicate project name for this user
+            cursor.execute(
+                "SELECT id FROM projects WHERE user_id = %s AND LOWER(project_name) = LOWER(%s) AND is_deleted = FALSE",
+                (user_id, project_name)
+            )
+            if cursor.fetchone():
+                raise ValueError(f"A project named '{project_name}' already exists. Please choose a different name.")
+
             cursor.execute("""
                 INSERT INTO projects (
                     id, user_id, project_name, description,
                     jira_project_key, confluence_space_key
                 ) VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING *
-            """, (project_id, user_id, project_name, description, 
+            """, (project_id, user_id, project_name, description,
                   jira_project_key, confluence_space_key))
-            
+
             project = dict(cursor.fetchone())
             conn.commit()
-            
+
             logger.info(f"Project created: {project_id} for user {user_id}")
             return project
+    except ValueError:
+        conn.rollback()
+        raise
     except Exception as e:
         conn.rollback()
         logger.error(f"Error creating project: {e}")
