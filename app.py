@@ -724,11 +724,8 @@ async def generate_brd(
         print(f"[APP] Transcript file: {transcript.filename} ({len(transcript_content)} bytes)")
         print(f"[APP] Template file: {template.filename} ({len(template_content)} bytes)")
         
-        # 2. Extract text
-        if transcript.filename.endswith(".docx"):
-            transcript_text = read_docx(transcript_content)
-        else:
-            transcript_text = transcript_content.decode("utf-8", errors="replace")
+        # 2. Extract text (supports .docx, .pdf, .txt)
+        transcript_text = extract_text(transcript_content, transcript.filename)
             
         template_text = read_docx(template_content)
         
@@ -3324,10 +3321,30 @@ async def get_support_user_guide(current_user: dict = Depends(get_current_user))
     for ref in sorted(image_map, key=len, reverse=True):
         html_content = html_content.replace(ref, image_map[ref])
 
+    # Add IDs to headings so the frontend can scroll to specific sections
+    import re as _re
+
+    def _slugify(text: str) -> str:
+        clean = _re.sub(r"<[^>]+>", "", text).strip()
+        return _re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")
+
+    def _add_heading_ids(html: str) -> str:
+        def _replacer(m):
+            tag = m.group(1)
+            attrs = m.group(2)
+            content = m.group(3)
+            slug = _slugify(content)
+            if slug:
+                return f"<{tag}{attrs} id=\"{slug}\">{content}</{tag}>"
+            return m.group(0)
+        return _re.sub(r"<(h[1-4])([^>]*)>(.*?)</\1>", _replacer, html, flags=_re.DOTALL | _re.IGNORECASE)
+
+    html_content = _add_heading_ids(html_content)
+
     style_block = """
     <style>
       body, .WordSection1 { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1a1a1a; }
-      h1, h2, h3 { color: #0f4c81; margin-top: 1.5em; margin-bottom: 0.5em; }
+      h1, h2, h3, h4 { color: #0f4c81; margin-top: 1.5em; margin-bottom: 0.5em; }
       p { margin: 0.6em 0; }
       img { max-width: 100%; height: auto; border-radius: 6px; margin: 12px 0; box-shadow: 0 1px 4px rgba(0,0,0,0.12); }
       table { border-collapse: collapse; width: 100%; margin: 1em 0; }

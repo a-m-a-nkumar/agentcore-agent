@@ -24,7 +24,7 @@ TECH_GROUP_OID = "670e52fc-59cc-4a13-b89c-c91367c7060c"
 
 GROUP_MODULE_MAP = {
     BUSINESS_GROUP_OID: ["brd", "confluence", "jira"],
-    TECH_GROUP_OID: ["design", "pair-programming", "testing"],
+    TECH_GROUP_OID: ["design", "pair-programming", "testing", "confluence", "jira"],
 }
 
 ALL_MODULES = {"brd", "confluence", "jira", "design", "pair-programming", "testing"}
