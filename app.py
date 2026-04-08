@@ -667,7 +667,7 @@ try:
         print(f"[APP] ✅ AWS credentials valid. Account: {creds_info.get('Account', 'Unknown')}")
         print(f"[APP] User: {creds_info.get('Arn', 'Unknown')}")
     else:
-        print(f"[APP] ⚠️  AWS credentials check failed: {creds_info}")
+        print(f"[APP] [WARN] AWS credentials check failed: {creds_info}")
         print("[APP] Please configure AWS credentials using:")
         print("  - AWS CLI: aws configure")
         print("  - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
@@ -677,7 +677,7 @@ try:
     test_client = get_agent_core_client()
     print(f"[APP] ✅ AgentCore client initialized successfully")
 except Exception as e:
-    print(f"[APP] ❌ Failed to initialize AWS clients: {e}")
+    print(f"[APP] [ERROR] Failed to initialize AWS clients: {e}")
     print("[APP] Please configure AWS credentials using:")
     print("  - AWS CLI: aws configure")
     print("  - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")

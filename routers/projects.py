@@ -153,6 +153,8 @@ def create_new_project(
         project['updated_at'] = int(project['updated_at'].timestamp() * 1000)
         
         return project
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error creating project: {e}")
         raise HTTPException(status_code=500, detail="Failed to create project")
