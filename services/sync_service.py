@@ -18,6 +18,8 @@ from db_helper_vector import (
     upsert_jira_issue,
     get_confluence_page,
     get_jira_issue,
+    get_all_confluence_pages_metadata,
+    get_all_jira_issues_metadata,
     find_existing_embedding,
     insert_document_embedding,
     delete_embeddings
@@ -140,11 +142,16 @@ async def sync_confluence_space(
  
     synced_count = 0
     skipped_count = 0
- 
+
+    # OPTIMIZATION: Bulk fetch all page metadata in 1 DB call instead of N individual calls
+    logger.info(f"[OPTIMIZATION] Bulk-fetching all Confluence page metadata for project {project_id}...")
+    local_pages_map = await asyncio.to_thread(get_all_confluence_pages_metadata, project_id)
+    logger.info(f"[OPTIMIZATION] Loaded {len(local_pages_map)} existing page records in 1 DB call (saved {len(local_pages_map)} individual DB connections)")
+
     for idx, page in enumerate(pages):
         try:
             page_id = page['id']
- 
+
             # Fetch full page details with content (offload blocking HTTP)
             page_url = f"{confluence.base_url}/rest/api/content/{page_id}?expand=body.storage,version"
             response = await asyncio.to_thread(
@@ -152,12 +159,12 @@ async def sync_confluence_space(
             )
             response.raise_for_status()
             full_page = response.json()
- 
+
             version_number = full_page['version']['number']
- 
-            # Check if page needs update (offload blocking DB call)
-            local_page = await asyncio.to_thread(get_confluence_page, project_id, page_id)
- 
+
+            # Check if page needs update (in-memory lookup, NO DB call)
+            local_page = local_pages_map.get(page_id)
+
             needs_update = False
             if not local_page:
                 # New page
@@ -236,7 +243,7 @@ async def sync_jira_project(
  
     synced_count = 0
     skipped_count = 0
- 
+
     def parse_atlassian_date(date_str: str) -> Optional[datetime]:
         if not date_str:
             return None
@@ -252,16 +259,21 @@ async def sync_jira_project(
         except Exception as e:
             logger.error(f"Error parsing date {date_str}: {e}")
             return None
- 
+
+    # OPTIMIZATION: Bulk fetch all issue metadata in 1 DB call instead of N individual calls
+    logger.info(f"[OPTIMIZATION] Bulk-fetching all Jira issue metadata for project {project_id}...")
+    local_issues_map = await asyncio.to_thread(get_all_jira_issues_metadata, project_id)
+    logger.info(f"[OPTIMIZATION] Loaded {len(local_issues_map)} existing issue records in 1 DB call (saved {len(local_issues_map)} individual DB connections)")
+
     for idx, issue in enumerate(issues):
         try:
             issue_key = issue['key']
             fields = issue['fields']
             updated_date_str = fields['updated']
             updated_date = parse_atlassian_date(updated_date_str)
- 
-            # Check if issue needs update (offload blocking DB call)
-            local_issue = await asyncio.to_thread(get_jira_issue, project_id, issue_key)
+
+            # Check if issue needs update (in-memory lookup, NO DB call)
+            local_issue = local_issues_map.get(issue_key)
  
             needs_update = False
             if not local_issue:
