@@ -3355,15 +3355,27 @@ async def get_support_user_guide(current_user: dict = Depends(get_current_user))
 
     style_block = """
     <style>
-      body, .WordSection1 { font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; color: #1a1a1a; }
-      h1, h2, h3, h4 { color: #0f4c81; margin-top: 1.5em; margin-bottom: 0.5em; }
-      p { margin: 0.6em 0; }
-      img { max-width: 100%; height: auto; border-radius: 6px; margin: 12px 0; box-shadow: 0 1px 4px rgba(0,0,0,0.12); }
-      table { border-collapse: collapse; width: 100%; margin: 1em 0; }
-      td, th { border: 1px solid #ddd; padding: 8px 12px; }
-      a { color: #0078d4; }
-      ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
-      li { margin: 0.3em 0; }
+      body, .WordSection1 {
+        font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+        line-height: 1.9; color: #1e293b; font-size: 19px;
+      }
+      h1 { color: #0f172a; font-size: 38px; font-weight: 700; margin: 1.8em 0 0.8em; padding-bottom: 0.4em; border-bottom: 2px solid #e2e8f0; }
+      h2 { color: #1e40af; font-size: 30px; font-weight: 700; margin: 1.8em 0 0.6em; padding-bottom: 0.3em; border-bottom: 1px solid #e2e8f0; }
+      h3 { color: #1e40af; font-size: 24px; font-weight: 600; margin: 1.5em 0 0.5em; }
+      h4 { color: #334155; font-size: 20px; font-weight: 600; margin: 1.2em 0 0.4em; }
+      p { margin: 0.8em 0; color: #374151; font-size: 17px; }
+      img { max-width: 50%; height: auto; border-radius: 10px; margin: 24px 0; display: block; box-shadow: 0 4px 16px rgba(0,0,0,0.12); border: 1px solid #e5e7eb; }
+      table { border-collapse: collapse; width: 100%; margin: 1.2em 0; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+      th { background: #f1f5f9; font-weight: 600; color: #1e293b; text-align: left; }
+      td, th { border: 1px solid #e2e8f0; padding: 10px 14px; font-size: 14px; }
+      tr:nth-child(even) { background: #f8fafc; }
+      a { color: #2563eb; text-decoration: none; font-weight: 500; }
+      a:hover { text-decoration: underline; color: #1d4ed8; }
+      ul, ol { margin: 0.6em 0; padding-left: 1.8em; }
+      li { margin: 0.4em 0; color: #374151; }
+      code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #be185d; }
+      pre { background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+      blockquote { border-left: 4px solid #3b82f6; margin: 1em 0; padding: 0.5em 1em; background: #eff6ff; border-radius: 0 6px 6px 0; }
     </style>
     """
     html_content = style_block + html_content

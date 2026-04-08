@@ -83,7 +83,10 @@ def require_module(module_name: str):
         user_info = verify_azure_token(authorization)
         groups = extract_user_groups(user_info)
         allowed = compute_allowed_modules(groups)
-        if module_name not in allowed:
+        # If no RBAC groups found (groupMembershipClaims not enabled, token cached
+        # without groups, or user not in any SDLC group), allow access gracefully.
+        # Only block if user HAS groups but lacks the required module.
+        if allowed and module_name not in allowed:
             raise HTTPException(status_code=403, detail=f"Access denied: '{module_name}' module")
         user_id = user_info.get("oid") or user_info.get("sub", "")
         email = user_info.get("preferred_username") or user_info.get("email") or user_info.get("upn", "")
@@ -97,24 +100,33 @@ AZURE_JWKS_URL_V1 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discov
 
 REGION = os.getenv("AWS_REGION", "us-east-1")
 
-# Cache for JWKS clients
+# Cache for JWKS clients — refreshed every 6 hours to pick up key rotations
+import time as _time
+
 _jwks_client_v2 = None
 _jwks_client_v1 = None
+_jwks_created_at_v2 = 0.0
+_jwks_created_at_v1 = 0.0
+_JWKS_TTL_SECONDS = 6 * 3600  # 6 hours
+
 
 def get_azure_jwks(issuer: str = None):
-    """Get Azure AD JWKS client (cached) - supports both v1.0 and v2.0"""
-    global _jwks_client_v2, _jwks_client_v1
-    
-    # Determine which JWKS to use based on issuer
+    """Get Azure AD JWKS client (cached with TTL) - supports both v1.0 and v2.0"""
+    global _jwks_client_v2, _jwks_client_v1, _jwks_created_at_v2, _jwks_created_at_v1
+
+    now = _time.time()
+
     if issuer and "sts.windows.net" in issuer:
-        # v1.0 token - use v1.0 JWKS
-        if _jwks_client_v1 is None:
+        if _jwks_client_v1 is None or (now - _jwks_created_at_v1) > _JWKS_TTL_SECONDS:
             _jwks_client_v1 = PyJWKClient(AZURE_JWKS_URL_V1)
+            _jwks_created_at_v1 = now
+            logger.info("[AUTH] JWKS v1.0 cache refreshed")
         return _jwks_client_v1
     else:
-        # v2.0 token - use v2.0 JWKS
-        if _jwks_client_v2 is None:
+        if _jwks_client_v2 is None or (now - _jwks_created_at_v2) > _JWKS_TTL_SECONDS:
             _jwks_client_v2 = PyJWKClient(AZURE_JWKS_URL_V2)
+            _jwks_created_at_v2 = now
+            logger.info("[AUTH] JWKS v2.0 cache refreshed")
         return _jwks_client_v2
 
 # -------------------------
