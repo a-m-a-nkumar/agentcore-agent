@@ -17,6 +17,9 @@ COPY --from=builder /opt/venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 COPY app.py .
 COPY auth.py .
+COPY environment.py .
+COPY env_vdi.py .
+COPY env_local.py .
 COPY db_config.py .
 COPY db_helper.py .
 COPY db_helper_vector.py .

@@ -26,7 +26,7 @@ class ConfluenceService:
         """Test if credentials are valid by fetching current user info"""
         try:
             url = f"{self.base_url}/rest/api/user/current"
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=10)
+            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=30)
             return response.status_code == 200
         except Exception as e:
             logger.error(f"Confluence connection test failed: {e}")
@@ -48,7 +48,7 @@ class ConfluenceService:
             # Paginate through all results
             while True:
                 params = {"limit": limit, "start": start}
-                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
                 response.raise_for_status()
 
                 data = response.json()
@@ -89,7 +89,7 @@ class ConfluenceService:
         try:
             url = f"{self.base_url}/rest/api/space/{space_key}/content/page"
             params = {"limit": limit}
-            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
             response.raise_for_status()
             
             data = response.json()
@@ -116,7 +116,7 @@ class ConfluenceService:
                     "start": start,
                     "expand": "version"  # removed history — was very slow
                 }
-                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 batch = data.get("results", [])
@@ -152,7 +152,7 @@ class ConfluenceService:
                     "start": start,
                     "expand": "version,_links"
                 }
-                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
                 response.raise_for_status()
                 data = response.json()
                 batch = data.get("results", [])
@@ -308,7 +308,7 @@ class ConfluenceService:
         try:
             url = f"{self.base_url}/rest/api/content"
             params = {"spaceKey": space_key, "title": title, "type": "page", "expand": "version"}
-            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
             response.raise_for_status()
             results = response.json().get("results", [])
             return results[0] if results else None

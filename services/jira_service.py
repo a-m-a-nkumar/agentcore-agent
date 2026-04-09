@@ -30,7 +30,7 @@ class JiraService:
         """
         try:
             url = f"{self.base_url}/rest/api/3/myself"
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=10)
+            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=30)
             
             if response.status_code == 200:
                 return (True, None)
@@ -60,9 +60,9 @@ class JiraService:
         """
         try:
             url = f"{self.base_url}/rest/api/3/project"
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=15)
+            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=30)
             response.raise_for_status()
-            
+
             projects = response.json()
             
             # Return simplified project list
@@ -192,7 +192,7 @@ class JiraService:
         try:
             # First get the project details to get the project ID
             url = f"{self.base_url}/rest/api/3/project/{project_key}"
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=15)
+            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=30)
             response.raise_for_status()
             
             project_data = response.json()
@@ -201,7 +201,7 @@ class JiraService:
             # Now get issue types for this project
             url = f"{self.base_url}/rest/api/3/issuetype/project"
             params = {"projectId": project_id}
-            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=15)
+            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
             response.raise_for_status()
             
             issue_types = response.json()
@@ -298,7 +298,7 @@ class JiraService:
                 headers=self.headers,
                 auth=self.auth,
                 params=params,
-                timeout=15
+                timeout=30
             )
             response.raise_for_status()
 

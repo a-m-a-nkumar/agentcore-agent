@@ -91,7 +91,7 @@ def get_sync_status(
     Returns counts of synced pages/issues and whether a sync is currently in progress.
     """
     try:
-        from db_helper_vector import get_all_confluence_pages, get_all_jira_issues
+        from db_helper_vector import get_sync_status_counts
         from db_helper import get_project
         from services.sync_service import get_sync_progress
 
@@ -100,41 +100,25 @@ def get_sync_status(
         is_syncing = progress.get('is_syncing', False) if progress else False
         sync_message = progress.get('message', '') if progress else ''
 
-        # Get project
+        # Get project (1 DB call)
         project = get_project(project_id)
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        # Get counts
-        pages = get_all_confluence_pages(project_id)
-        issues = get_all_jira_issues(project_id)
-
-        # Get embedding count
-        from db_helper import get_db_connection, release_db_connection
-        conn = get_db_connection()
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT COUNT(*) FROM document_embeddings
-                WHERE project_id = %s
-            """, (project_id,))
-            result = cursor.fetchone()
-            embedding_count = result[0] if result else 0
-            cursor.close()
-        finally:
-            release_db_connection(conn)
+        # OPTIMIZATION: Get all counts + last sync times in 1 DB call instead of 3
+        counts = get_sync_status_counts(project_id)
 
         return {
             "project_id": project_id,
             "project_name": project['project_name'],
             "is_syncing": is_syncing,
             "sync_message": sync_message,
-            "confluence_pages": len(pages),
-            "jira_issues": len(issues),
-            "total_embeddings": embedding_count,
+            "confluence_pages": counts['page_count'],
+            "jira_issues": counts['issue_count'],
+            "total_embeddings": counts['embedding_count'],
             "last_synced": {
-                "confluence": pages[0]['updated_at'] if pages else None,
-                "jira": issues[0]['updated_at'] if issues else None
+                "confluence": counts['last_confluence_sync'],
+                "jira": counts['last_jira_sync']
             }
         }
 

@@ -28,6 +28,8 @@ class QueryRequest(BaseModel):
     source_filter: Optional[str] = None
     include_context: Optional[bool] = True
     return_prompt: Optional[bool] = False
+    frontend_requirements: Optional[str] = None
+    backend_requirements: Optional[str] = None
 
 
 # ============================================
@@ -59,7 +61,9 @@ async def query_internal(
                 project_id=request.project_id,
                 user_query=request.query,
                 max_chunks=request.max_chunks,
-                source_filter=request.source_filter
+                source_filter=request.source_filter,
+                frontend_requirements=request.frontend_requirements or "",
+                backend_requirements=request.backend_requirements or "",
             )
         except Exception as e:
             logger.error(f"Error generating enhanced prompt: {e}")
