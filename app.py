@@ -32,6 +32,9 @@ from routers.orchestration_internal import router as orchestration_internal_rout
 from routers.test_generation import router as test_generation_router
 from routers.test_internal import router as test_internal_router
 from routers.design import router as design_router
+from routers.harness import router as harness_router
+from routers.pipeline_generator import router as pipeline_generator_router
+from routers.terraform_generator import router as terraform_generator_router
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
 
@@ -95,6 +98,9 @@ app.include_router(jira_generation_router)
 app.include_router(test_generation_router)
 app.include_router(test_internal_router)
 app.include_router(design_router)
+app.include_router(harness_router)
+app.include_router(pipeline_generator_router)
+app.include_router(terraform_generator_router)
 
 # Add request logging middleware
 @app.middleware("http")
@@ -232,6 +238,21 @@ async def get_current_user(request: Request) -> dict:
     try:
         user_info = verify_azure_token(token)
         print(f"[AUTH] Token verified successfully for user: {user_info.get('email') or user_info.get('preferred_username')}")
+        # --- SECURITY DEBUG: log all Azure AD token claims ---
+        print(f"[AUTH] ===== FULL TOKEN CLAIMS =====")
+        print(f"[AUTH] oid       : {user_info.get('oid')}")
+        print(f"[AUTH] sub       : {user_info.get('sub')}")
+        print(f"[AUTH] email     : {user_info.get('preferred_username') or user_info.get('email')}")
+        print(f"[AUTH] name      : {user_info.get('name')}")
+        print(f"[AUTH] roles     : {user_info.get('roles', [])}")
+        print(f"[AUTH] groups    : {user_info.get('groups', [])}")
+        print(f"[AUTH] scp       : {user_info.get('scp')}")
+        print(f"[AUTH] tid       : {user_info.get('tid')}")
+        print(f"[AUTH] iss       : {user_info.get('iss')}")
+        print(f"[AUTH] aud       : {user_info.get('aud')}")
+        print(f"[AUTH] all claims: {list(user_info.keys())}")
+        print(f"[AUTH] ================================")
+        # --- END SECURITY DEBUG ---
     except HTTPException as e:
         print(f"[AUTH] Token verification failed: {e.detail}")
         raise
@@ -271,7 +292,8 @@ async def get_current_user(request: Request) -> dict:
         "user_id": user_id,
         "email": email,
         "name": name,
-        "token": token
+        "token": token,
+        "groups": user_info.get("groups", [])  # Azure AD security group Object IDs
     }
 
 def render_brd_json_to_text(brd_data: dict) -> str:
@@ -690,7 +712,7 @@ async def generate_brd(
         print("\n" + "="*80)
         print("[APP] Starting BRD generation")
         print("="*80)
-        
+
         # 1. Read files
         transcript_content = await transcript.read()
         template_content = await template.read()
@@ -908,6 +930,19 @@ async def generate_brd_from_s3(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate BRD from transcript in S3 and template in S3"""
+    # --- SECURITY GROUP CHECK: admin_deluxe only (OID: 6eeb201b-93f7-4e44-b836-85fde485a3e9) ---
+    ADMIN_DELUXE_OID = "6eeb201b-93f7-4e44-b836-85fde485a3e9"
+    user_groups = current_user.get("groups", [])
+    print(f"[AUTH] /api/generate-from-s3 - user groups: {user_groups}")
+    if ADMIN_DELUXE_OID not in user_groups:
+        print(f"[AUTH] /api/generate-from-s3 - ACCESS DENIED for user: {current_user.get('email')} | groups: {user_groups}")
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: only members of the 'admin_deluxe' group can generate BRDs"
+        )
+    print(f"[AUTH] /api/generate-from-s3 - ACCESS GRANTED for user: {current_user.get('email')}")
+    # --- END SECURITY GROUP CHECK ---
+
     try:
         print("\n" + "="*80)
         print("[APP] Starting BRD generation from S3")
