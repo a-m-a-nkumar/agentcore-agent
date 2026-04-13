@@ -9,6 +9,10 @@ Write-Host "  AgentCore Backend Server" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
+# Navigate to the backend directory
+$BackendPath = "C:\Users\t479164\Desktop\development\sdlc_python_fastapi_backend"
+Set-Location -Path $BackendPath
+
 # Step 1: Check if virtual environment exists
 Write-Host "[1/5] Checking virtual environment..." -ForegroundColor Yellow
 if (-Not (Test-Path ".\.venv\Scripts\Activate.ps1")) {

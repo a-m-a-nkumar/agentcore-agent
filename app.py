@@ -155,11 +155,14 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
 # Import authentication functions
 from auth import (
-    verify_azure_token, 
-    store_user_identity_in_agentcore, 
+    verify_azure_token,
+    store_user_identity_in_agentcore,
     check_brd_access_via_agentcore,
     grant_brd_access_via_agentcore,
-    revoke_brd_access_via_agentcore
+    revoke_brd_access_via_agentcore,
+    extract_user_groups,
+    compute_allowed_modules,
+    require_module,
 )
 
 # Setup templates
@@ -260,36 +263,26 @@ async def get_current_user(request: Request) -> dict:
     user_id = user_info.get("oid") or user_info.get("sub")
     email = user_info.get("email") or user_info.get("preferred_username")
     name = user_info.get("name")
-    
+
     print(f"[AUTH] User ID: {user_id}, Email: {email}")
-    
-    # Check BRD access via AgentCore Identity
-    try:
-        has_access = check_brd_access_via_agentcore(user_id)
-        print(f"[AUTH] BRD access check result: {has_access}")
-    except Exception as e:
-        print(f"[AUTH] Error checking BRD access: {e}, defaulting to allow")
-        has_access = True  # Default to allow on error
-    
-    if not has_access:
-        raise HTTPException(status_code=403, detail="Access denied: You do not have permission to access BRD features")
-    
+
+    groups = extract_user_groups(user_info)
+    allowed_modules = compute_allowed_modules(groups)
+    print(f"[AUTH] Groups: {groups}, Allowed modules: {allowed_modules}")
+
     # Store user identity in AgentCore if not exists
     try:
-        store_user_identity_in_agentcore(
-            user_id=user_id,
-            email=email,
-            name=name or ""
-        )
+        store_user_identity_in_agentcore(user_id=user_id, email=email, name=name or "")
     except Exception as e:
         print(f"[AUTH] Warning: Failed to store user identity in AgentCore: {e}")
-        # Don't fail the request if identity storage fails
-    
+
     return {
         "user_id": user_id,
         "email": email,
         "name": name,
-        "token": token
+        "token": token,
+        "groups": groups,
+        "allowed_modules": allowed_modules,
     }
 
 def render_brd_json_to_text(brd_data: dict) -> str:
@@ -731,17 +724,20 @@ async def generate_brd(
         print(f"[APP] Transcript file: {transcript.filename} ({len(transcript_content)} bytes)")
         print(f"[APP] Template file: {template.filename} ({len(template_content)} bytes)")
         
-        # 2. Extract text
-        if transcript.filename.endswith(".docx"):
-            transcript_text = read_docx(transcript_content)
-        else:
-            transcript_text = transcript_content.decode("utf-8", errors="replace")
-            
+        # 2. Extract text (supports .docx, .pdf, .txt)
+        transcript_text = extract_text(transcript_content, transcript.filename)
+
         template_text = read_docx(template_content)
-        
+
         print(f"[APP] Transcript text: {len(transcript_text)} chars")
         print(f"[APP] Template text: {len(template_text)} chars")
-        
+
+        # Validate transcript is not empty
+        if not transcript_text or len(transcript_text.strip()) < 50:
+            return JSONResponse(status_code=400, content={
+                "error": "Transcript is empty or too short. Please upload a transcript with meaningful content."
+            })
+
         # 3. Prepare Payload (with BMAD persona/workflow overlay if available)
         base_prompt = "Generate a BRD based on the provided template and transcript."
         bmad_prompt = _build_bmad_prompt(base_prompt, workflow_key="create-prd")
@@ -996,7 +992,13 @@ async def generate_brd_from_s3(
 
         print(f"[APP] Transcript text: {len(transcript_text)} chars")
         print(f"[APP] Template text: {len(template_text)} chars")
-        
+
+        # Validate transcript is not empty
+        if not transcript_text or len(transcript_text.strip()) < 50:
+            return JSONResponse(status_code=400, content={
+                "error": "Transcript is empty or too short. Please upload a transcript with meaningful content."
+            })
+
         # 4. Prepare Payload (same as /generate endpoint, with BMAD overlay if available)
         base_prompt = "Generate a BRD based on the provided template and transcript."
         bmad_prompt = _build_bmad_prompt(base_prompt, workflow_key="create-prd")
@@ -3261,15 +3263,124 @@ async def check_brd_access(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/user/info")
 async def get_user_info(current_user: dict = Depends(get_current_user)):
-    """Get current user information"""
+    """Get current user information including group-based module access"""
     user_id = current_user["user_id"]
     identity_arn = get_user_identity_arn(user_id)
-    
     return JSONResponse(content={
         "user_id": user_id,
         "email": current_user["email"],
-        "identity_arn": identity_arn
+        "name": current_user.get("name", ""),
+        "identity_arn": identity_arn,
+        "groups": current_user.get("groups", []),
+        "allowed_modules": current_user.get("allowed_modules", []),
     })
+
+
+@app.get("/api/support/user-guide")
+async def get_support_user_guide(current_user: dict = Depends(get_current_user)):
+    """Return the user guide HTML extracted from the MHTML .doc in S3."""
+    import email as email_lib
+    import base64 as b64
+
+    s3_client = get_s3_client()
+    try:
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET_NAME,
+            Key="support/SDLC_Orchestrator_Userguide_ForTesting.doc",
+        )
+        raw = response["Body"].read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load user guide from S3: {e}")
+
+    msg = email_lib.message_from_string(raw)
+    image_map: dict[str, str] = {}
+    html_content = ""
+
+    for part in msg.walk():
+        ct = part.get_content_type()
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        if "html" in ct:
+            html_content = payload.decode("utf-8", errors="ignore")
+            continue
+        if ct.startswith("multipart/"):
+            continue
+        mime = ct
+        if ct == "application/octet-stream":
+            if payload[:8] == b"\x89PNG\r\n\x1a\n":
+                mime = "image/png"
+            elif payload[:2] == b"\xff\xd8":
+                mime = "image/jpeg"
+            elif payload[:4] == b"GIF8":
+                mime = "image/gif"
+            else:
+                mime = "image/png"
+        data_uri = f"data:{mime};base64,{b64.b64encode(payload).decode()}"
+        loc = part.get("Content-Location", "")
+        if loc:
+            image_map[loc] = data_uri
+            fname = loc.rsplit("/", 1)[-1] if "/" in loc else loc
+            if fname:
+                image_map[fname] = data_uri
+        cid = part.get("Content-ID", "").strip("<>")
+        if cid:
+            image_map[f"cid:{cid}"] = data_uri
+
+    if not html_content:
+        raise HTTPException(status_code=500, detail="Could not extract HTML from user guide")
+
+    for ref in sorted(image_map, key=len, reverse=True):
+        html_content = html_content.replace(ref, image_map[ref])
+
+    # Add IDs to headings so the frontend can scroll to specific sections
+    import re as _re
+
+    def _slugify(text: str) -> str:
+        clean = _re.sub(r"<[^>]+>", "", text).strip()
+        return _re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")
+
+    def _add_heading_ids(html: str) -> str:
+        def _replacer(m):
+            tag = m.group(1)
+            attrs = m.group(2)
+            content = m.group(3)
+            slug = _slugify(content)
+            if slug:
+                return f"<{tag}{attrs} id=\"{slug}\">{content}</{tag}>"
+            return m.group(0)
+        return _re.sub(r"<(h[1-4])([^>]*)>(.*?)</\1>", _replacer, html, flags=_re.DOTALL | _re.IGNORECASE)
+
+    html_content = _add_heading_ids(html_content)
+
+    style_block = """
+    <style>
+      body, .WordSection1 {
+        font-family: 'Segoe UI', -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+        line-height: 1.9; color: #1e293b; font-size: 19px;
+      }
+      h1 { color: #0f172a; font-size: 38px; font-weight: 700; margin: 1.8em 0 0.8em; padding-bottom: 0.4em; border-bottom: 2px solid #e2e8f0; }
+      h2 { color: #1e40af; font-size: 30px; font-weight: 700; margin: 1.8em 0 0.6em; padding-bottom: 0.3em; border-bottom: 1px solid #e2e8f0; }
+      h3 { color: #1e40af; font-size: 24px; font-weight: 600; margin: 1.5em 0 0.5em; }
+      h4 { color: #334155; font-size: 20px; font-weight: 600; margin: 1.2em 0 0.4em; }
+      p { margin: 0.8em 0; color: #374151; font-size: 17px; }
+      img { max-width: 50%; height: auto; border-radius: 10px; margin: 24px 0; display: block; box-shadow: 0 4px 16px rgba(0,0,0,0.12); border: 1px solid #e5e7eb; }
+      table { border-collapse: collapse; width: 100%; margin: 1.2em 0; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+      th { background: #f1f5f9; font-weight: 600; color: #1e293b; text-align: left; }
+      td, th { border: 1px solid #e2e8f0; padding: 10px 14px; font-size: 14px; }
+      tr:nth-child(even) { background: #f8fafc; }
+      a { color: #2563eb; text-decoration: none; font-weight: 500; }
+      a:hover { text-decoration: underline; color: #1d4ed8; }
+      ul, ol { margin: 0.6em 0; padding-left: 1.8em; }
+      li { margin: 0.4em 0; color: #374151; }
+      code { background: #f1f5f9; padding: 2px 6px; border-radius: 4px; font-size: 13px; color: #be185d; }
+      pre { background: #1e293b; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow-x: auto; font-size: 13px; }
+      blockquote { border-left: 4px solid #3b82f6; margin: 1em 0; padding: 0.5em 1em; background: #eff6ff; border-radius: 0 6px 6px 0; }
+    </style>
+    """
+    html_content = style_block + html_content
+    return JSONResponse(content={"html": html_content})
+
 
 @app.post("/api/admin/grant-brd-access")
 async def grant_brd_access(

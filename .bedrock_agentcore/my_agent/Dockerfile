@@ -23,8 +23,7 @@ ENV UV_SYSTEM_PYTHON=1 \
 
 
 
-# Use lean agent-only requirements (NOT the full backend requirements.txt)
-COPY requirements-agent.txt requirements.txt
+COPY requirements.txt requirements.txt
 RUN uv pip install -r requirements.txt
 
 

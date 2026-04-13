@@ -63,11 +63,52 @@ def get_confluence_page(project_id: str, page_id: str) -> Optional[Dict]:
             SELECT * FROM confluence_pages
             WHERE project_id = %s AND page_id = %s
         """, (project_id, page_id))
-        
+
         result = cursor.fetchone()
         cursor.close()
-        
+
         return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
+
+
+def get_all_confluence_pages_metadata(project_id: str) -> Dict[str, Dict]:
+    """Bulk fetch page_id -> {version_number, ...} for all pages in a project (single DB call)"""
+    logger.info(f"[BULK_FETCH] Fetching all Confluence page metadata for project {project_id} in one query")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT page_id, version_number, updated_at
+            FROM confluence_pages WHERE project_id = %s
+        """, (project_id,))
+        results = cursor.fetchall()
+        cursor.close()
+        metadata_map = {r['page_id']: dict(r) for r in results}
+        logger.info(f"[BULK_FETCH] Loaded {len(metadata_map)} Confluence page metadata records in 1 DB call (instead of {len(metadata_map)} individual calls)")
+        return metadata_map
+    finally:
+        release_db_connection(conn)
+
+
+def get_sync_status_counts(project_id: str) -> Dict:
+    """Get page count, issue count, embedding count, and last sync times in ONE query (1 DB call instead of 3)"""
+    logger.info(f"[OPTIMIZATION] Fetching all sync status counts for project {project_id} in a single query")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM confluence_pages WHERE project_id = %s) as page_count,
+                (SELECT MAX(updated_at) FROM confluence_pages WHERE project_id = %s) as last_confluence_sync,
+                (SELECT COUNT(*) FROM jira_issues WHERE project_id = %s) as issue_count,
+                (SELECT MAX(updated_at) FROM jira_issues WHERE project_id = %s) as last_jira_sync,
+                (SELECT COUNT(*) FROM document_embeddings WHERE project_id = %s) as embedding_count
+        """, (project_id, project_id, project_id, project_id, project_id))
+        result = cursor.fetchone()
+        cursor.close()
+        logger.info(f"[OPTIMIZATION] Got all sync counts in 1 DB call: {result['page_count']} pages, {result['issue_count']} issues, {result['embedding_count']} embeddings")
+        return dict(result)
     finally:
         release_db_connection(conn)
 
@@ -181,14 +222,32 @@ def get_jira_issue(project_id: str, issue_key: str) -> Optional[Dict]:
             SELECT * FROM jira_issues
             WHERE project_id = %s AND issue_key = %s
         """, (project_id, issue_key))
-        
+
         result = cursor.fetchone()
         cursor.close()
-        
+
         return dict(result) if result else None
     finally:
         release_db_connection(conn)
 
+
+def get_all_jira_issues_metadata(project_id: str) -> Dict[str, Dict]:
+    """Bulk fetch issue_key -> {updated_date, ...} for all issues in a project (single DB call)"""
+    logger.info(f"[BULK_FETCH] Fetching all Jira issue metadata for project {project_id} in one query")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT issue_key, updated_date, updated_at
+            FROM jira_issues WHERE project_id = %s
+        """, (project_id,))
+        results = cursor.fetchall()
+        cursor.close()
+        metadata_map = {r['issue_key']: dict(r) for r in results}
+        logger.info(f"[BULK_FETCH] Loaded {len(metadata_map)} Jira issue metadata records in 1 DB call (instead of {len(metadata_map)} individual calls)")
+        return metadata_map
+    finally:
+        release_db_connection(conn)
 
 
 def get_all_jira_issues(project_id: str) -> List[Dict]:

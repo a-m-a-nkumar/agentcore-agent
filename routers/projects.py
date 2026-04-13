@@ -124,15 +124,18 @@ def create_new_project(
     """
     try:
         user_id = current_user["id"]
-        
-        project = create_project(
-            project_id=project_data.project_id,
-            user_id=user_id,
-            project_name=project_data.project_name,
-            description=project_data.description,
-            jira_project_key=project_data.jira_project_key,
-            confluence_space_key=project_data.confluence_space_key
-        )
+
+        try:
+            project = create_project(
+                project_id=project_data.project_id,
+                user_id=user_id,
+                project_name=project_data.project_name,
+                description=project_data.description,
+                jira_project_key=project_data.jira_project_key,
+                confluence_space_key=project_data.confluence_space_key
+            )
+        except ValueError as ve:
+            raise HTTPException(status_code=409, detail=str(ve))
         
         # Trigger initial sync in background if Jira or Confluence is configured
         if project_data.jira_project_key or project_data.confluence_space_key:
