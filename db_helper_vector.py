@@ -443,6 +443,191 @@ def search_embeddings(
         release_db_connection(conn)
 
 
+def _build_or_tsquery(query_text: str) -> str:
+    """
+    Build an OR-based tsquery string from raw text.
+    Splits into words, removes short/stop words, joins with ' | '.
+    Returns a string safe for to_tsquery('english', ...).
+    """
+    import re
+    words = re.findall(r'[a-zA-Z0-9]+', query_text.lower())
+    # Filter out very short words (likely stop words or noise)
+    stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+                  'do', 'does', 'did', 'has', 'have', 'had', 'it', 'its',
+                  'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from',
+                  'and', 'or', 'not', 'but', 'so', 'if', 'as', 'that', 'this',
+                  'what', 'how', 'all', 'can', 'will', 'my', 'i', 'we', 'they'}
+    terms = [w for w in words if len(w) >= 2 and w not in stop_words]
+    if not terms:
+        return None
+    return ' | '.join(terms)
+
+
+def keyword_search(
+    project_id: str,
+    query_text: str,
+    limit: int = 20,
+    source_type: Optional[str] = None
+) -> List[Dict]:
+    """
+    Full-text keyword search using OR-based matching and BM25-style ranking.
+    Uses OR logic so chunks matching ANY query term are returned,
+    ranked by how many terms they contain (via ts_rank_cd).
+
+    Args:
+        project_id: Project ID to search within
+        query_text: Raw user query text
+        limit: Number of results to return
+        source_type: Optional filter by source type ('confluence' or 'jira')
+
+    Returns:
+        List of matching documents with bm25_rank scores
+    """
+    or_query = _build_or_tsquery(query_text)
+    if not or_query:
+        logger.info(f"[KEYWORD_SEARCH] No valid terms in query: {query_text[:50]}...")
+        return []
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        if source_type:
+            query = """
+                SELECT *,
+                       ts_rank_cd(content_tsvector, to_tsquery('english', %s)) AS bm25_rank
+                FROM document_embeddings
+                WHERE project_id = %s AND source_type = %s
+                  AND content_tsvector @@ to_tsquery('english', %s)
+                ORDER BY bm25_rank DESC
+                LIMIT %s
+            """
+            params = (or_query, project_id, source_type, or_query, limit)
+        else:
+            query = """
+                SELECT *,
+                       ts_rank_cd(content_tsvector, to_tsquery('english', %s)) AS bm25_rank
+                FROM document_embeddings
+                WHERE project_id = %s
+                  AND content_tsvector @@ to_tsquery('english', %s)
+                ORDER BY bm25_rank DESC
+                LIMIT %s
+            """
+            params = (or_query, project_id, or_query, limit)
+
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        cursor.close()
+
+        logger.info(f"[KEYWORD_SEARCH] Found {len(results)} results for query: {query_text[:50]}... (terms: {or_query[:60]})")
+        return [dict(row) for row in results]
+    except Exception as e:
+        logger.error(f"[KEYWORD_SEARCH] Error: {e}")
+        return []
+    finally:
+        release_db_connection(conn)
+
+
+def rrf_fuse(
+    ranked_lists: List[List[Dict]],
+    k: int = 60,
+    limit: int = 10
+) -> List[Dict]:
+    """
+    Reciprocal Rank Fusion — merge multiple ranked result lists into one.
+
+    Args:
+        ranked_lists: List of ranked result lists (each from a different retriever)
+        k: RRF constant (default 60, from original paper)
+        limit: Number of results to return after fusion
+
+    Returns:
+        Fused and deduplicated results sorted by RRF score
+    """
+    scores = {}       # key -> cumulative RRF score
+    doc_map = {}      # key -> best result dict
+
+    for ranked_list in ranked_lists:
+        for rank, doc in enumerate(ranked_list, start=1):
+            key = (doc.get('source_id', ''), doc.get('chunk_index', 0))
+            rrf_contribution = 1.0 / (k + rank)
+            scores[key] = scores.get(key, 0.0) + rrf_contribution
+
+            if key not in doc_map:
+                doc_map[key] = doc
+
+    sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+
+    results = []
+    for key in sorted_keys[:limit]:
+        doc = dict(doc_map[key])
+        doc['rrf_score'] = scores[key]
+        if 'similarity' not in doc and 'bm25_rank' in doc:
+            doc['similarity'] = doc['bm25_rank']
+        results.append(doc)
+
+    logger.info(f"[RRF_FUSE] Fused {sum(len(rl) for rl in ranked_lists)} candidates into {len(results)} results")
+    return results
+
+
+def hybrid_search(
+    project_id: str,
+    query_text: str,
+    query_embedding: List[float],
+    limit: int = 10,
+    source_type: Optional[str] = None
+) -> List[Dict]:
+    """
+    Hybrid search combining vector similarity and BM25 keyword search via RRF.
+
+    Args:
+        project_id: Project ID to search within
+        query_text: Raw query text for keyword search
+        query_embedding: Query vector for similarity search
+        limit: Number of final results to return
+        source_type: Optional filter by source type ('confluence' or 'jira')
+
+    Returns:
+        List of results fused via RRF, each with 'rrf_score' field
+    """
+    candidate_limit = limit * 3
+
+    # 1. Vector search (existing function)
+    logger.info(f"[HYBRID] Running vector search for project {project_id}")
+    vector_results = search_embeddings(
+        project_id=project_id,
+        query_embedding=query_embedding,
+        limit=candidate_limit,
+        source_type=source_type
+    )
+
+    # 2. Keyword/BM25 search
+    logger.info(f"[HYBRID] Running keyword search for project {project_id}")
+    keyword_results = keyword_search(
+        project_id=project_id,
+        query_text=query_text,
+        limit=candidate_limit,
+        source_type=source_type
+    )
+
+    # 3. If keyword search returned nothing, fall back to vector-only
+    if not keyword_results:
+        logger.info(f"[HYBRID] No keyword matches — using vector-only results")
+        for doc in vector_results:
+            doc['rrf_score'] = doc.get('similarity', 0.0)
+        return vector_results[:limit]
+
+    # 4. Fuse via RRF
+    logger.info(f"[HYBRID] Fusing {len(vector_results)} vector + {len(keyword_results)} keyword results")
+    fused = rrf_fuse(
+        ranked_lists=[vector_results, keyword_results],
+        k=60,
+        limit=limit
+    )
+
+    return fused
+
+
 def get_surrounding_chunks(
     project_id: str,
     source_id: str,

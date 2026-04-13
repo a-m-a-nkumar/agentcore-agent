@@ -5,7 +5,7 @@ Handles embedding generation, vector search, and context assembly
 
 from typing import List, Dict, Optional, Any
 from services.embedding_service import embedding_service
-from db_helper_vector import search_embeddings, get_surrounding_chunks_batch
+from db_helper_vector import search_embeddings, get_surrounding_chunks_batch, hybrid_search
 import logging
 
 logger = logging.getLogger(__name__)
@@ -40,10 +40,11 @@ class SearchService:
             logger.info(f"Generating embedding for query: {query}")
             query_embedding = embedding_service.generate_embedding(query)
             
-            # 2. Search embeddings
-            logger.info(f"Searching embeddings in project {project_id}")
-            results = search_embeddings(
+            # 2. Hybrid search (vector + BM25 keyword, fused via RRF)
+            logger.info(f"[HYBRID] Running hybrid search in project {project_id}")
+            results = hybrid_search(
                 project_id=project_id,
+                query_text=query,
                 query_embedding=query_embedding,
                 limit=limit,
                 source_type=source_type
@@ -99,7 +100,7 @@ class SearchService:
                     'title': result['title'],
                     'content': content,
                     'url': result.get('url', ''),
-                    'similarity': float(result['similarity']),
+                    'similarity': float(result.get('similarity', result.get('rrf_score', 0))),
                     'chunk_index': result['chunk_index'],
                     'metadata': result.get('metadata', {})
                 })
