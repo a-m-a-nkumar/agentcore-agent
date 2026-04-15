@@ -114,7 +114,7 @@ class ConfluenceService:
                     "type": "page",
                     "limit": batch_size,
                     "start": start,
-                    "expand": "version"  # removed history — was very slow
+                    "expand": "version,ancestors"  # ancestors gives parent-child hierarchy
                 }
                 response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
                 response.raise_for_status()

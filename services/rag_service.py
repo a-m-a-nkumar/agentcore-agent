@@ -152,17 +152,17 @@ class RAGService:
             if not source_filter:
                 source_filter = self._detect_source_filter(user_query)
  
-            # Step 1 & 2: Use centralized search service (eliminates duplication and uses batch operations)
-            logger.info(f"Querying search service for: {user_query[:50]}... (source_filter={source_filter})")
+            # Step 1 & 2: Multi-query hybrid search (query rewriting + vector + BM25 + RRF)
+            logger.info(f"Querying multi-query search for: {user_query[:50]}... (source_filter={source_filter})")
             with langfuse.start_as_current_observation(
                 as_type="span",
                 name="rag.search",
                 metadata={"query_length": len(user_query), "project_id": project_id, "max_chunks": max_chunks, "source_filter": source_filter or ""},
             ):
-                results = search_service.semantic_search(
+                results = self._multi_query_search(
                     project_id=project_id,
-                    query=user_query,
-                    limit=max_chunks,
+                    user_query=user_query,
+                    max_chunks=max_chunks,
                     source_type=source_filter,
                     include_context=include_context
                 )
@@ -253,11 +253,11 @@ class RAGService:
         Does NOT call the LLM, just returns the prompt string.
         """
         try:
-            # 1. Search
-            results = search_service.semantic_search(
+            # 1. Multi-query hybrid search
+            results = self._multi_query_search(
                 project_id=project_id,
-                query=user_query,
-                limit=max_chunks,
+                user_query=user_query,
+                max_chunks=max_chunks,
                 source_type=source_filter,
                 include_context=True
             )
@@ -284,7 +284,7 @@ class RAGService:
             print(f"[RAG ENHANCE] User Query     : {user_query}")
             print(f"[RAG ENHANCE] Frontend Reqs  : {frontend_requirements or '(not specified)'}")
             print(f"[RAG ENHANCE] Backend Reqs   : {backend_requirements or '(not specified)'}")
-            print(f"[RAG ENHANCE] RAG chunks ({len(context_chunks)}):")
+            print(f"[RAG ENHANCE] RAG chunks ({len(context_chunks)}) via multi-query hybrid search:")
             for i, chunk in enumerate(context_chunks, 1):
                 snippet = chunk['content'][:300].replace('\n', ' ')
                 print(f"  [{i}] {chunk['source']}")
@@ -355,6 +355,152 @@ Optimized Prompt:"""
             return 'confluence'
         return None
  
+    def _rewrite_query(self, user_query: str) -> List[str]:
+        """
+        Use the LLM to generate 3 alternative search queries for the user's question.
+        Returns list of up to 3 rewritten queries (does NOT include the original).
+        Falls back to empty list if LLM call fails.
+        """
+        prompt = f"""You are a search query optimizer for a software project knowledge base containing Confluence BRDs and Jira user stories.
+
+Given the developer's request, generate exactly 3 alternative search queries. Each must approach the topic differently:
+
+1. A specific technical query mentioning exact technologies, protocols, or standards relevant to this request
+2. A broader query capturing related business concepts, workflows, and adjacent features
+3. ONLY raw keywords separated by spaces — no sentence structure, just 5-8 domain-specific technical terms (e.g. "tokenization PCI vault card encryption recurring")
+
+Developer request: {user_query}
+
+Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
+
+        try:
+            logger.info(f"[QUERY_REWRITE] Rewriting query: {user_query[:50]}...")
+            response = chat_completion(
+                messages=[{"role": "user", "content": prompt}],
+                model="Claude-4.5-Haiku",
+                temperature=0.3,
+                max_tokens=256,
+            )
+
+            if not response:
+                logger.warning("[QUERY_REWRITE] Empty response from LLM, using original query only")
+                return []
+
+            lines = []
+            for line in response.strip().split('\n'):
+                line = line.strip()
+                if not line:
+                    continue
+                cleaned = re.sub(r'^\d+[\.\)\-\:]\s*', '', line).strip()
+                if cleaned:
+                    lines.append(cleaned)
+
+            rewritten = lines[:3]
+            logger.info(f"[QUERY_REWRITE] Generated {len(rewritten)} alternative queries")
+            for i, q in enumerate(rewritten, 1):
+                logger.info(f"[QUERY_REWRITE]   {i}. {q[:80]}")
+
+            return rewritten
+
+        except Exception as e:
+            logger.error(f"[QUERY_REWRITE] Failed to rewrite query: {e}")
+            return []
+
+    def _multi_query_search(
+        self,
+        project_id: str,
+        user_query: str,
+        max_chunks: int = 10,
+        source_type: Optional[str] = None,
+        include_context: bool = True
+    ) -> List[Dict[str, Any]]:
+        """
+        Multi-query search: rewrite the user query into variants, run hybrid search
+        on each in parallel, and merge results with appearance-based boosting.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        # Step 1: Generate query variants (original + up to 3 rewrites)
+        rewritten_queries = self._rewrite_query(user_query)
+        all_queries = [user_query] + rewritten_queries
+        logger.info(f"[MULTI_QUERY] Searching with {len(all_queries)} query variants")
+
+        # Step 2: Run hybrid search for each query variant IN PARALLEL
+        per_query_limit = max(max_chunks, 5)
+
+        def _run_search(query_idx_and_query):
+            idx, query = query_idx_and_query
+            logger.info(f"[MULTI_QUERY] Running search {idx+1}/{len(all_queries)}: {query[:60]}...")
+            results = search_service.semantic_search(
+                project_id=project_id,
+                query=query,
+                limit=per_query_limit,
+                source_type=source_type,
+                include_context=include_context
+            )
+            logger.info(f"[MULTI_QUERY] Query {idx+1} returned {len(results)} results")
+            return idx, results
+
+        all_result_lists = [None] * len(all_queries)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = [executor.submit(_run_search, (i, q)) for i, q in enumerate(all_queries)]
+            for future in as_completed(futures):
+                idx, results = future.result()
+                all_result_lists[idx] = results
+
+        # Step 3: Merge across queries with appearance-based boosting
+        score_map = {}
+        doc_map = {}
+        appearance_count = {}
+
+        for query_idx, results in enumerate(all_result_lists):
+            if not results:
+                continue
+            for rank, result in enumerate(results, start=1):
+                key = (result.get('source_id', ''), result.get('chunk_index', 0))
+
+                rrf_contribution = 1.0 / (60 + rank)
+
+                # Boost original query results (1.5x) to preserve user intent
+                if query_idx == 0:
+                    rrf_contribution *= 1.5
+
+                score_map[key] = score_map.get(key, 0.0) + rrf_contribution
+                appearance_count[key] = appearance_count.get(key, 0) + 1
+
+                if key not in doc_map or result.get('similarity', 0) > doc_map[key].get('similarity', 0):
+                    doc_map[key] = result
+
+        # Step 4: Apply appearance bonus + title matching bonus
+        query_terms = set(re.findall(r'[a-zA-Z]+', user_query.lower()))
+        for key in score_map:
+            count = appearance_count[key]
+            # Appearance bonus: +10% per additional query that found this chunk
+            if count > 1:
+                score_map[key] *= (1.0 + 0.1 * (count - 1))
+
+            # Title bonus: +20% if chunk title contains query terms
+            doc = doc_map[key]
+            title_lower = doc.get('title', '').lower()
+            title_hits = sum(1 for t in query_terms if t in title_lower and len(t) >= 3)
+            if title_hits >= 2:
+                score_map[key] *= 1.2
+            elif title_hits == 1:
+                score_map[key] *= 1.1
+
+        # Sort by score and take top max_chunks
+        sorted_keys = sorted(score_map.keys(), key=lambda x: score_map[x], reverse=True)
+
+        merged_results = []
+        for key in sorted_keys[:max_chunks]:
+            result = dict(doc_map[key])
+            result['rrf_score'] = score_map[key]
+            result['query_appearances'] = appearance_count[key]
+            merged_results.append(result)
+
+        logger.info(f"[MULTI_QUERY] Merged {sum(len(rl) for rl in all_result_lists if rl)} total results into {len(merged_results)} unique results")
+        return merged_results
+
     def _build_rag_prompt(self, query: str, context_chunks: List[Dict]) -> str:
         """Build prompt for Claude with context"""
  
