@@ -3,6 +3,7 @@ import uuid
 import hashlib
 import json
 import re
+import asyncio
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
@@ -32,6 +33,9 @@ from routers.orchestration_internal import router as orchestration_internal_rout
 from routers.test_generation import router as test_generation_router
 from routers.test_internal import router as test_internal_router
 from routers.design import router as design_router
+from routers.harness import router as harness_router
+from routers.pipeline_generator import router as pipeline_generator_router
+from routers.terraform_generator import router as terraform_generator_router
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session
 # Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
@@ -103,6 +107,9 @@ app.include_router(jira_generation_router)
 app.include_router(test_generation_router)
 app.include_router(test_internal_router)
 app.include_router(design_router)
+app.include_router(harness_router)
+app.include_router(pipeline_generator_router)
+app.include_router(terraform_generator_router)
 
 # Add request logging middleware
 @app.middleware("http")
@@ -762,11 +769,15 @@ async def generate_brd(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = agent_core_client.invoke_agent_runtime(
-                agentRuntimeArn=AGENT_ARN,
-                runtimeSessionId=session_id,
-                payload=payload_bytes,
-                qualifier="DEFAULT"
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: agent_core_client.invoke_agent_runtime(
+                    agentRuntimeArn=AGENT_ARN,
+                    runtimeSessionId=session_id,
+                    payload=payload_bytes,
+                    qualifier="DEFAULT"
+                )
             )
         except Exception as timeout_error:
             if "timeout" in str(timeout_error).lower() or "ReadTimeoutError" in str(type(timeout_error).__name__):
@@ -1021,11 +1032,15 @@ async def generate_brd_from_s3(
         agent_core_client = get_agent_core_client()
         
         try:
-                        response = agent_core_client.invoke_agent_runtime(
-                agentRuntimeArn=AGENT_ARN,
-                runtimeSessionId=session_id,
-                payload=payload_bytes,
-                qualifier="DEFAULT"
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: agent_core_client.invoke_agent_runtime(
+                    agentRuntimeArn=AGENT_ARN,
+                    runtimeSessionId=session_id,
+                    payload=payload_bytes,
+                    qualifier="DEFAULT"
+                )
             )
         except Exception as timeout_error:
             if "timeout" in str(timeout_error).lower() or "ReadTimeoutError" in str(type(timeout_error).__name__):
@@ -1187,13 +1202,17 @@ async def chat_with_agent(
         # retrieved later by /api/brd-history.
         print(f"[CHAT] Using runtimeSessionId: {session_id}")
 
-        response = agent_core_client.invoke_agent_runtime(
-            agentRuntimeArn=AGENT_ARN,
-            runtimeSessionId=session_id,
-            payload=payload_bytes,
-            qualifier="DEFAULT"
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: agent_core_client.invoke_agent_runtime(
+                agentRuntimeArn=AGENT_ARN,
+                runtimeSessionId=session_id,
+                payload=payload_bytes,
+                qualifier="DEFAULT"
+            )
         )
-        
+
         content = []
         for chunk in response.get("response", []):
             content.append(chunk.decode('utf-8'))
@@ -1480,11 +1499,15 @@ async def analyst_chat(
         agent_core_client = get_agent_core_client()
         
         try:
-            response = agent_core_client.invoke_agent_runtime(
-                agentRuntimeArn=ANALYST_AGENT_ARN,
-                runtimeSessionId=runtime_session_id,
-                payload=payload_bytes,
-                qualifier="DEFAULT"
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,
+                lambda: agent_core_client.invoke_agent_runtime(
+                    agentRuntimeArn=ANALYST_AGENT_ARN,
+                    runtimeSessionId=runtime_session_id,
+                    payload=payload_bytes,
+                    qualifier="DEFAULT"
+                )
             )
             print(f"[ANALYST-CHAT] ✅ Successfully called analyst agent")
         except Exception as invoke_error:
