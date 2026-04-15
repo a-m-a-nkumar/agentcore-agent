@@ -199,8 +199,9 @@ async def sync_confluence_space(
                 # Delete old embeddings (offload blocking DB call)
                 await asyncio.to_thread(delete_embeddings, project_id, 'confluence', page_id)
  
-                # Generate new embeddings
-                content = _strip_html(full_page['body']['storage']['value'])
+                # Generate new embeddings — preprocess HTML to Markdown for header-aware chunking
+                raw_html = full_page['body']['storage']['value']
+                content = embedding_service._preprocess_confluence_content(raw_html)
                 await generate_and_store_embeddings(
                     project_id=project_id,
                     user_id=user_id,
@@ -392,14 +393,18 @@ async def generate_and_store_embeddings(
         url: Document URL
     """
     try:
-        # Chunk the content
-        chunks = embedding_service.chunk_text(content)
- 
+        # Chunk the content using LangChain two-stage pipeline
+        chunks = embedding_service.chunk_text(
+            text=content,
+            source_type=source_type,
+            page_title=title
+        )
+
         if not chunks:
             logger.warning(f"No chunks generated for {source_type} {source_id}")
             return
- 
-        logger.info(f"  Generated {len(chunks)} chunks for {source_type} {source_id}")
+
+        logger.info(f"  Generated {len(chunks)} chunks for {source_type} {source_id} (LangChain pipeline)")
  
         # Generate and store embeddings for each chunk
         reused_count = 0
