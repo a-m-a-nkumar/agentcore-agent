@@ -20,37 +20,18 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from auth import verify_azure_token
+from environment import chat_completion
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/terraform", tags=["terraform"])
 
-# ─── Bedrock ──────────────────────────────────────────────────────────────────
-
-_bedrock = None
-
-def get_bedrock():
-    global _bedrock
-    if _bedrock is None:
-        _bedrock = boto3.client(
-            "bedrock-runtime",
-            region_name="us-east-1",
-            config=BotoConfig(read_timeout=300, connect_timeout=10, retries={"max_attempts": 2}),
-        )
-    return _bedrock
-
-MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+# ─── LLM call (uses environment switch: VDI gateway or direct Bedrock) ───────
 
 def invoke_claude(prompt: str, max_tokens: int = 8000, temperature: float = 1.0) -> str:
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "messages": [{"role": "user", "content": prompt}],
-    })
-    resp = get_bedrock().invoke_model(modelId=MODEL_ID, body=body)
-    result = json.loads(resp["body"].read())
-    return result["content"][0]["text"]
+    """Call Claude via the environment-configured LLM provider (gateway or Bedrock)."""
+    messages = [{"role": "user", "content": prompt}]
+    return chat_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
