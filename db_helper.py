@@ -99,8 +99,59 @@ def _run_migrations(db_params: dict, sslmode: str):
                     END IF;
                 END $$;
             """)
+            # Create artifact_lineage table if it doesn't exist
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS artifact_lineage (
+                    id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    project_id                  VARCHAR(255) NOT NULL,
+                    user_id                     VARCHAR(255) NOT NULL,
+                    source_type                 VARCHAR(50)  NOT NULL,
+                    source_id                   VARCHAR(255) NOT NULL,
+                    source_section_id           VARCHAR(50)  NOT NULL,
+                    source_version              INTEGER      NOT NULL,
+                    source_content_hash         VARCHAR(64)  NOT NULL,
+                    target_type                 VARCHAR(50)  NOT NULL,
+                    target_id                   VARCHAR(255) NOT NULL,
+                    target_content_hash         VARCHAR(64)  NOT NULL,
+                    target_metadata             JSONB        NOT NULL DEFAULT '{}'::jsonb,
+                    original_generated_content  JSONB        NOT NULL,
+                    status                      VARCHAR(30)  NOT NULL DEFAULT 'current',
+                    created_at                  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at                  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT fk_lineage_project FOREIGN KEY (project_id)
+                        REFERENCES projects(id) ON DELETE CASCADE,
+                    CONSTRAINT fk_lineage_user FOREIGN KEY (user_id)
+                        REFERENCES users(id) ON DELETE CASCADE
+                )
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_lineage_source_lookup
+                ON artifact_lineage (project_id, source_id, source_section_id, status)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_lineage_target_lookup
+                ON artifact_lineage (project_id, target_type, target_id)
+            """)
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_lineage_project_status
+                ON artifact_lineage (project_id, status)
+            """)
+            # Auto-update trigger for updated_at (reuses existing function from setup_core_tables)
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_trigger WHERE tgname = 'trigger_lineage_updated'
+                    ) THEN
+                        CREATE TRIGGER trigger_lineage_updated
+                        BEFORE UPDATE ON artifact_lineage
+                        FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+                    END IF;
+                END $$;
+            """)
+
             conn.commit()
-            logger.info("Database migrations completed (brd_id, agentcore_session_id on projects)")
+            logger.info("Database migrations completed (brd_id, agentcore_session_id, artifact_lineage)")
     except Exception as e:
         conn.rollback()
         logger.error(f"Migration error (non-fatal): {e}")

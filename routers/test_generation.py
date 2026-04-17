@@ -12,6 +12,8 @@ import logging
 import json
 import os
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html import unescape
 
@@ -19,6 +21,9 @@ from auth import verify_azure_token, require_module
 from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
 from services.confluence_service import ConfluenceService
 from services.github_service import GitHubService
+from services.lineage_service import record_lineage
+from utils.requirement_ids import normalize_requirement_id
+from utils.content_hashing import hash_text
 from environment import chat_completion, chat_completion_stream
 
 router = APIRouter(prefix="/api/test", tags=["test"], dependencies=[Depends(require_module("testing"))])
@@ -61,6 +66,7 @@ class PushToConfluenceRequest(BaseModel):
     parent_page_id: Optional[str] = None
     source_scenario_page: Optional[str] = None  # Title of the source BRD scenario page
     coverage_summary: Optional[str] = None  # JSON string of coverage data
+    source_brd_page_id: Optional[str] = None  # Source BRD Confluence page ID (for lineage)
 
 
 class FeatureFile(BaseModel):
@@ -357,6 +363,76 @@ def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str) -> s
 
 
 # ============================================
+# LINEAGE HELPER
+# ============================================
+
+_SCENARIO_ID_PATTERN = re.compile(r'\*\*Scenario ID\*\*\s*\|\s*(TS-\d+)', re.IGNORECASE)
+_REQUIREMENT_REF_PATTERN = re.compile(r'\*\*Requirement Ref\*\*\s*\|\s*((?:FR|NFR|BR)-\d+)', re.IGNORECASE)
+
+
+def _extract_scenario_requirement_pairs(markdown_content: str) -> list:
+    """
+    Parse markdown test scenario content to extract (scenario_id, requirement_ref) pairs.
+    Looks for the metadata table rows in each scenario section.
+    """
+    pairs = []
+    # Split on scenario headings (#### TS-XXX: ...)
+    sections = re.split(r'(?=####\s+TS-\d+)', markdown_content)
+
+    for section in sections:
+        scenario_match = _SCENARIO_ID_PATTERN.search(section)
+        req_match = _REQUIREMENT_REF_PATTERN.search(section)
+        if scenario_match:
+            scenario_id = scenario_match.group(1)
+            req_ref = req_match.group(1) if req_match else None
+            pairs.append((scenario_id, req_ref))
+
+    return pairs
+
+
+def _record_test_scenario_lineage(
+    content: str,
+    project_id: str,
+    user_id: str,
+    source_brd_page_id: str,
+    source_brd_page_version: int,
+    target_confluence_page_id: str,
+):
+    """Record lineage rows for each test scenario that has a requirement ref."""
+    pairs = _extract_scenario_requirement_pairs(content)
+    recorded = 0
+
+    for scenario_id, req_ref in pairs:
+        if not req_ref:
+            continue
+
+        normalized_ref = normalize_requirement_id(req_ref)
+        scenario_snapshot = {
+            "scenario_id": scenario_id,
+            "requirement_ref": req_ref,
+        }
+
+        record_lineage(
+            project_id=project_id,
+            user_id=user_id,
+            source_type='confluence_page',
+            source_id=source_brd_page_id,
+            source_section_id=normalized_ref,
+            source_version=source_brd_page_version,
+            source_content_hash=hash_text(req_ref),
+            target_type='test_scenario',
+            target_id=scenario_id,
+            target_content_hash=hash_text(json.dumps(scenario_snapshot, sort_keys=True)),
+            target_metadata={"confluence_page_id": target_confluence_page_id},
+            original_generated_content=scenario_snapshot,
+        )
+        recorded += 1
+
+    if recorded:
+        logger.info(f"Recorded {recorded} test scenario lineage rows for project {project_id}")
+
+
+# ============================================
 # API ENDPOINTS
 # ============================================
 
@@ -484,12 +560,14 @@ RESPOND WITH EXACTLY THIS JSON FORMAT (no markdown fences, no commentary):
     {{
       "id": "TS-001",
       "name": "Language Detection and Response",
-      "description": "Verify that the system correctly detects and responds in all 12 supported languages"
+      "description": "Verify that the system correctly detects and responds in all 12 supported languages",
+      "requirement_ref": "FR-001"
     }},
     {{
       "id": "TS-002",
       "name": "Real-time Sentiment Detection",
-      "description": "Verify that the system accurately analyzes customer sentiment in real-time"
+      "description": "Verify that the system accurately analyzes customer sentiment in real-time",
+      "requirement_ref": "FR-002"
     }}
   ],
   "prompt": "You are a senior QA automation expert specializing in BDD test case generation.\\n\\nYOUR TASK:\\nAnalyse ALL the code in this project (services, controllers, routes, models, utils — everything) and generate implementation-level test cases in Gherkin format (.feature file syntax).\\n\\nBRD TEST SCENARIOS:\\nBelow are test scenarios derived from the BRD \\"{page_title}\\". These define WHAT needs to be tested at a business level:\\n\\n  TS-001: Language Detection and Response\\n    → Verify that the system correctly detects and responds in all 12 supported languages\\n  TS-002: Real-time Sentiment Detection\\n    → Verify that the system accurately analyzes customer sentiment in real-time\\n\\nCRITICAL INSTRUCTIONS:\\n\\n1. CODE-FIRST APPROACH: Scan the entire codebase first. Identify which features are actually implemented. ONLY generate test cases for scenarios whose functionality EXISTS in the code. If a scenario's feature is not implemented, SKIP it entirely.\\n\\n2. IMPLEMENTATION-LEVEL GHERKIN: Do NOT write generic business-level Gherkin. Your Given/When/Then steps MUST reference actual implementation details found in the code:\\n   - Real API endpoints (e.g., POST /api/v1/detect-language)\\n   - Real function/service names (e.g., LanguageDetectionService)\\n   - Real request/response fields (e.g., \\"detected_language\\", \\"confidence_score\\")\\n   - Real database models or schemas if relevant\\n   - Real error codes and messages from the codebase\\n\\n3. TAG each test case with its scenario ID: @TS-XXX @regression\\n\\n4. For each covered scenario, generate:\\n   - Happy path (main success flow with real data)\\n   - Edge cases (boundary values, empty inputs, max lengths, concurrent requests)\\n   - Negative/error conditions (invalid inputs, service failures, timeout handling)\\n\\n5. OUTPUT FORMAT — valid Gherkin (.feature file), one feature per scenario:\\n\\n   @TS-001 @regression\\n   Feature: Language Detection and Response\\n\\n     Background:\\n       Given the language detection service is running\\n       And the NLP models for all 12 languages are loaded\\n\\n     Scenario: Successfully detect Spanish input\\n       When I send a POST request to \\"/api/v1/detect-language\\" with body:\\n         \\"\\"\\"\\n         {{\\"text\\": \\"Hola, necesito ayuda con mi pedido\\"}}\\n         \\"\\"\\"\\n       Then the response status should be 200\\n       And the response field \\"detected_language\\" should be \\"es\\"\\n       And the response field \\"confidence\\" should be greater than 0.95\\n\\n     Scenario: Reject unsupported language\\n       When I send a POST request to \\"/api/v1/detect-language\\" with body:\\n         \\"\\"\\"\\n         {{\\"text\\": \\"unsupported text\\"}}\\n         \\"\\"\\"\\n       Then the response status should be 422\\n       And the response field \\"error\\" should contain \\"unsupported_language\\"\\n\\n6. COVERAGE SUMMARY — at the end, provide:\\n   - ✅ Covered: List each TS-ID, what code implements it, and how many test cases generated\\n   - ❌ Skipped: List each TS-ID that was skipped and WHY (feature not found in code)\\n   - 📊 Overall: X of Y scenarios covered\\n\\nIMPORTANT REMINDERS:\\n- Do NOT hallucinate endpoints or functions that don't exist in the code\\n- Do NOT generate test cases for features that aren't implemented\\n- Every Given/When/Then step should be traceable to actual code\\n- Use realistic test data that matches the codebase's data models\\n- If the project uses specific testing frameworks or patterns, follow those conventions"
@@ -497,6 +575,7 @@ RESPOND WITH EXACTLY THIS JSON FORMAT (no markdown fences, no commentary):
 
 RULES:
 - ONLY extract scenarios that are FULLY DEFINED with structured fields (Scenario ID, Objective, Preconditions, Happy Path, etc.)
+- For each scenario, extract the Requirement Ref field (e.g. FR-001, FR-002, NFR-003) from the scenario metadata table. If a scenario has no Requirement Ref, set "requirement_ref" to null in the JSON output.
 - Do NOT extract items that only appear in "Test Scope" sections, bullet lists, or placeholder notes like "[Continue with additional scenarios for FR-03 through FR-22...]"
 - Do NOT extract requirement references (FR-XX) that are merely listed but lack a complete scenario definition with steps
 - If the document says "TS-001: Language Detection" with a full table of fields, Objective, Preconditions, Happy Path — that IS a scenario. If it just says "FR-05: Platform Integrations" in a scope list — that is NOT a scenario.
@@ -649,23 +728,71 @@ async def push_test_scenarios_to_confluence(
         else:
             confluence_html = markdown_to_confluence_storage(request.content)
 
-        existing_page = confluence_service.find_page_by_title(space_key, request.page_title)
-        if existing_page:
-            page = confluence_service.update_page(
-                page_id=existing_page['id'],
-                title=request.page_title,
-                content=confluence_html,
-                current_version=existing_page['version']['number']
-            )
-            logger.info(f"Updated existing Confluence page: {page['title']} (ID: {page['id']})")
-        else:
-            page = confluence_service.create_page(
-                space_key=space_key,
-                title=request.page_title,
-                content=confluence_html,
-                parent_id=request.parent_page_id
-            )
-            logger.info(f"Created Confluence page: {page['title']} (ID: {page['id']})")
+        # Fetch BRD page version and push the test scenario page in parallel
+        brd_page_version = None
+
+        def _fetch_brd_version():
+            nonlocal brd_page_version
+            if not request.source_brd_page_id:
+                return
+            try:
+                brd_data = confluence_service.get_page_content(request.source_brd_page_id)
+                brd_page_version = brd_data.get('version', 1)
+                logger.info(f"Fetched BRD page version {brd_page_version} for lineage tracking")
+            except Exception as e:
+                logger.warning(f"Could not fetch BRD page for lineage (non-fatal): {e}")
+
+        def _push_confluence_page():
+            existing = confluence_service.find_page_by_title(space_key, request.page_title)
+            if existing:
+                result = confluence_service.update_page(
+                    page_id=existing['id'],
+                    title=request.page_title,
+                    content=confluence_html,
+                    current_version=existing['version']['number']
+                )
+                logger.info(f"Updated existing Confluence page: {result['title']} (ID: {result['id']})")
+            else:
+                result = confluence_service.create_page(
+                    space_key=space_key,
+                    title=request.page_title,
+                    content=confluence_html,
+                    parent_id=request.parent_page_id
+                )
+                logger.info(f"Created Confluence page: {result['title']} (ID: {result['id']})")
+            return result
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            fut_page = executor.submit(_push_confluence_page)
+            fut_brd = executor.submit(_fetch_brd_version)
+            page = fut_page.result()   # raise if page push failed
+            fut_brd.result()           # swallow errors (non-fatal)
+
+        # Fire lineage writes in a background thread — response returns immediately
+        if request.source_brd_page_id and brd_page_version:
+            _content_snapshot = request.content
+            _project_id = request.project_id
+            _user_id = current_user['id']
+            _source_brd_page_id = request.source_brd_page_id
+            _brd_page_version = brd_page_version
+            _target_page_id = page['id']
+
+            def _write_lineage_batch():
+                try:
+                    _record_test_scenario_lineage(
+                        content=_content_snapshot,
+                        project_id=_project_id,
+                        user_id=_user_id,
+                        source_brd_page_id=_source_brd_page_id,
+                        source_brd_page_version=_brd_page_version,
+                        target_confluence_page_id=_target_page_id,
+                    )
+                except Exception as e:
+                    logger.warning(f"Background lineage batch failed (non-fatal): {e}")
+
+            threading.Thread(target=_write_lineage_batch, daemon=True).start()
+            logger.info("Queued test scenario lineage records for background write")
+
         return {
             "page_id": page['id'],
             "page_title": page['title'],

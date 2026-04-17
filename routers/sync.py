@@ -89,38 +89,74 @@ def get_sync_status(
     """
     Get sync status for a project.
     Returns counts of synced pages/issues and whether a sync is currently in progress.
+
+    When a sync is actively running, only returns the in-memory progress
+    (no DB queries) to avoid competing with the sync for DB connections.
+    Full counts are returned only when sync is idle.
     """
     try:
-        from db_helper_vector import get_sync_status_counts
-        from db_helper import get_project
         from services.sync_service import get_sync_progress
 
-        # Check in-memory sync progress first (lightweight, no DB hit)
+        # Check in-memory sync progress (no DB hit)
         progress = get_sync_progress(project_id)
         is_syncing = progress.get('is_syncing', False) if progress else False
         sync_message = progress.get('message', '') if progress else ''
 
-        # Get project (1 DB call)
-        project = get_project(project_id)
-        if not project:
-            raise HTTPException(status_code=404, detail="Project not found")
-
-        # OPTIMIZATION: Get all counts + last sync times in 1 DB call instead of 3
-        counts = get_sync_status_counts(project_id)
-
-        return {
-            "project_id": project_id,
-            "project_name": project['project_name'],
-            "is_syncing": is_syncing,
-            "sync_message": sync_message,
-            "confluence_pages": counts['page_count'],
-            "jira_issues": counts['issue_count'],
-            "total_embeddings": counts['embedding_count'],
-            "last_synced": {
-                "confluence": counts['last_confluence_sync'],
-                "jira": counts['last_jira_sync']
+        # While sync is running, return lightweight response — no DB queries
+        if is_syncing:
+            return {
+                "project_id": project_id,
+                "is_syncing": True,
+                "sync_message": sync_message,
+                "confluence_pages": None,
+                "jira_issues": None,
+                "total_embeddings": None,
+                "last_synced": None
             }
-        }
+
+        # Sync is idle — fetch counts using a single DB connection
+        from db_helper import get_db_connection, release_db_connection
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+
+            # Project name
+            cursor.execute("SELECT project_name FROM projects WHERE id = %s", (project_id,))
+            project_row = cursor.fetchone()
+            if not project_row:
+                cursor.close()
+                raise HTTPException(status_code=404, detail="Project not found")
+            project_name = project_row[0]
+
+            # Counts + last-synced timestamps in one round-trip
+            cursor.execute("""
+                SELECT
+                    (SELECT COUNT(*) FROM confluence_pages WHERE project_id = %s),
+                    (SELECT COUNT(*) FROM jira_issues WHERE project_id = %s),
+                    (SELECT COUNT(*) FROM document_embeddings WHERE project_id = %s),
+                    (SELECT MAX(updated_at) FROM confluence_pages WHERE project_id = %s),
+                    (SELECT MAX(updated_at) FROM jira_issues WHERE project_id = %s)
+            """, (project_id, project_id, project_id, project_id, project_id))
+            row = cursor.fetchone()
+            cursor.close()
+
+            page_count, issue_count, embedding_count, conf_last, jira_last = row
+
+            return {
+                "project_id": project_id,
+                "project_name": project_name,
+                "is_syncing": False,
+                "sync_message": sync_message,
+                "confluence_pages": page_count or 0,
+                "jira_issues": issue_count or 0,
+                "total_embeddings": embedding_count or 0,
+                "last_synced": {
+                    "confluence": str(conf_last) if conf_last else None,
+                    "jira": str(jira_last) if jira_last else None
+                }
+            }
+        finally:
+            release_db_connection(conn)
 
     except HTTPException:
         raise
