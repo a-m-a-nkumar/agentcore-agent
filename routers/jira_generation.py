@@ -5,8 +5,6 @@ import logging
 import json
 import os
 import re
-import threading
-from concurrent.futures import ThreadPoolExecutor
 from html import unescape
 # Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
 from environment import chat_completion
@@ -19,9 +17,6 @@ from db_helper import (
 )
 from services.confluence_service import ConfluenceService
 from services.jira_service import JiraService
-from services.lineage_service import record_lineage
-from utils.requirement_ids import normalize_requirement_id
-from utils.content_hashing import hash_text
 
 router = APIRouter(prefix="/api/jira", tags=["jira"], dependencies=[Depends(require_module("jira"))])
 logger = logging.getLogger(__name__)
@@ -91,7 +86,6 @@ class CreateJiraItemsRequest(BaseModel):
     jira_project_key: str
     epics: List[Dict]  # Contains epic_id, create_epic, and selected user_stories
     board_id: Optional[int] = None  # Selected Jira board
-    confluence_page_id: Optional[str] = None  # Source BRD page ID (for lineage tracking)
 
 
 # ============================================
@@ -541,40 +535,11 @@ def create_jira_items(
     created_epics = []
     created_stories = []
     failed = []
-    lineage_queue = []  # Collect lineage data during creation, write in background after
-
-    # 3. Fetch issue type IDs and BRD page version in parallel
-    brd_page_version = None
-    epic_type_id = None
-    story_type_id = None
-
-    def _fetch_brd_version():
-        nonlocal brd_page_version
-        if not request.confluence_page_id:
-            return
-        try:
-            cs = ConfluenceService(
-                credentials['atlassian_domain'],
-                credentials['atlassian_email'],
-                credentials['atlassian_api_token']
-            )
-            brd_page_data = cs.get_page_content(request.confluence_page_id)
-            brd_page_version = brd_page_data.get('version', 1)
-            logger.info(f"Fetched BRD page version {brd_page_version} for lineage tracking")
-        except Exception as e:
-            logger.warning(f"Could not fetch BRD page for lineage (non-fatal): {e}")
-
-    def _fetch_issue_types():
-        nonlocal epic_type_id, story_type_id
+    
+    # 3. Get issue type IDs for Epic and Story
+    try:
         epic_type_id = jira_service.get_issue_type_id(request.jira_project_key, "Epic")
         story_type_id = jira_service.get_issue_type_id(request.jira_project_key, "Story")
-
-    try:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            fut_brd = executor.submit(_fetch_brd_version)
-            fut_types = executor.submit(_fetch_issue_types)
-            fut_types.result()  # raise if issue type fetch failed
-            fut_brd.result()    # swallow errors (non-fatal)
         
         if not epic_type_id:
             # Try alternative names
@@ -674,14 +639,7 @@ def create_jira_items(
                             })
                             
                             logger.info(f"Created Story: {jira_story_key} under Epic {jira_epic_key}")
-
-                            # Collect lineage data for background write
-                            if request.confluence_page_id and brd_page_version:
-                                lineage_queue.append({
-                                    "story": story,
-                                    "jira_story_key": jira_story_key,
-                                })
-
+                            
                         except Exception as e:
                             logger.error(f"Failed to create story {story['story_id']}: {e}")
                             failed.append({
@@ -698,44 +656,6 @@ def create_jira_items(
                 "error": str(e)
             })
     
-    # Write all lineage records in a background thread (non-blocking)
-    if lineage_queue and request.confluence_page_id and brd_page_version:
-        def _write_lineage_batch():
-            for item in lineage_queue:
-                try:
-                    story = item["story"]
-                    req_id = normalize_requirement_id(story.get('mapped_to_requirement', ''))
-                    story_snapshot = {
-                        "title": story.get('title'),
-                        "description": story.get('description'),
-                        "acceptance_criteria": story.get('acceptance_criteria', []),
-                        "story_points": story.get('story_points'),
-                        "priority": story.get('priority'),
-                        "mapped_to_requirement": story.get('mapped_to_requirement'),
-                    }
-                    target_text = json.dumps(story_snapshot, sort_keys=True)
-
-                    record_lineage(
-                        project_id=request.project_id,
-                        user_id=current_user['id'],
-                        source_type='confluence_page',
-                        source_id=request.confluence_page_id,
-                        source_section_id=req_id,
-                        source_version=brd_page_version,
-                        source_content_hash=hash_text(story.get('mapped_to_requirement', '')),
-                        target_type='jira_story',
-                        target_id=item["jira_story_key"],
-                        target_content_hash=hash_text(target_text),
-                        target_metadata={},
-                        original_generated_content=story_snapshot,
-                    )
-                except Exception as e:
-                    logger.warning(f"Lineage write failed for {item.get('jira_story_key')} (non-fatal): {e}")
-            logger.info(f"Background lineage batch complete: {len(lineage_queue)} records")
-
-        threading.Thread(target=_write_lineage_batch, daemon=True).start()
-        logger.info(f"Queued {len(lineage_queue)} lineage records for background write")
-
     return {
         "status": "success",
         "created_epics": created_epics,

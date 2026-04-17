@@ -1,3 +1,6 @@
+@@ -1,36 +1,178 @@
+# Start Frontend Server
+# Deluxe SDLC Frontend (from Azure DevOps)
 # ====================================================================
 # START FRONTEND SERVER
 # Deluxe SDLC Frontend (React + Vite)
@@ -8,10 +11,13 @@ Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
+Write-Host " Starting Frontend Server..." -ForegroundColor Cyan
 Write-Host "  Deluxe SDLC Frontend Server" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
+# Navigate to the frontend directory
+$FrontendPath = "C:\Users\ArushSingh\Desktop\FRONTEND1"
 # Frontend directory path
 $FrontendPath = "C:\Users\ArushSingh\Desktop\FRONTEND1_new"
 
@@ -32,6 +38,7 @@ Set-Location -Path $FrontendPath
 Write-Host "  [OK] Current directory: $(Get-Location)" -ForegroundColor Green
 Write-Host ""
 
+Write-Host "Current Directory: $FrontendPath" -ForegroundColor Yellow
 # STEP 3 - Check Node.js and npm
 Write-Host "[3/5] Checking Node.js and npm..." -ForegroundColor Yellow
 
@@ -52,6 +59,12 @@ if ($LASTEXITCODE -eq 0) {
 }
 Write-Host ""
 
+# Check if node_modules exists
+if (-not (Test-Path "node_modules")) {
+    Write-Host "[WARNING] node_modules not found!" -ForegroundColor Yellow
+    Write-Host "Installing dependencies..." -ForegroundColor Yellow
+    Write-Host ""
+    npm install
 # STEP 4 - Per-package dependency audit
 Write-Host "[4/5] Auditing packages from package.json..." -ForegroundColor Yellow
 Write-Host ""
@@ -152,6 +165,8 @@ if ($missingList.Count -gt 0) {
 }
 Write-Host ""
 
+Write-Host "Starting Vite development server..." -ForegroundColor Cyan
+Write-Host "Frontend will be available at: http://localhost:5173" -ForegroundColor Green
 # STEP 5 - Check .env and start dev server
 Write-Host "[5/5] Checking environment file..." -ForegroundColor Yellow
 if (Test-Path ".env") {
@@ -167,6 +182,7 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "  Frontend URL : http://localhost:5173" -ForegroundColor Cyan
 Write-Host ""
+Write-Host "Press Ctrl+C to stop the server" -ForegroundColor Yellow
 Write-Host "  Press Ctrl+C to stop the server" -ForegroundColor Yellow
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
