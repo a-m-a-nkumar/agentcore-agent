@@ -284,31 +284,38 @@ def list_jira_projects(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/confluence/spaces")
-def list_confluence_spaces(current_user: dict = Depends(get_current_user)):
+def list_confluence_spaces(
+    start: int = 0,
+    limit: int = 100,
+    search: str = "",
+    current_user: dict = Depends(get_current_user),
+):
     """
-    List all accessible Confluence spaces for the linked Atlassian account
-    
-    Returns:
-        List of Confluence spaces with key, name, id, and type
+    List accessible Confluence spaces with pagination for lazy loading.
+
+    Query params:
+        start:  offset for pagination (default 0)
+        limit:  page size (default 100)
+        search: optional text filter on key/name
     """
     credentials = get_user_atlassian_credentials(current_user['id'])
-    
+
     if not credentials or not credentials.get('atlassian_api_token'):
         raise HTTPException(
             status_code=400,
             detail="Atlassian account not linked. Please link your account first."
         )
-    
+
     try:
         confluence_service = ConfluenceService(
             credentials['atlassian_domain'],
             credentials['atlassian_email'],
             credentials['atlassian_api_token']
         )
-        
-        spaces = confluence_service.get_spaces()
-        return {"spaces": spaces}
-    
+
+        result = confluence_service.get_spaces_page(start=start, limit=limit, search=search)
+        return result   # { spaces: [...], hasMore: bool }
+
     except Exception as e:
         logger.error(f"Error fetching Confluence spaces: {e}")
         raise HTTPException(status_code=500, detail=str(e))

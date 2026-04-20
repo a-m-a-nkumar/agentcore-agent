@@ -75,6 +75,54 @@ class ConfluenceService:
             logger.error(f"Error fetching Confluence spaces: {e}")
             raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
     
+    def get_spaces_page(self, start: int = 0, limit: int = 100, search: str = "") -> Dict:
+        """
+        Fetch a single page of Confluence spaces (for lazy loading).
+        Retries up to 3 times on transient connection errors.
+
+        Returns:
+            dict with keys: spaces, hasMore
+        """
+        import time
+        url = f"{self.base_url}/rest/api/space"
+        params = {"limit": limit, "start": start}
+        last_err = None
+
+        for attempt in range(3):
+            try:
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
+                response.raise_for_status()
+
+                data = response.json()
+                batch = data.get("results", [])
+
+                # Filter personal spaces and apply optional search
+                spaces = [
+                    {
+                        "key": s["key"],
+                        "name": s["name"],
+                        "id": s["id"],
+                        "type": s.get("type", "global"),
+                    }
+                    for s in batch
+                    if not s["key"].startswith("~")
+                    and (not search or search.lower() in s["key"].lower() or search.lower() in s["name"].lower())
+                ]
+
+                has_more = len(batch) >= limit
+                return {"spaces": spaces, "hasMore": has_more}
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_err = e
+                logger.warning(f"Confluence spaces attempt {attempt + 1}/3 failed (start={start}): {e}")
+                if attempt < 2:
+                    time.sleep(1)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error fetching Confluence spaces page (start={start}): {e}")
+                raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
+
+        logger.error(f"Confluence spaces failed after 3 retries (start={start}): {last_err}")
+        raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
+
     def get_space_pages(self, space_key: str, limit: int = 100) -> List[Dict]:
         """
         Fetch pages from a specific Confluence space
