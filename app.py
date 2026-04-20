@@ -164,6 +164,7 @@ AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 from auth import (
     verify_azure_token,
     store_user_identity_in_agentcore,
+    get_user_identity_arn,
     check_brd_access_via_agentcore,
     grant_brd_access_via_agentcore,
     revoke_brd_access_via_agentcore,
