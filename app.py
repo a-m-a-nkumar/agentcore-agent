@@ -37,7 +37,7 @@ from routers.harness import router as harness_router
 from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
 # Import database helpers for session persistence
-from db_helper import save_project_brd_session
+from db_helper import save_project_brd_session, create_or_update_user
 # Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
 from environment import s3_put_object, get_s3_client  # noqa: F401
 
@@ -3286,13 +3286,29 @@ async def check_brd_access(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/user/info")
 async def get_user_info(current_user: dict = Depends(get_current_user)):
-    """Get current user information including group-based module access"""
+    """Get current user information including group-based module access.
+
+    Source of truth for RBAC — frontend calls this after login instead of
+    computing modules from idTokenClaims.groups, so that:
+      1. Groups-claim overage (>200 groups) is handled via Microsoft Graph
+         inside extract_user_groups().
+      2. Every authenticated user is recorded in the DB (even those who end
+         up with no allowed modules and see AccessDenied).
+    """
     user_id = current_user["user_id"]
+    email = current_user["email"]
+    name = current_user.get("name", "")
+
+    try:
+        create_or_update_user(user_id, email, name)
+    except Exception as e:
+        print(f"[USER_INFO] Failed to upsert user row for {email}: {e}")
+
     identity_arn = get_user_identity_arn(user_id)
     return JSONResponse(content={
         "user_id": user_id,
-        "email": current_user["email"],
-        "name": current_user.get("name", ""),
+        "email": email,
+        "name": name,
         "identity_arn": identity_arn,
         "groups": current_user.get("groups", []),
         "allowed_modules": current_user.get("allowed_modules", []),
