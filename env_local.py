@@ -185,6 +185,92 @@ def chat_completion(
     return content
 
 
+def chat_completion_with_tools(
+    messages: List[Dict],
+    tools: List[Dict],
+    model: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: Optional[int] = None,
+) -> Dict:
+    """
+    Bedrock call with Anthropic-native tool use (local dev).
+    Accepts OpenAI tool format, converts to Anthropic format for Bedrock.
+    Returns dict with "message" and "finish_reason" matching the gateway interface.
+    """
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        config=_get_bedrock_config(),
+    )
+    model_id = model or DEFAULT_BEDROCK_MODEL
+
+    # Convert OpenAI tool format → Anthropic tool format
+    anthropic_tools = []
+    for t in tools:
+        fn = t.get("function", t)
+        anthropic_tools.append({
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+
+    # Separate system messages from user/assistant messages
+    system_parts = []
+    chat_messages = []
+    for m in messages:
+        if m["role"] == "system":
+            system_parts.append(m["content"])
+        else:
+            chat_messages.append(m)
+
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": chat_messages,
+        "tools": anthropic_tools,
+        "max_tokens": max_tokens or 4000,
+        "temperature": temperature,
+    }
+    if system_parts:
+        body["system"] = "\n\n".join(system_parts)
+
+    logger.info(f"[LOCAL LLM] Tool call → Bedrock model: {model_id}")
+    response = client.invoke_model(
+        modelId=model_id,
+        body=json.dumps(body),
+        contentType="application/json",
+    )
+    result = json.loads(response["body"].read())
+
+    # Convert Anthropic response to OpenAI-compatible structure
+    stop_reason = result.get("stop_reason", "end_turn")
+    content_blocks = result.get("content", [])
+
+    text_parts = []
+    tool_calls = []
+    for block in content_blocks:
+        if block.get("type") == "text":
+            text_parts.append(block["text"])
+        elif block.get("type") == "tool_use":
+            tool_calls.append(type("ToolCall", (), {
+                "id": block["id"],
+                "function": type("Function", (), {
+                    "name": block["name"],
+                    "arguments": json.dumps(block["input"]),
+                })(),
+                "type": "function",
+            })())
+
+    # Build a message-like object matching OpenAI SDK structure
+    msg = type("Message", (), {
+        "content": "\n".join(text_parts) if text_parts else None,
+        "tool_calls": tool_calls if tool_calls else None,
+        "role": "assistant",
+    })()
+
+    finish_reason = "tool_calls" if stop_reason == "tool_use" else "stop"
+    return {"message": msg, "finish_reason": finish_reason}
+
+
 def chat_completion_stream(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,

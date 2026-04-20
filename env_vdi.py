@@ -35,7 +35,7 @@ from db_config import get_db_params  # noqa: F401
 # 3. API Gateway — LLM calls via Deluxe DLX AI proxy
 # ---------------------------------------------------------------------------
 # llm_gateway.py wraps the OpenAI-compatible Deluxe endpoint.
-from llm_gateway import chat_completion  # noqa: F401
+from llm_gateway import chat_completion, chat_completion_with_tools  # noqa: F401
 
 import json
 import logging as _logging

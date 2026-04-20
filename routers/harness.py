@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 from auth import verify_azure_token
+from environment import chat_completion, chat_completion_with_tools
 
 logger = logging.getLogger(__name__)
 
@@ -1245,11 +1246,8 @@ class AiAnalyzePipelineRequest(BaseModel):
 
 @router.post("/ai-analyze-pipeline")
 async def ai_analyze_pipeline(req: AiAnalyzePipelineRequest, _=Depends(get_current_user)):
-    import boto3
     import json as _json
     import re as _re
-
-    MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 
     prompt = f"""You are a Harness CI/CD pipeline expert. Analyze this pipeline YAML and the error, then identify ONLY the minimal fix needed.
 
@@ -1289,21 +1287,12 @@ CRITICAL JSON RULES:
 }}"""
 
     try:
-        bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-        payload = _json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 1000,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": prompt}],
-        })
-        response = bedrock.invoke_model(modelId=MODEL_ID, body=payload)
-        result = _json.loads(response["body"].read())
-        text = result["content"][0]["text"].strip()
+        messages = [{"role": "user", "content": prompt}]
+        text = chat_completion(messages=messages, temperature=0, max_tokens=1000).strip()
 
         # Strip markdown fences if present (```json ... ``` or ``` ... ```)
         if text.startswith("```"):
             lines = text.split("\n")
-            # Remove first line (```json or ```) and last line if it's ```
             start = 1
             end = len(lines)
             if lines[-1].strip() == "```" or lines[-1].strip() == "```json":
@@ -1375,11 +1364,9 @@ class AiEditPipelineRequest(BaseModel):
 
 @router.post("/ai-edit-pipeline")
 async def ai_edit_pipeline(req: AiEditPipelineRequest, _=Depends(get_current_user)):
-    import boto3
     import json as _json
     import re as _re
 
-    MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     prompt = f"""You are a Harness YAML pipeline expert performing a MINIMAL surgical fix.
 
 STRICT RULES — you MUST follow all of these:
@@ -1401,16 +1388,8 @@ Error to fix: {req.instruction}
 Return ONLY the complete YAML. No explanation, no markdown fences, no comments."""
 
     try:
-        bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-        payload = _json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 8000,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": prompt}],
-        })
-        response = bedrock.invoke_model(modelId=MODEL_ID, body=payload)
-        result = _json.loads(response["body"].read())
-        modified = result["content"][0]["text"].strip()
+        messages = [{"role": "user", "content": prompt}]
+        modified = chat_completion(messages=messages, temperature=0, max_tokens=8000).strip()
 
         # Strip markdown fences if Claude added them
         if modified.startswith("```"):
@@ -1461,10 +1440,8 @@ class AiSummarizeLogsRequest(BaseModel):
 
 @router.post("/ai-summarize-logs")
 async def ai_summarize_logs(req: AiSummarizeLogsRequest, _=Depends(get_current_user)):
-    import boto3
     import json as _json
 
-    MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     data = req.execution_data
     prompt = f"""A Harness CI/CD pipeline execution failed. Analyze this data and provide a concise, plain-English summary of what went wrong and how to fix it.
 
@@ -1486,18 +1463,11 @@ Provide:
 Keep it brief and actionable."""
 
     try:
-        bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
         # Truncate large payloads to avoid token limits
         prompt_safe = prompt[:12000] if len(prompt) > 12000 else prompt
-        payload = _json.dumps({
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": 1000,
-            "temperature": 0,
-            "messages": [{"role": "user", "content": prompt_safe}],
-        })
-        response = bedrock.invoke_model(modelId=MODEL_ID, body=payload)
-        result = _json.loads(response["body"].read())
-        return {"summary": result["content"][0]["text"].strip()}
+        messages = [{"role": "user", "content": prompt_safe}]
+        text = chat_completion(messages=messages, temperature=0, max_tokens=1000)
+        return {"summary": text.strip()}
     except Exception as e:
         import traceback
         raise HTTPException(status_code=500, detail=f"AI summary failed: {str(e)} | {traceback.format_exc()[-500:]}")
@@ -1516,78 +1486,99 @@ class HarnessChatRequest(BaseModel):
 
 HARNESS_CHAT_TOOLS = [
     {
-        "name": "get_account_info",
-        "description": "Get Harness account information (name, plan, status, company).",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "list_organizations",
-        "description": "List all organizations in the Harness account.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "list_projects",
-        "description": "List all projects, optionally filtered by org.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "org_id": {"type": "string", "description": "Org identifier"},
-            },
+        "type": "function",
+        "function": {
+            "name": "get_account_info",
+            "description": "Get Harness account information (name, plan, status, company).",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
-        "name": "list_pipelines",
-        "description": "List pipelines in a specific project.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "org_id": {"type": "string"},
-                "project_id": {"type": "string"},
-            },
-            "required": ["org_id", "project_id"],
+        "type": "function",
+        "function": {
+            "name": "list_organizations",
+            "description": "List all organizations in the Harness account.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
-        "name": "list_executions",
-        "description": "List recent pipeline executions in a project. Pass status=['Failed'] to filter only failed runs, status=['Success'] for successful, or omit for all.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "org_id": {"type": "string"},
-                "project_id": {"type": "string"},
-                "status": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Filter by status. Valid values: 'Failed', 'Success', 'Running', 'Aborted'. Omit for all statuses."
+        "type": "function",
+        "function": {
+            "name": "list_projects",
+            "description": "List all projects, optionally filtered by org.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "org_id": {"type": "string", "description": "Org identifier"},
                 },
             },
-            "required": ["org_id", "project_id"],
         },
     },
     {
-        "name": "get_pipeline_detail",
-        "description": "Get detailed info about a pipeline: metadata and recent executions.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "org_id": {"type": "string"},
-                "project_id": {"type": "string"},
-                "pipeline_id": {"type": "string"},
+        "type": "function",
+        "function": {
+            "name": "list_pipelines",
+            "description": "List pipelines in a specific project.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "org_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                },
+                "required": ["org_id", "project_id"],
             },
-            "required": ["org_id", "project_id", "pipeline_id"],
         },
     },
     {
-        "name": "get_execution_logs",
-        "description": "Get logs, stages, and failed steps for a specific pipeline execution.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "org_id": {"type": "string"},
-                "project_id": {"type": "string"},
-                "execution_id": {"type": "string"},
+        "type": "function",
+        "function": {
+            "name": "list_executions",
+            "description": "List recent pipeline executions in a project. Pass status=['Failed'] to filter only failed runs, status=['Success'] for successful, or omit for all.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "org_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "status": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Filter by status. Valid values: 'Failed', 'Success', 'Running', 'Aborted'. Omit for all statuses.",
+                    },
+                },
+                "required": ["org_id", "project_id"],
             },
-            "required": ["org_id", "project_id", "execution_id"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_pipeline_detail",
+            "description": "Get detailed info about a pipeline: metadata and recent executions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "org_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "pipeline_id": {"type": "string"},
+                },
+                "required": ["org_id", "project_id", "pipeline_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_execution_logs",
+            "description": "Get logs, stages, and failed steps for a specific pipeline execution.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "org_id": {"type": "string"},
+                    "project_id": {"type": "string"},
+                    "execution_id": {"type": "string"},
+                },
+                "required": ["org_id", "project_id", "execution_id"],
+            },
         },
     },
 ]
@@ -1667,10 +1658,8 @@ async def _execute_chat_tool(req: HarnessChatRequest, tool_name: str, tool_input
 
 @router.post("/chat")
 async def harness_chat(req: HarnessChatRequest, _=Depends(get_current_user)):
-    import boto3
     import json as _json
 
-    MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
     system_prompt = f"""You are a helpful Harness CI/CD assistant inside an SDLC platform.
 You can query and control the user's Harness account using the tools provided.
 
@@ -1686,46 +1675,62 @@ Rules:
 - If a tool returns an error, explain it clearly and suggest what to do.
 - You cannot trigger pipelines — if asked, tell the user to use the Deployments tab instead."""
 
-    messages = list(req.history) + [{"role": "user", "content": req.message}]
+    messages = [{"role": "system", "content": system_prompt}] + list(req.history) + [{"role": "user", "content": req.message}]
+    tool_calls_log = []
 
     try:
-        bedrock = boto3.client("bedrock-runtime", region_name="us-east-1")
-        tool_calls_made = []
+        # Agent loop: up to 6 iterations of tool use via gateway
+        for iteration in range(6):
+            result = chat_completion_with_tools(
+                messages=messages,
+                tools=HARNESS_CHAT_TOOLS,
+                temperature=0,
+                max_tokens=4000,
+            )
+            msg = result["message"]
+            finish_reason = result["finish_reason"]
 
-        for _ in range(6):
-            payload = _json.dumps({
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": 4000,
-                "system": system_prompt,
-                "tools": HARNESS_CHAT_TOOLS,
-                "messages": messages,
-            })
-            resp = bedrock.invoke_model(modelId=MODEL_ID, body=payload)
-            result = _json.loads(resp["body"].read())
-            stop_reason = result.get("stop_reason")
-            content = result.get("content", [])
+            # No tool calls — return the final text response
+            if finish_reason != "tool_calls" or not msg.tool_calls:
+                answer = (msg.content or "").strip()
+                messages.append({"role": "assistant", "content": answer})
+                return {"answer": answer, "tool_calls": tool_calls_log, "history": messages}
 
-            if stop_reason == "end_turn":
-                text = next((c["text"] for c in content if c.get("type") == "text"), "")
-                messages.append({"role": "assistant", "content": content})
-                return {"answer": text, "tool_calls": tool_calls_made, "history": messages}
+            # Append assistant message with tool calls to conversation
+            assistant_msg = {"role": "assistant", "content": msg.content or ""}
+            # Serialize tool_calls for the messages list
+            assistant_msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+                }
+                for tc in msg.tool_calls
+            ]
+            messages.append(assistant_msg)
 
-            if stop_reason == "tool_use":
-                messages.append({"role": "assistant", "content": content})
-                tool_results = []
-                for block in content:
-                    if block.get("type") != "tool_use":
-                        continue
-                    tool_calls_made.append({"name": block["name"], "input": block.get("input", {})})
-                    try:
-                        tr = await _execute_chat_tool(req, block["name"], block.get("input", {}))
-                        tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": _json.dumps(tr)})
-                    except Exception as e:
-                        tool_results.append({"type": "tool_result", "tool_use_id": block["id"], "content": f"Error: {e}", "is_error": True})
-                messages.append({"role": "user", "content": tool_results})
+            # Execute each tool call and append results
+            for tc in msg.tool_calls:
+                tool_name = tc.function.name
+                tool_input = _json.loads(tc.function.arguments) if tc.function.arguments else {}
+                logger.info(f"[Harness Chat] Tool call #{iteration}: {tool_name}({tool_input})")
+                tool_calls_log.append({"tool": tool_name, "input": tool_input})
 
-        raise HTTPException(status_code=500, detail="Agent exceeded maximum iterations")
+                tool_result = await _execute_chat_tool(req, tool_name, tool_input)
+
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": _json.dumps(tool_result, default=str),
+                })
+
+        # If we exhausted all iterations, return the last message
+        final = chat_completion(messages=messages, temperature=0, max_tokens=4000)
+        messages.append({"role": "assistant", "content": final})
+        return {"answer": final.strip(), "tool_calls": tool_calls_log, "history": messages}
+
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"[Harness Chat] Agent failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Chat agent failed: {str(e)}")

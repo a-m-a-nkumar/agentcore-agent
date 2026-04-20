@@ -67,3 +67,47 @@ def chat_completion(
             "finish_reason": getattr(response.choices[0], "finish_reason", None),
         }
     return content
+
+
+def chat_completion_with_tools(
+    messages: List[Dict],
+    tools: List[Dict],
+    model: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: Optional[int] = None,
+) -> Dict:
+    """
+    Gateway call with OpenAI-style function calling (tools).
+
+    Returns dict with:
+      - "message": the assistant message object (may contain tool_calls)
+      - "finish_reason": "stop" | "tool_calls"
+    """
+    client = _get_client()
+    resolved = model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
+    if any(tok in resolved for tok in ("anthropic", "bedrock", "amazon")):
+        resolved = os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
+
+    params = {
+        "model": resolved,
+        "messages": messages,
+        "temperature": temperature,
+        "tools": tools,
+    }
+    if max_tokens is not None:
+        params["max_tokens"] = max_tokens
+
+    logger.info(f"[LLM Gateway] Tool call → model='{resolved}' tools={[t['function']['name'] for t in tools]}")
+    start = time.time()
+    response = client.chat.completions.create(**params)
+    elapsed = time.time() - start
+    logger.info(f"[LLM Gateway] Tool response in {elapsed:.1f}s, finish_reason={response.choices[0].finish_reason}")
+
+    if not response or not response.choices:
+        raise ValueError(f"Gateway returned empty response for model={resolved}")
+
+    msg = response.choices[0].message
+    return {
+        "message": msg,
+        "finish_reason": response.choices[0].finish_reason,
+    }
