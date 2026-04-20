@@ -10,6 +10,8 @@ import json
 import logging
 import time
 import threading
+import base64
+import boto3
 from psycopg2 import pool
 from datetime import datetime
 from typing import List, Dict, Optional, Any
@@ -777,37 +779,87 @@ def delete_session(session_id: str, hard_delete: bool = False) -> bool:
 # Atlassian Integration Functions
 # ============================================
 
+# KMS encryption for Atlassian PAT tokens (industry standard: never store secrets in plain text)
+_KMS_KEY_ARN = os.getenv("KMS_KEY_ARN", "")
+_kms_client = None
+
+def _get_kms_client():
+    global _kms_client
+    if _kms_client is None:
+        _kms_client = boto3.client("kms", region_name=os.getenv("AWS_REGION", "us-east-1"))
+    return _kms_client
+
+def _encrypt_token(plain_token: str) -> str:
+    """Encrypt a PAT token using AWS KMS before storing in DB."""
+    if not _KMS_KEY_ARN:
+        logger.warning("[KMS] KMS_KEY_ARN not set — storing token without encryption (dev only)")
+        return plain_token
+    try:
+        response = _get_kms_client().encrypt(
+            KeyId=_KMS_KEY_ARN,
+            Plaintext=plain_token.encode("utf-8"),
+        )
+        # Store as base64 string with a prefix so we can detect encrypted values
+        encrypted_b64 = base64.b64encode(response["CiphertextBlob"]).decode("utf-8")
+        return f"kms:{encrypted_b64}"
+    except Exception as e:
+        logger.error(f"[KMS] Encryption failed: {e}")
+        raise RuntimeError("Failed to encrypt Atlassian token. Check KMS configuration.") from e
+
+def _decrypt_token(stored_token: str) -> str:
+    """Decrypt a KMS-encrypted PAT token retrieved from DB."""
+    if not stored_token:
+        return stored_token
+    # If token was stored without encryption (dev/legacy), return as-is
+    if not stored_token.startswith("kms:"):
+        return stored_token
+    if not _KMS_KEY_ARN:
+        logger.warning("[KMS] KMS_KEY_ARN not set — cannot decrypt token")
+        return stored_token
+    try:
+        ciphertext = base64.b64decode(stored_token[4:])  # strip "kms:" prefix
+        response = _get_kms_client().decrypt(
+            KeyId=_KMS_KEY_ARN,
+            CiphertextBlob=ciphertext,
+        )
+        return response["Plaintext"].decode("utf-8")
+    except Exception as e:
+        logger.error(f"[KMS] Decryption failed: {e}")
+        raise RuntimeError("Failed to decrypt Atlassian token. Check KMS configuration.") from e
+
+
 def update_user_atlassian_credentials(
     user_id: str,
     domain: str,
     email: str,
     api_token: str
 ) -> bool:
-    """Update user's Atlassian credentials"""
+    """Encrypt PAT token with KMS then persist all Atlassian credentials to DB."""
+    encrypted_token = _encrypt_token(api_token)
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
             cursor.execute("""
-                UPDATE users 
-                SET atlassian_domain = %s,
-                    atlassian_email = %s,
+                UPDATE users
+                SET atlassian_domain    = %s,
+                    atlassian_email     = %s,
                     atlassian_api_token = %s,
                     atlassian_linked_at = NOW()
                 WHERE id = %s
-            """, (domain, email, api_token, user_id))
+            """, (domain, email, encrypted_token, user_id))
             conn.commit()
-            logger.info(f"Updated Atlassian credentials for user: {user_id}")
+            logger.info(f"[ATLASSIAN] Credentials updated (KMS-encrypted) for user: {user_id}")
             return True
     except Exception as e:
         conn.rollback()
-        logger.error(f"Error updating Atlassian credentials: {e}")
+        logger.error(f"[ATLASSIAN] Error updating credentials for user {user_id}: {e}")
         raise
     finally:
         release_db_connection(conn)
 
 
 def get_user_atlassian_credentials(user_id: str) -> Optional[Dict[str, Any]]:
-    """Get user's Atlassian credentials"""
+    """Retrieve Atlassian credentials from DB and decrypt the PAT token with KMS."""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -817,6 +869,12 @@ def get_user_atlassian_credentials(user_id: str) -> Optional[Dict[str, Any]]:
                 WHERE id = %s
             """, (user_id,))
             result = cursor.fetchone()
-            return dict(result) if result else None
+            if not result:
+                return None
+            creds = dict(result)
+            # Decrypt the token before returning — callers always get plain text
+            if creds.get("atlassian_api_token"):
+                creds["atlassian_api_token"] = _decrypt_token(creds["atlassian_api_token"])
+            return creds
     finally:
         release_db_connection(conn)
