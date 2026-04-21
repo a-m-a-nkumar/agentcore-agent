@@ -36,6 +36,7 @@ from routers.design import router as design_router
 from routers.harness import router as harness_router
 from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
+from routers.figma import router as figma_router
 # Import database helpers for session persistence
 from db_helper import save_project_brd_session, create_or_update_user
 # Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
@@ -110,6 +111,7 @@ app.include_router(design_router)
 app.include_router(harness_router)
 app.include_router(pipeline_generator_router)
 app.include_router(terraform_generator_router)
+app.include_router(figma_router)
 
 # Add request logging middleware
 @app.middleware("http")
