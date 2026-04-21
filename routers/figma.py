@@ -308,9 +308,39 @@ async def link_figma_account(
 ):
     """Validate Figma PAT + Team ID then save credentials to the users table."""
     service = FigmaService(request.pat, request.team_id)
+
+    # 1. Validate PAT via /me
     ok, err = service.test_connection()
     if not ok:
         raise HTTPException(status_code=400, detail=err)
+
+    # 2. Validate that team_id is actually a TEAM ID (not an org/enterprise ID).
+    #    Figma's /teams/{id}/projects endpoint 404s for org/enterprise IDs and
+    #    for teams on Free plans. Catching this at link time avoids silently
+    #    saving a non-working ID.
+    try:
+        service.get_team_projects()
+    except requests.HTTPError as http_err:
+        status = http_err.response.status_code if http_err.response is not None else None
+        if status == 404:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Team ID not found or not accessible. Common causes:\n"
+                    "• You entered an Enterprise/Org ID instead of a Team ID — "
+                    "open your team page in Figma, copy the ID from "
+                    "figma.com/files/team/<TEAM_ID>/...\n"
+                    "• Your PAT belongs to a user who isn't a member of this team.\n"
+                    "• The team is on Figma's Free/Starter plan — listing team "
+                    "projects requires Professional, Organization or Enterprise."
+                ),
+            )
+        if status == 403:
+            raise HTTPException(status_code=403, detail="PAT does not have access to this team.")
+        if status == 401:
+            raise HTTPException(status_code=401, detail="PAT is invalid or expired.")
+        raise HTTPException(status_code=502, detail=f"Figma API error ({status}): {http_err}")
+
     update_user_figma_credentials(current_user["id"], request.pat, request.team_id)
     logger.info(f"[FIGMA] Credentials linked for user {current_user['id']}")
     return {"status": "linked"}
