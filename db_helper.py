@@ -775,3 +775,37 @@ def get_user_atlassian_credentials(user_id: str) -> Optional[Dict[str, Any]]:
             return dict(result) if result else None
     finally:
         release_db_connection(conn)
+
+
+def update_user_figma_credentials(user_id: str, pat: str, team_id: str) -> bool:
+    """Save Figma PAT and Team ID for a user."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET figma_pat = %s,
+                    figma_team_id = %s,
+                    figma_linked_at = NOW()
+                WHERE id = %s
+            """, (pat, team_id, user_id))
+            conn.commit()
+            return cursor.rowcount > 0
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_figma_credentials(user_id: str):
+    """Retrieve stored Figma PAT and Team ID. Returns None if not linked."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=__import__('psycopg2.extras', fromlist=['RealDictCursor']).RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT figma_pat, figma_team_id, figma_linked_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
