@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from typing import Optional
 from services.rag_service import rag_service
 from routers.internal_utils import validate_api_key
+from db_helper import get_project
 import logging
 import json
 
@@ -50,6 +51,19 @@ async def query_internal(
     """
     validate_api_key(x_api_key)
 
+    # MCP calls have no user identity — resolve the project owner and attribute
+    # the token usage to them so we don't lose those calls.
+    owner_user_id: Optional[str] = None
+    try:
+        project = get_project(request.project_id)
+        if project:
+            owner_user_id = project.get("user_id")
+            logger.info(f"[ORCHESTRATION] project {request.project_id} owned by user {owner_user_id} — attributing tokens")
+        else:
+            logger.warning(f"[ORCHESTRATION] project {request.project_id} not found — tokens will log as user=unknown")
+    except Exception as e:
+        logger.warning(f"[ORCHESTRATION] project owner lookup failed (non-fatal): {e}")
+
     # ── Plain JSON path (MCP prompt enhancement) ──
     if request.return_prompt:
         print(f"[ORCHESTRATION] Received MCP enhancement request for project: {request.project_id}")
@@ -64,6 +78,7 @@ async def query_internal(
                 source_filter=request.source_filter,
                 frontend_requirements=request.frontend_requirements or "",
                 backend_requirements=request.backend_requirements or "",
+                user_id=owner_user_id,
             )
         except Exception as e:
             logger.error(f"Error generating enhanced prompt: {e}")
@@ -82,7 +97,8 @@ async def query_internal(
                 user_query=request.query,
                 max_chunks=request.max_chunks,
                 source_filter=request.source_filter,
-                include_context=request.include_context
+                include_context=request.include_context,
+                user_id=owner_user_id,
             ):
                 yield f"data: {json.dumps(event)}\n\n"
 
