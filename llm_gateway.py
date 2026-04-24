@@ -76,12 +76,13 @@ def chat_completion(
     if usage:
         total = getattr(usage, "total_tokens", 0) or 0
         logger.info(
-            f"[LLM Gateway] {elapsed:.1f}s tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
+            f"[LLM Gateway] {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} "
+            f"tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
             f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
         )
         _record_tokens_async(user_id, total)
     else:
-        logger.info(f"[LLM Gateway] Response received in {elapsed:.1f}s (no usage)")
+        logger.info(f"[LLM Gateway] {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} (no usage)")
 
     if not response or not response.choices:
         logger.error(f"[LLM Gateway] Empty response from gateway: {response}")
@@ -134,13 +135,14 @@ def chat_completion_with_tools(
     if usage:
         total = getattr(usage, "total_tokens", 0) or 0
         logger.info(
-            f"[LLM Gateway] Tool response {elapsed:.1f}s finish_reason={response.choices[0].finish_reason} "
+            f"[LLM Gateway] Tool {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} "
+            f"finish={response.choices[0].finish_reason} "
             f"tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
             f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
         )
         _record_tokens_async(user_id, total)
     else:
-        logger.info(f"[LLM Gateway] Tool response in {elapsed:.1f}s, finish_reason={response.choices[0].finish_reason}")
+        logger.info(f"[LLM Gateway] Tool {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} finish={response.choices[0].finish_reason} (no usage)")
 
     if not response or not response.choices:
         raise ValueError(f"Gateway returned empty response for model={resolved}")

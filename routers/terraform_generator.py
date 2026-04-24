@@ -28,10 +28,10 @@ router = APIRouter(prefix="/api/terraform", tags=["terraform"])
 
 # ─── LLM call (uses environment switch: VDI gateway or direct Bedrock) ───────
 
-def invoke_claude(prompt: str, max_tokens: int = 8000, temperature: float = 1.0) -> str:
+def invoke_claude(prompt: str, max_tokens: int = 8000, temperature: float = 1.0, user_id: Optional[str] = None) -> str:
     """Call Claude via the environment-configured LLM provider (gateway or Bedrock)."""
     messages = [{"role": "user", "content": prompt}]
-    return chat_completion(messages=messages, temperature=temperature, max_tokens=max_tokens)
+    return chat_completion(messages=messages, temperature=temperature, max_tokens=max_tokens, user_id=user_id)
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
@@ -193,7 +193,8 @@ async def parse_document(file: UploadFile = File(...), _=Depends(verify_azure_to
 
 
 @router.post("/validate-component")
-async def validate_component(req: ValidateComponentRequest, _=Depends(verify_azure_token)):
+async def validate_component(req: ValidateComponentRequest, token_data: dict = Depends(verify_azure_token)):
+    user_id = token_data.get("oid") or token_data.get("sub")
     raw = invoke_claude(
         f"""Is "{req.name}" a real, provisionable AWS infrastructure component that can be managed with Terraform?
 Answer with JSON only: {{"valid": true, "reason": "one line"}} or {{"valid": false, "reason": "one line explaining what it is not"}}
@@ -201,6 +202,7 @@ Real examples: EC2, RDS, S3, VPC, EKS, Lambda, ECS, ElastiCache, CloudFront, Rou
 If it is a made-up word, random text, or not an AWS service, return valid=false.""",
         max_tokens=80,
         temperature=0,
+        user_id=user_id,
     )
     try:
         result = json.loads(strip_fences(raw, "json"))
@@ -210,10 +212,11 @@ If it is a made-up word, random text, or not an AWS service, return valid=false.
 
 
 @router.post("/extract-components")
-async def extract_components(req: ExtractRequest, _=Depends(verify_azure_token)):
+async def extract_components(req: ExtractRequest, token_data: dict = Depends(verify_azure_token)):
     """
     Use Claude to read the SAD and return a JSON list of infra components.
     """
+    user_id = token_data.get("oid") or token_data.get("sub")
     clean_doc = strip_html(req.document_content)[:10000]
 
     prompt = f"""You are a cloud infrastructure expert. Read the Solution Architecture Document below and extract the infrastructure components that are EXPLICITLY mentioned as needing to be provisioned.
@@ -243,7 +246,7 @@ Example:
 ]"""
 
     try:
-        raw = invoke_claude(prompt, max_tokens=3000, temperature=0)
+        raw = invoke_claude(prompt, max_tokens=3000, temperature=0, user_id=user_id)
         raw = strip_fences(raw, "json")
         components = json.loads(raw)
         return {"components": components}
@@ -257,11 +260,12 @@ Example:
 
 
 @router.post("/generate-stream")
-async def generate_terraform_stream(req: GenerateRequest, _=Depends(verify_azure_token)):
+async def generate_terraform_stream(req: GenerateRequest, token_data: dict = Depends(verify_azure_token)):
     """
     Stream Terraform module generation for selected components.
     Yields newline-delimited JSON objects: {file, content, done}
     """
+    user_id = token_data.get("oid") or token_data.get("sub")
     project   = re.sub(r'[^a-z0-9_]', '_', req.project_name.lower())
     region    = req.aws_region or "us-east-1"
     env       = req.environment or "dev"
@@ -306,6 +310,7 @@ If it is a real AWS service or resource (e.g. EC2, RDS, S3, VPC, EKS, Lambda, et
 If it is a made-up name, random text, or not a real AWS resource, return valid=false.""",
                     max_tokens=100,
                     temperature=0,
+                    user_id=user_id,
                 )
                 try:
                     validation = json.loads(strip_fences(validation_raw, "json"))
@@ -335,6 +340,7 @@ Requirements:
 
 Return ONLY raw HCL. No explanation. No markdown fences.""",
                     max_tokens=6000,
+                    user_id=user_id,
                 )
                 files[f"modules/{comp.id}/main.tf"] = strip_fences(main_raw)
 
@@ -354,6 +360,7 @@ Requirements:
 
 Return ONLY raw HCL. No explanation. No markdown fences.""",
                     max_tokens=4000,
+                    user_id=user_id,
                 )
                 files[f"modules/{comp.id}/variables.tf"] = strip_fences(variables_raw)
 
@@ -371,6 +378,7 @@ Requirements:
 
 Return ONLY raw HCL. No explanation. No markdown fences.""",
                     max_tokens=2000,
+                    user_id=user_id,
                 )
                 files[f"modules/{comp.id}/outputs.tf"] = strip_fences(outputs_raw)
 
@@ -406,6 +414,7 @@ Task: Write the ROOT main.tf that:
 
 Return ONLY raw HCL. No explanation. No markdown fences.""",
             max_tokens=4000,
+            user_id=user_id,
          )
          files["main.tf"] = strip_fences(root_main_raw)
 

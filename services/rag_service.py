@@ -131,7 +131,8 @@ class RAGService:
         user_query: str,
         max_chunks: int = 10,
         source_filter: Optional[str] = None,
-        include_context: bool = True
+        include_context: bool = True,
+        user_id: Optional[str] = None,
     ):
         """
         Query using RAG - retrieve relevant chunks and generate answer
@@ -164,7 +165,8 @@ class RAGService:
                     user_query=user_query,
                     max_chunks=max_chunks,
                     source_type=source_filter,
-                    include_context=include_context
+                    include_context=include_context,
+                    user_id=user_id,
                 )
  
             if not results:
@@ -217,7 +219,7 @@ class RAGService:
                 input=prompt,
                 metadata={"project_id": project_id},
             ) as gen_obs:
-                async for chunk in self._stream_claude_response(prompt):
+                async for chunk in self._stream_claude_response(prompt, user_id=user_id):
                     if chunk.get("type") == "chunk":
                         accumulated_output.append(chunk.get("content", ""))
                     yield chunk
@@ -247,6 +249,7 @@ class RAGService:
         source_filter: Optional[str] = None,
         frontend_requirements: str = "",
         backend_requirements: str = "",
+        user_id: Optional[str] = None,
     ) -> str:
         """
         Retrieve context and build an enhanced prompt for IDE use (MCP)
@@ -259,7 +262,8 @@ class RAGService:
                 user_query=user_query,
                 max_chunks=max_chunks,
                 source_type=source_filter,
-                include_context=True
+                include_context=True,
+                user_id=user_id,
             )
            
             if not results:
@@ -331,7 +335,7 @@ Optimized Prompt:"""
  
             # 5. Call LLM to generate the prompt
             generated_prompt = ""
-            async for chunk in self._stream_claude_response(meta_prompt):
+            async for chunk in self._stream_claude_response(meta_prompt, user_id=user_id):
                 if chunk['type'] == 'chunk':
                     generated_prompt += chunk['content']
            
@@ -355,7 +359,7 @@ Optimized Prompt:"""
             return 'confluence'
         return None
  
-    def _rewrite_query(self, user_query: str) -> List[str]:
+    def _rewrite_query(self, user_query: str, user_id: Optional[str] = None) -> List[str]:
         """
         Use the LLM to generate 3 alternative search queries for the user's question.
         Returns list of up to 3 rewritten queries (does NOT include the original).
@@ -380,6 +384,7 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
                 model="Claude-4.5-Haiku",
                 temperature=0.3,
                 max_tokens=256,
+                user_id=user_id,
             )
 
             if not response:
@@ -412,7 +417,8 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
         user_query: str,
         max_chunks: int = 10,
         source_type: Optional[str] = None,
-        include_context: bool = True
+        include_context: bool = True,
+        user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Multi-query search: rewrite the user query into variants, run hybrid search
@@ -421,7 +427,7 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
         # Step 1: Generate query variants (original + up to 3 rewrites)
-        rewritten_queries = self._rewrite_query(user_query)
+        rewritten_queries = self._rewrite_query(user_query, user_id=user_id)
         all_queries = [user_query] + rewritten_queries
         logger.info(f"[MULTI_QUERY] Searching with {len(all_queries)} query variants")
 
@@ -529,16 +535,17 @@ Answer:"""
  
         return prompt
    
-    async def _stream_claude_response(self, prompt: str):
+    async def _stream_claude_response(self, prompt: str, user_id: Optional[str] = None):
         """Generate response via gateway and emit as chunk events."""
         try:
             prompt_len = len(prompt)
             logger.info(f"Sending prompt to gateway: model={self.model_id}, prompt_length={prompt_len} chars (~{prompt_len // 4} tokens)")
- 
+
             text = chat_completion(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.7,
                 max_tokens=4096,
+                user_id=user_id,
             )
  
             if text:

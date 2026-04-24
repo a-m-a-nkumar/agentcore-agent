@@ -102,7 +102,8 @@ async def query_documentation(
                             project_id=request.project_id,
                             user_query=request.query,
                             max_chunks=request.max_chunks,
-                            source_filter=request.source_filter
+                            source_filter=request.source_filter,
+                            user_id=user_id,
                         )
                         yield f"data: {json.dumps({'type': 'enhanced_prompt', 'content': enhanced_prompt})}\n\n"
                         yield f"data: {json.dumps({'type': 'done'})}\n\n"
@@ -114,7 +115,8 @@ async def query_documentation(
                         user_query=request.query,
                         max_chunks=request.max_chunks,
                         source_filter=request.source_filter,
-                        include_context=request.include_context
+                        include_context=request.include_context,
+                        user_id=user_id,
                     ):
                         yield f"data: {json.dumps(event)}\n\n"
             except Exception as e:
