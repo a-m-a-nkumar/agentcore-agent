@@ -1,5 +1,6 @@
 import logging
 import os
+import threading
 import time
 from typing import Dict, List, Optional, Union
 
@@ -24,6 +25,21 @@ def _get_client() -> OpenAI:
     return _client
 
 
+def _record_tokens_async(user_id: Optional[str], total_tokens: int) -> None:
+    """Fire-and-forget write to users.token_usage — never blocks the caller."""
+    if not user_id or not total_tokens or total_tokens <= 0:
+        return
+
+    def _write():
+        try:
+            from db_helper import increment_user_token_usage
+            increment_user_token_usage(user_id, total_tokens)
+        except Exception as e:
+            logger.warning(f"[LLM Gateway] token_usage write failed for {user_id}: {e}")
+
+    threading.Thread(target=_write, daemon=True).start()
+
+
 def chat_completion(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
@@ -31,6 +47,7 @@ def chat_completion(
     max_tokens: Optional[int] = None,
     system_prompt: Optional[str] = None,
     return_metadata: bool = False,
+    user_id: Optional[str] = None,
 ) -> Union[str, Dict]:
     client = _get_client()
     resolved = model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
@@ -54,7 +71,17 @@ def chat_completion(
     start = time.time()
     response = client.chat.completions.create(**params)
     elapsed = time.time() - start
-    logger.info(f"[LLM Gateway] Response received in {elapsed:.1f}s")
+
+    usage = getattr(response, "usage", None)
+    if usage:
+        total = getattr(usage, "total_tokens", 0) or 0
+        logger.info(
+            f"[LLM Gateway] {elapsed:.1f}s tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
+            f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
+        )
+        _record_tokens_async(user_id, total)
+    else:
+        logger.info(f"[LLM Gateway] Response received in {elapsed:.1f}s (no usage)")
 
     if not response or not response.choices:
         logger.error(f"[LLM Gateway] Empty response from gateway: {response}")
@@ -75,6 +102,7 @@ def chat_completion_with_tools(
     model: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
+    user_id: Optional[str] = None,
 ) -> Dict:
     """
     Gateway call with OpenAI-style function calling (tools).
@@ -101,7 +129,18 @@ def chat_completion_with_tools(
     start = time.time()
     response = client.chat.completions.create(**params)
     elapsed = time.time() - start
-    logger.info(f"[LLM Gateway] Tool response in {elapsed:.1f}s, finish_reason={response.choices[0].finish_reason}")
+
+    usage = getattr(response, "usage", None)
+    if usage:
+        total = getattr(usage, "total_tokens", 0) or 0
+        logger.info(
+            f"[LLM Gateway] Tool response {elapsed:.1f}s finish_reason={response.choices[0].finish_reason} "
+            f"tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
+            f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
+        )
+        _record_tokens_async(user_id, total)
+    else:
+        logger.info(f"[LLM Gateway] Tool response in {elapsed:.1f}s, finish_reason={response.choices[0].finish_reason}")
 
     if not response or not response.choices:
         raise ValueError(f"Gateway returned empty response for model={resolved}")

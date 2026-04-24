@@ -342,7 +342,7 @@ RULES — follow all of these strictly:
 """
 
 
-def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str) -> str:
+def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str, user_id: Optional[str] = None) -> str:
     """
     Use Bedrock (Claude) to generate a Test Scenario document from BRD content.
     Returns a markdown string.
@@ -356,6 +356,7 @@ def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str) -> s
         model=BEDROCK_MODEL_ID,
         temperature=0,
         max_tokens=16000,
+        user_id=user_id,
     )
     content = _strip_trailing_notes(content)
     logger.info(f"Bedrock response received, length: {len(content)} characters")
@@ -468,7 +469,8 @@ async def generate_test_scenarios(
     try:
         markdown_content = generate_test_scenarios_with_bedrock(
             page_data['content'],
-            page_data['title']
+            page_data['title'],
+            user_id=current_user.get("id"),
         )
         return {
             "page_title": page_data['title'],
@@ -534,7 +536,7 @@ async def generate_test_scenarios_stream(
     )
 
 
-def extract_scenarios_with_bedrock(raw_content: str, page_title: str) -> dict:
+def extract_scenarios_with_bedrock(raw_content: str, page_title: str, user_id: Optional[str] = None) -> dict:
     """
     Use Bedrock (Claude) to extract structured test scenarios from raw
     Confluence page content and generate a clean Gherkin prompt.
@@ -599,6 +601,7 @@ RULES:
         model=BEDROCK_MODEL_ID,
         temperature=0.1,
         max_tokens=8000,
+        user_id=user_id,
     )
     logger.info(f"Bedrock extraction response length: {len(content_text)} chars")
 
@@ -644,7 +647,8 @@ async def parse_scenarios_from_confluence(
     try:
         result = extract_scenarios_with_bedrock(
             page_data['content'],
-            page_data['title']
+            page_data['title'],
+            user_id=current_user.get("id"),
         )
         return {
             "page_title": page_data['title'],

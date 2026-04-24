@@ -151,9 +151,21 @@ def _run_migrations(db_params: dict, sslmode: str):
                     END IF;
                 END $$;
             """)
+            # Add token_usage column to users table — per-user cumulative LLM token count
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'users' AND column_name = 'token_usage'
+                    ) THEN
+                        ALTER TABLE users ADD COLUMN token_usage BIGINT NOT NULL DEFAULT 0;
+                    END IF;
+                END $$;
+            """)
 
             conn.commit()
-            logger.info("Database migrations completed (brd_id, agentcore_session_id, artifact_lineage)")
+            logger.info("Database migrations completed (brd_id, agentcore_session_id, artifact_lineage, token_usage)")
     except Exception as e:
         conn.rollback()
         logger.error(f"Migration error (non-fatal): {e}")
@@ -963,3 +975,26 @@ def get_user_figma_credentials(user_id: str):
             return dict(result) if result else None
     finally:
         release_db_connection(conn)
+
+
+def increment_user_token_usage(user_id: str, tokens: int) -> None:
+    """Atomically add `tokens` to users.token_usage for the given user_id.
+
+    Silently skips if user_id is missing or tokens <= 0. Never raises — token
+    accounting must not break user-facing flows.
+    """
+    if not user_id or not tokens or tokens <= 0:
+        return
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    "UPDATE users SET token_usage = token_usage + %s WHERE id = %s",
+                    (int(tokens), user_id),
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+    except Exception as e:
+        logger.warning(f"[token_usage] Failed to increment for user {user_id}: {e}")

@@ -58,6 +58,7 @@ def _invoke_claude(
     user_message: str,
     model_id: str = XML_MODEL_ID,
     max_tokens: int = XML_MAX_TOKENS,
+    user_id: Optional[str] = None,
 ) -> str:
     """Call the environment LLM synchronously and return the full text response."""
     try:
@@ -67,6 +68,7 @@ def _invoke_claude(
             temperature=0.5,
             max_tokens=max_tokens,
             system_prompt=system_prompt,
+            user_id=user_id,
         )
     except Exception as e:
         logger.error(f"[DESIGN] LLM invoke error: {e}")
@@ -521,7 +523,7 @@ def _inline_md(text: str) -> str:
 @router.post("/generate-prompt", response_model=GeneratePromptResponse)
 async def generate_architecture_prompt(
     request: GeneratePromptRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Combine content from multiple Confluence pages and generate a
@@ -541,7 +543,7 @@ CONFLUENCE CONTENT:
 Output ONLY the completed prompt block starting with the ==== header line. Do not add any preamble or explanation before or after it."""
 
     logger.info(f"[DESIGN] Generating architecture prompt v3.0 from {len(request.page_contents)} page(s)")
-    prompt = _invoke_claude(ARCHITECTURE_SYSTEM_PROMPT, user_message, model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS)
+    prompt = _invoke_claude(ARCHITECTURE_SYSTEM_PROMPT, user_message, model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS, user_id=current_user.get("id"))
     logger.info(f"[DESIGN] Prompt generated ({len(prompt)} chars)")
     return GeneratePromptResponse(prompt=prompt)
 
@@ -549,7 +551,7 @@ Output ONLY the completed prompt block starting with the ==== header line. Do no
 @router.post("/generate-xml", response_model=GenerateXMLResponse)
 async def generate_drawio_xml(
     request: GenerateXMLRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Take a finalised architecture prompt and generate a valid draw.io
@@ -585,7 +587,7 @@ Requirements:
 Output ONLY the XML, starting with <mxGraphModel and ending with </mxGraphModel>."""
 
     logger.info("[DESIGN] Generating draw.io XML")
-    raw = _invoke_claude(system_prompt, user_message)
+    raw = _invoke_claude(system_prompt, user_message, user_id=current_user.get("id"))
 
     # Strip any accidental markdown fences
     raw = raw.replace("```xml", "").replace("```", "").strip()
@@ -601,7 +603,7 @@ Output ONLY the XML, starting with <mxGraphModel and ending with </mxGraphModel>
 @router.post("/generate-document", response_model=GenerateDocumentResponse)
 async def generate_architecture_document(
     request: GenerateDocumentRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Generate a professional architecture document in Markdown from the
@@ -631,6 +633,7 @@ Then output the full architecture document in Markdown following your instructio
         user_message,
         model_id=DOCUMENT_MODEL_ID,
         max_tokens=DOCUMENT_MAX_TOKENS,
+        user_id=current_user.get("id"),
     )
     logger.info(f"[DESIGN] Document generated ({len(document)} chars)")
     return GenerateDocumentResponse(document=document)
@@ -650,7 +653,7 @@ def _invoke_claude_stream(system_prompt: str, user_message: str, model_id: str, 
 @router.post("/generate-prompt-stream")
 async def generate_architecture_prompt_stream(
     request: GeneratePromptRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """Streaming version of /generate-prompt. Sends SSE chunks as Claude generates."""
     if not request.page_contents:
@@ -678,7 +681,7 @@ Output ONLY the completed prompt block starting with the ==== header line. Do no
 @router.post("/generate-document-stream")
 async def generate_architecture_document_stream(
     request: GenerateDocumentRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """Streaming version of /generate-document. Sends SSE chunks as Claude generates."""
     if not request.xml.strip():

@@ -147,6 +147,7 @@ def chat_completion(
     max_tokens: Optional[int] = None,
     system_prompt: Optional[str] = None,
     return_metadata: bool = False,
+    user_id: Optional[str] = None,
 ) -> Union[str, Dict]:
     """
     Send a chat request directly to AWS Bedrock (local dev — no gateway).
@@ -178,6 +179,22 @@ def chat_completion(
     )
     result = json.loads(response["body"].read())
     content = (result.get("content", [{}])[0].get("text", "") or "").strip()
+
+    # Record per-user token usage (fire-and-forget, same pattern as gateway)
+    if user_id:
+        usage = result.get("usage") or {}
+        total = (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0)
+        if total > 0:
+            try:
+                import threading
+                from db_helper import increment_user_token_usage
+                threading.Thread(
+                    target=lambda: increment_user_token_usage(user_id, total),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                logger.warning(f"[LOCAL LLM] token_usage write failed: {e}")
+
     if return_metadata:
         stop_reason = result.get("stop_reason")
         finish_reason = "length" if stop_reason == "max_tokens" else stop_reason

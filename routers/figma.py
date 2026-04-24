@@ -52,6 +52,7 @@ def _invoke_claude(
     user_message: str,
     model_id: str = FIGMA_MODEL_ID,
     max_tokens: int = FIGMA_MAX_TOKENS,
+    user_id: Optional[str] = None,
 ) -> str:
     """Call Claude via the environment gateway (local: Bedrock, VDI: Deluxe proxy)."""
     try:
@@ -61,6 +62,7 @@ def _invoke_claude(
             temperature=0.5,
             max_tokens=max_tokens,
             system_prompt=system_prompt,
+            user_id=user_id,
         )
     except Exception as e:
         logger.error(f"[FIGMA] LLM invoke error: {e}")
@@ -283,7 +285,7 @@ Output ONLY the filled prompt block starting with the === header line. Zero plac
     logger.info(f"[FIGMA] Generating prompt for story {story.key} in project {request.project_id}")
     for i, r in enumerate(results, 1):
         logger.info(f"[FIGMA] Chunk {i}: '{r['title']}' (source_id={r['source_id']}, similarity={r['similarity']:.3f}, url={r.get('url', 'N/A')})")
-    prompt = _invoke_claude(FIGMA_SYSTEM_PROMPT, user_message)
+    prompt = _invoke_claude(FIGMA_SYSTEM_PROMPT, user_message, user_id=current_user.get("id"))
     logger.info(f"[FIGMA] Prompt generated ({len(prompt)} chars), {len(sources)} unique sources")
 
     return FigmaPromptResponse(prompt=prompt, sources=sources)

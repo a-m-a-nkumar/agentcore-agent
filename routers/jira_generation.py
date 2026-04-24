@@ -339,6 +339,7 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
             temperature=0.3,
             max_tokens=32768,
             return_metadata=True,
+            user_id=current_user.get("id"),
         )
 
         generated_text = response["content"]

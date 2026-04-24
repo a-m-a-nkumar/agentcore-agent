@@ -1245,7 +1245,7 @@ class AiAnalyzePipelineRequest(BaseModel):
 
 
 @router.post("/ai-analyze-pipeline")
-async def ai_analyze_pipeline(req: AiAnalyzePipelineRequest, _=Depends(get_current_user)):
+async def ai_analyze_pipeline(req: AiAnalyzePipelineRequest, current_user: dict = Depends(get_current_user)):
     import json as _json
     import re as _re
 
@@ -1288,7 +1288,7 @@ CRITICAL JSON RULES:
 
     try:
         messages = [{"role": "user", "content": prompt}]
-        text = chat_completion(messages=messages, temperature=0, max_tokens=1000).strip()
+        text = chat_completion(messages=messages, temperature=0, max_tokens=1000, user_id=current_user.get("oid") or current_user.get("sub")).strip()
 
         # Strip markdown fences if present (```json ... ``` or ``` ... ```)
         if text.startswith("```"):
@@ -1363,7 +1363,7 @@ class AiEditPipelineRequest(BaseModel):
 
 
 @router.post("/ai-edit-pipeline")
-async def ai_edit_pipeline(req: AiEditPipelineRequest, _=Depends(get_current_user)):
+async def ai_edit_pipeline(req: AiEditPipelineRequest, current_user: dict = Depends(get_current_user)):
     import json as _json
     import re as _re
 
@@ -1389,7 +1389,7 @@ Return ONLY the complete YAML. No explanation, no markdown fences, no comments."
 
     try:
         messages = [{"role": "user", "content": prompt}]
-        modified = chat_completion(messages=messages, temperature=0, max_tokens=8000).strip()
+        modified = chat_completion(messages=messages, temperature=0, max_tokens=8000, user_id=current_user.get("oid") or current_user.get("sub")).strip()
 
         # Strip markdown fences if Claude added them
         if modified.startswith("```"):
@@ -1439,7 +1439,7 @@ class AiSummarizeLogsRequest(BaseModel):
 
 
 @router.post("/ai-summarize-logs")
-async def ai_summarize_logs(req: AiSummarizeLogsRequest, _=Depends(get_current_user)):
+async def ai_summarize_logs(req: AiSummarizeLogsRequest, current_user: dict = Depends(get_current_user)):
     import json as _json
 
     data = req.execution_data
@@ -1466,7 +1466,7 @@ Keep it brief and actionable."""
         # Truncate large payloads to avoid token limits
         prompt_safe = prompt[:12000] if len(prompt) > 12000 else prompt
         messages = [{"role": "user", "content": prompt_safe}]
-        text = chat_completion(messages=messages, temperature=0, max_tokens=1000)
+        text = chat_completion(messages=messages, temperature=0, max_tokens=1000, user_id=current_user.get("oid") or current_user.get("sub"))
         return {"summary": text.strip()}
     except Exception as e:
         import traceback
@@ -1657,7 +1657,7 @@ async def _execute_chat_tool(req: HarnessChatRequest, tool_name: str, tool_input
 
 
 @router.post("/chat")
-async def harness_chat(req: HarnessChatRequest, _=Depends(get_current_user)):
+async def harness_chat(req: HarnessChatRequest, current_user: dict = Depends(get_current_user)):
     import json as _json
 
     system_prompt = f"""You are a helpful Harness CI/CD assistant inside an SDLC platform.
@@ -1686,6 +1686,7 @@ Rules:
                 tools=HARNESS_CHAT_TOOLS,
                 temperature=0,
                 max_tokens=4000,
+                user_id=current_user.get("oid") or current_user.get("sub"),
             )
             msg = result["message"]
             finish_reason = result["finish_reason"]
@@ -1725,7 +1726,7 @@ Rules:
                 })
 
         # If we exhausted all iterations, return the last message
-        final = chat_completion(messages=messages, temperature=0, max_tokens=4000)
+        final = chat_completion(messages=messages, temperature=0, max_tokens=4000, user_id=current_user.get("oid") or current_user.get("sub"))
         messages.append({"role": "assistant", "content": final})
         return {"answer": final.strip(), "tool_calls": tool_calls_log, "history": messages}
 
