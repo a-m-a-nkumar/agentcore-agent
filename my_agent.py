@@ -47,6 +47,7 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
             return
         try:
             import json as _json
+            import ssl as _ssl
             from urllib import request as _urlreq
             body = _json.dumps({
                 "user_id": user_id, "tokens": total_tokens, "source": source,
@@ -57,7 +58,12 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
                 headers={"X-API-Key": api_key, "Content-Type": "application/json"},
                 method="POST",
             )
-            with _urlreq.urlopen(req, timeout=5) as resp:
+            ctx = None
+            if os.getenv("INTERNAL_TLS_VERIFY", "1") == "0":
+                ctx = _ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+            with _urlreq.urlopen(req, timeout=5, context=ctx) as resp:
                 if resp.status >= 400:
                     print(f"[BRD-AGENT] record-tokens callback {resp.status}: {resp.read()[:200]!r}", flush=True)
         except Exception as e:

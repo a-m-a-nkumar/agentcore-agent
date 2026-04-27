@@ -60,6 +60,7 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
             return
         try:
             import json as _json
+            import ssl as _ssl
             from urllib import request as _urlreq
             from urllib.error import HTTPError as _HTTPError, URLError as _URLError
 
@@ -72,7 +73,17 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
                 headers={"X-API-Key": api_key, "Content-Type": "application/json"},
                 method="POST",
             )
-            with _urlreq.urlopen(req, timeout=5) as resp:
+            # The deployed dev backend (sdlc-dev.deluxe.com) sits behind a
+            # Deluxe-internal CA whose chain isn't in the Lambda runtime's
+            # default trust store. Allow callers (Lambdas, agent containers)
+            # to opt out of cert verification for this internal callback by
+            # setting INTERNAL_TLS_VERIFY=0. Payload is just tokens + UUID.
+            ctx = None
+            if os.getenv("INTERNAL_TLS_VERIFY", "1") == "0":
+                ctx = _ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = _ssl.CERT_NONE
+            with _urlreq.urlopen(req, timeout=5, context=ctx) as resp:
                 if resp.status >= 400:
                     logger.warning(f"[LLM Gateway] record-tokens callback {resp.status}: {resp.read()[:200]!r}")
         except _HTTPError as e:
