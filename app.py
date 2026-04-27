@@ -1950,7 +1950,8 @@ async def analyst_chat_stream(
 
                 payload = {
                     'session_id': runtime_session_id,
-                    'user_message': formatted_message
+                    'user_message': formatted_message,
+                    'user_id': current_user.get('user_id'),  # for token usage tracking
                 }
 
                 response = lambda_client.invoke(
@@ -2246,7 +2247,8 @@ async def analyst_generate_brd(
             
             lambda_payload = {
                 "session_id": session_id,
-                "brd_id": brd_id
+                "brd_id": brd_id,
+                "user_id": current_user.get("user_id"),  # for token usage tracking
             }
             
             lambda_response = lambda_client.invoke(
@@ -2491,7 +2493,8 @@ async def analyst_generate_brd(
             
             lambda_payload = {
                 "session_id": session_id,
-                "brd_id": brd_id
+                "brd_id": brd_id,
+                "user_id": current_user.get("user_id"),  # for token usage tracking
             }
             
             lambda_response = lambda_client.invoke(
@@ -2705,7 +2708,8 @@ async def analyst_generate_brd(
             
             lambda_payload = {
                 "session_id": session_id,
-                "brd_id": brd_id
+                "brd_id": brd_id,
+                "user_id": current_user.get("user_id"),  # for token usage tracking
             }
             
         except Exception as e:
@@ -2750,7 +2754,8 @@ async def analyst_generate_brd(
         lambda_payload = {
             "conversation_history": messages,  # Pass messages array directly
             "brd_id": brd_id,
-            "session_id": session_id
+            "session_id": session_id,
+            "user_id": current_user.get("user_id"),  # for token usage tracking
         }
         
         print(f"[ANALYST-GENERATE-BRD] Calling Lambda: {lambda_function_name}")
