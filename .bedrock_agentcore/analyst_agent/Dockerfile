@@ -18,7 +18,9 @@ ENV UV_SYSTEM_PYTHON=1 \
     LAMBDA_REQUIREMENTS_GATHERING_ARN=arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering \
     LAMBDA_BRD_FROM_HISTORY_ARN=arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history \
     DLXAI_GATEWAY_URL=https://dlxai-dev.deluxe.com/proxy \
-    GATEWAY_MODEL=Claude-4.5-Sonnet
+    GATEWAY_MODEL=Claude-4.5-Sonnet \
+    BACKEND_URL="" \
+    INTERNAL_API_KEY=""
 
 
 

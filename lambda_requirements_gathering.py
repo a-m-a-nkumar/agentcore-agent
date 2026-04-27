@@ -151,6 +151,7 @@ def lambda_handler(event, context):
         # Extract inputs
         session_id = event.get('session_id')
         user_message = event.get('user_message')
+        user_id = event.get('user_id')  # for token attribution
         
         if not session_id or not user_message:
             return {
@@ -182,6 +183,8 @@ def lambda_handler(event, context):
             messages=[{"role": "user", "content": full_prompt}],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
+            user_id=user_id,
+            token_source="lambda_requirements_gathering",
         )
         
         logger.info(f"Generated response length: {len(assistant_response)} chars")

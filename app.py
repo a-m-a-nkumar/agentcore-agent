@@ -7,6 +7,7 @@ import asyncio
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
+from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -754,7 +755,8 @@ async def generate_brd(
         payload_dict = {
             "prompt": bmad_prompt,
             "template": template_text,
-            "transcript": transcript_text
+            "transcript": transcript_text,
+            "user_id": current_user.get("user_id"),  # for token usage tracking
         }
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
@@ -966,9 +968,21 @@ async def generate_brd_from_s3(
         print("[APP] Starting BRD generation from S3")
         print("="*80)
 
-        # Support both plural (new) and singular (backward compat) field names
-        raw_paths = transcript_s3_paths or transcript_s3_path or ""
-        s3_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
+        # Support both plural (new) and singular (backward compat) field names.
+        # Filenames can contain commas (e.g. "Monday, March 30, part 2.txt"), so a
+        # JSON array is the canonical form. Fall back to comma-split only when the
+        # payload isn't valid JSON (older clients).
+        raw_paths = (transcript_s3_paths or transcript_s3_path or "").strip()
+        s3_paths: list[str] = []
+        if raw_paths:
+            try:
+                parsed = json.loads(raw_paths)
+                if isinstance(parsed, list):
+                    s3_paths = [str(p).strip() for p in parsed if str(p).strip()]
+                elif isinstance(parsed, str):
+                    s3_paths = [parsed.strip()] if parsed.strip() else []
+            except (ValueError, TypeError):
+                s3_paths = [p.strip() for p in raw_paths.split(",") if p.strip()]
         if not s3_paths:
             return JSONResponse(status_code=400, content={"error": "No transcript S3 paths provided"})
 
@@ -1019,7 +1033,8 @@ async def generate_brd_from_s3(
         payload_dict = {
             "prompt": bmad_prompt,
             "template": template_text,
-            "transcript": transcript_text
+            "transcript": transcript_text,
+            "user_id": current_user.get("user_id"),  # for token usage tracking
         }
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
@@ -1191,6 +1206,7 @@ async def chat_with_agent(
             "prompt": formatted_message,
             "brd_id": brd_id,
             "session_id": session_id,  # Pass session_id so agent can use it
+            "user_id": current_user.get("user_id"),  # for token usage tracking
         }
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
@@ -1488,6 +1504,7 @@ async def analyst_chat(
         payload_dict = {
             "prompt": formatted_message,
             "session_id": runtime_session_id,  # Always use the computed session_id
+            "user_id": current_user.get("user_id"),  # for token usage tracking
         }
         if project_id and project_id != "none":
             payload_dict["project_id"] = project_id
@@ -3608,6 +3625,42 @@ async def api_get_brd_section(
         "section": section,
         "markdown": markdown,
     })
+
+
+# -------------------------
+# Internal token-usage callback
+# -------------------------
+# Used by Lambdas and AgentCore agents (which can't reach RDS directly) to
+# report LLM token consumption back to the backend. API-key authenticated.
+
+class RecordTokensRequest(BaseModel):
+    user_id: str
+    tokens: int
+    source: Optional[str] = None  # e.g. "lambda_brd_generator", "pm_agent"
+
+
+@app.post("/api/internal/record-tokens", status_code=204)
+async def record_tokens(
+    body: RecordTokensRequest,
+    x_api_key: str = Header(alias="X-API-Key"),
+):
+    """Increment users.token_usage from Lambda/agent call sites that can't talk
+    to RDS directly. Validates X-API-Key against INTERNAL_API_KEYS env."""
+    from routers.internal_utils import validate_api_key
+    from db_helper import increment_user_token_usage as _bump
+
+    validate_api_key(x_api_key)
+
+    if body.tokens <= 0 or not body.user_id:
+        return  # 204 — silently no-op for invalid inputs
+
+    try:
+        _bump(body.user_id, body.tokens)
+        print(f"[record-tokens] user={body.user_id} tokens={body.tokens} source={body.source or '?'}")
+    except Exception as e:
+        # Log but don't surface — token accounting must never break callers
+        print(f"[record-tokens] FAILED user={body.user_id} tokens={body.tokens}: {e}")
+
 
 if __name__ == "__main__":
     import uvicorn

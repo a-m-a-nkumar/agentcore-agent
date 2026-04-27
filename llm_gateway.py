@@ -25,17 +25,49 @@ def _get_client() -> OpenAI:
     return _client
 
 
-def _record_tokens_async(user_id: Optional[str], total_tokens: int) -> None:
-    """Fire-and-forget write to users.token_usage — never blocks the caller."""
+def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Optional[str] = None) -> None:
+    """Fire-and-forget write to users.token_usage — never blocks the caller.
+
+    Dual-mode:
+      1. ECS / local backend (db_helper importable AND DB reachable):
+         direct UPDATE on users.token_usage.
+      2. Lambda / agent container (no RDS access): POST to the backend's
+         /api/internal/record-tokens endpoint using BACKEND_URL +
+         INTERNAL_API_KEY env vars.
+    """
     if not user_id or not total_tokens or total_tokens <= 0:
         return
 
     def _write():
+        # Try direct DB write first (ECS path)
         try:
             from db_helper import increment_user_token_usage
             increment_user_token_usage(user_id, total_tokens)
+            return
         except Exception as e:
-            logger.warning(f"[LLM Gateway] token_usage write failed for {user_id}: {e}")
+            logger.debug(f"[LLM Gateway] direct DB write skipped ({e}); falling back to HTTP callback")
+
+        # Fallback: HTTP callback to backend (Lambda / agent path)
+        backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
+        api_key = os.getenv("INTERNAL_API_KEY", "")
+        if not backend_url or not api_key:
+            logger.warning(
+                f"[LLM Gateway] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY env vars not set "
+                f"(would have recorded {total_tokens} tokens for user {user_id})"
+            )
+            return
+        try:
+            import requests as _requests
+            resp = _requests.post(
+                f"{backend_url}/api/internal/record-tokens",
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"user_id": user_id, "tokens": total_tokens, "source": source},
+                timeout=5,
+            )
+            if not resp.ok:
+                logger.warning(f"[LLM Gateway] record-tokens callback {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.warning(f"[LLM Gateway] record-tokens callback failed for {user_id}: {e}")
 
     threading.Thread(target=_write, daemon=True).start()
 
@@ -48,6 +80,7 @@ def chat_completion(
     system_prompt: Optional[str] = None,
     return_metadata: bool = False,
     user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
 ) -> Union[str, Dict]:
     client = _get_client()
     resolved = model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
@@ -77,10 +110,11 @@ def chat_completion(
         total = getattr(usage, "total_tokens", 0) or 0
         logger.info(
             f"[LLM Gateway] {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} "
+            f"source={token_source or '?'} "
             f"tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
             f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
         )
-        _record_tokens_async(user_id, total)
+        _record_tokens_async(user_id, total, source=token_source)
     else:
         logger.info(f"[LLM Gateway] {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} (no usage)")
 
@@ -104,6 +138,7 @@ def chat_completion_with_tools(
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
     user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
 ) -> Dict:
     """
     Gateway call with OpenAI-style function calling (tools).
@@ -136,11 +171,12 @@ def chat_completion_with_tools(
         total = getattr(usage, "total_tokens", 0) or 0
         logger.info(
             f"[LLM Gateway] Tool {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} "
+            f"source={token_source or '?'} "
             f"finish={response.choices[0].finish_reason} "
             f"tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
             f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
         )
-        _record_tokens_async(user_id, total)
+        _record_tokens_async(user_id, total, source=token_source)
     else:
         logger.info(f"[LLM Gateway] Tool {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} finish={response.choices[0].finish_reason} (no usage)")
 

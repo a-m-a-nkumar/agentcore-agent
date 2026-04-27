@@ -6,6 +6,7 @@ This agent uses Lambda functions as tools for BRD generation, retrieval, and edi
 import json
 import os
 import re
+import threading
 from typing import Optional
 
 from bedrock_agentcore import BedrockAgentCoreApp
@@ -23,6 +24,65 @@ from environment import (
     DEFAULT_AGENTCORE_MEMORY_ID,
     DEFAULT_AGENTCORE_ACTOR_ID,
 )
+
+# Per-invocation user_id (set by entrypoint, read by tools when building Lambda payloads
+# so each Lambda can attribute its own LLM token usage to the right user).
+_current_user_id: Optional[str] = None
+
+
+def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, source: str) -> None:
+    """Fire-and-forget HTTP callback to backend's /api/internal/record-tokens.
+    Used for tokens spent by Strands inside this agent (BedrockModel / OpenAIModel),
+    which don't go through llm_gateway.
+    """
+    if not user_id or not total_tokens or total_tokens <= 0:
+        return
+
+    def _post():
+        backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
+        api_key = os.getenv("INTERNAL_API_KEY", "")
+        if not backend_url or not api_key:
+            print(f"[BRD-AGENT] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY not set "
+                  f"(would have recorded {total_tokens} tokens for {user_id})", flush=True)
+            return
+        try:
+            import requests as _requests
+            resp = _requests.post(
+                f"{backend_url}/api/internal/record-tokens",
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"user_id": user_id, "tokens": total_tokens, "source": source},
+                timeout=5,
+            )
+            if not resp.ok:
+                print(f"[BRD-AGENT] record-tokens callback {resp.status_code}: {resp.text[:200]}", flush=True)
+        except Exception as e:
+            print(f"[BRD-AGENT] record-tokens callback failed for {user_id}: {e}", flush=True)
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def _capture_strands_metrics(agent_obj, user_id: Optional[str], source: str) -> None:
+    """Read Strands accumulated token usage off an agent and ship it to backend."""
+    if not user_id:
+        return
+    try:
+        # Strands stores cumulative token usage on agent.event_loop_metrics.accumulated_usage
+        metrics = getattr(agent_obj, "event_loop_metrics", None) or getattr(agent_obj, "metrics", None)
+        usage = None
+        if metrics is not None:
+            usage = getattr(metrics, "accumulated_usage", None) or getattr(metrics, "total_token_usage", None)
+        if usage is None:
+            return
+        total = 0
+        if isinstance(usage, dict):
+            total = usage.get("totalTokens") or usage.get("total_tokens") or 0
+        else:
+            total = getattr(usage, "totalTokens", 0) or getattr(usage, "total_tokens", 0)
+        if total:
+            print(f"[BRD-AGENT] Strands tokens={total} user={user_id} source={source}", flush=True)
+            _record_tokens_via_callback(user_id, int(total), source)
+    except Exception as e:
+        print(f"[BRD-AGENT] _capture_strands_metrics failed: {e}", flush=True)
 
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
@@ -132,7 +192,9 @@ def generate_brd(template: str, transcript: str, brd_id: Optional[str] = None) -
     }
     if brd_id:
         payload['brd_id'] = brd_id
-    
+    if _current_user_id:
+        payload['user_id'] = _current_user_id  # for token usage tracking
+
     lambda_response = invoke_lambda_tool(LAMBDA_GENERATOR, payload)
     
     print(f"[BRD-AGENT] Lambda response type: {type(lambda_response)}", flush=True)
@@ -298,7 +360,9 @@ def chat_with_brd(
         payload['template'] = template
     if transcript:
         payload['transcript'] = transcript
-    
+    if _current_user_id:
+        payload['user_id'] = _current_user_id  # for token usage tracking
+
     lambda_response = invoke_lambda_tool(LAMBDA_CHAT, payload)
     
     # Parse response - handle different response formats
@@ -451,14 +515,19 @@ def invoke(payload):
         "brd_id": "Optional BRD ID"
     }
     """
+    global _current_user_id
     try:
         print("=" * 80, flush=True)
         print("[BRD-AGENT] Handler invoked (Strands + Lambda Tools)", flush=True)
         print("=" * 80, flush=True)
-        
+
+        # Stash user_id so tools can attribute Lambda LLM calls.
+        _current_user_id = payload.get("user_id") or None
+        print(f"[BRD-AGENT] user_id={_current_user_id or 'unknown'}", flush=True)
+
         # Extract user message from payload
         user_message = payload.get("prompt") or payload.get("text") or payload.get("message", "Hello! How can I help you with BRD operations?")
-        
+
         print(f"[BRD-AGENT] User message: {user_message[:200]}...", flush=True)
         print(f"[BRD-AGENT] Payload keys: {list(payload.keys())}", flush=True)
         
@@ -573,6 +642,7 @@ Now analyze and take action."""
                 
                 try:
                     result = agent(enhanced_message)
+                    _capture_strands_metrics(agent, _current_user_id, "pm_agent_chat")
                     if hasattr(result, 'data'):
                         result_text = str(result.data) if result.data else str(result)
                     elif hasattr(result, 'output'):
@@ -583,7 +653,7 @@ Now analyze and take action."""
                         result_text = result
                     else:
                         result_text = str(result)
-                    
+
                     print(f"[BRD-AGENT] AGENT PATH result: {result_text[:300]}", flush=True)
                 except Exception as e:
                     print(f"[BRD-AGENT] AGENT PATH error, falling back to direct: {e}", flush=True)
@@ -600,10 +670,11 @@ Now analyze and take action."""
         else:
             # Run the agent with user message for general queries
             print(f"[BRD-AGENT] Running Strands agent for general query...", flush=True)
-            
+
             # Use the synchronous call method (agent is callable)
             result = agent(user_message)
-            
+            _capture_strands_metrics(agent, _current_user_id, "pm_agent_general")
+
             # Extract response from agent result
             if hasattr(result, 'data'):
                 result_text = str(result.data) if result.data else str(result)
@@ -642,11 +713,13 @@ Now analyze and take action."""
         import traceback
         error_trace = traceback.format_exc()
         print(error_trace, flush=True)
-        
+
         return {
             "result": f"Error processing request: {str(e)}. Please check CloudWatch logs for details.",
             "isError": True
         }
+    finally:
+        _current_user_id = None
 
 if __name__ == "__main__":
     # Run the app locally for testing

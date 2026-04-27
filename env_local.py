@@ -148,6 +148,7 @@ def chat_completion(
     system_prompt: Optional[str] = None,
     return_metadata: bool = False,
     user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
 ) -> Union[str, Dict]:
     """
     Send a chat request directly to AWS Bedrock (local dev — no gateway).

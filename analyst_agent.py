@@ -5,7 +5,64 @@ This agent uses Lambda functions as tools for requirements gathering and BRD gen
 
 import json
 import os
+import threading
 from typing import Optional
+
+# Per-invocation user_id (set by entrypoint, read by tools when building Lambda payloads
+# so each Lambda can attribute its own LLM token usage to the right user).
+_current_user_id: Optional[str] = None
+
+
+def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, source: str) -> None:
+    """Fire-and-forget HTTP callback to backend's /api/internal/record-tokens for
+    Strands tokens spent inside this agent (BedrockModel / OpenAIModel)."""
+    if not user_id or not total_tokens or total_tokens <= 0:
+        return
+
+    def _post():
+        backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
+        api_key = os.getenv("INTERNAL_API_KEY", "")
+        if not backend_url or not api_key:
+            print(f"[ANALYST-AGENT] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY not set "
+                  f"(would have recorded {total_tokens} tokens for {user_id})", flush=True)
+            return
+        try:
+            import requests as _requests
+            resp = _requests.post(
+                f"{backend_url}/api/internal/record-tokens",
+                headers={"X-API-Key": api_key, "Content-Type": "application/json"},
+                json={"user_id": user_id, "tokens": total_tokens, "source": source},
+                timeout=5,
+            )
+            if not resp.ok:
+                print(f"[ANALYST-AGENT] record-tokens callback {resp.status_code}: {resp.text[:200]}", flush=True)
+        except Exception as e:
+            print(f"[ANALYST-AGENT] record-tokens callback failed for {user_id}: {e}", flush=True)
+
+    threading.Thread(target=_post, daemon=True).start()
+
+
+def _capture_strands_metrics(agent_obj, user_id: Optional[str], source: str) -> None:
+    """Read Strands accumulated token usage off an agent and ship it to backend."""
+    if not user_id:
+        return
+    try:
+        metrics = getattr(agent_obj, "event_loop_metrics", None) or getattr(agent_obj, "metrics", None)
+        usage = None
+        if metrics is not None:
+            usage = getattr(metrics, "accumulated_usage", None) or getattr(metrics, "total_token_usage", None)
+        if usage is None:
+            return
+        total = 0
+        if isinstance(usage, dict):
+            total = usage.get("totalTokens") or usage.get("total_tokens") or 0
+        else:
+            total = getattr(usage, "totalTokens", 0) or getattr(usage, "total_tokens", 0)
+        if total:
+            print(f"[ANALYST-AGENT] Strands tokens={total} user={user_id} source={source}", flush=True)
+            _record_tokens_via_callback(user_id, int(total), source)
+    except Exception as e:
+        print(f"[ANALYST-AGENT] _capture_strands_metrics failed: {e}", flush=True)
 
 # Defensive import strategy for BedrockAgentCoreApp (same as my_agent)
 try:
@@ -140,7 +197,9 @@ def gather_requirements(session_id: str, user_message: str) -> str:
         'session_id': session_id,
         'user_message': user_message
     }
-    
+    if _current_user_id:
+        payload['user_id'] = _current_user_id  # for token usage tracking
+
     try:
         result = invoke_lambda_tool(LAMBDA_REQUIREMENTS_GATHERING, payload)
         
@@ -194,10 +253,12 @@ def generate_brd_from_history(session_id: str, brd_id: Optional[str] = None) -> 
     payload = {
         'session_id': session_id
     }
-    
+
     if brd_id:
         payload['brd_id'] = brd_id
-    
+    if _current_user_id:
+        payload['user_id'] = _current_user_id  # for token usage tracking
+
     try:
         result = invoke_lambda_tool(LAMBDA_BRD_FROM_HISTORY, payload)
         
@@ -306,14 +367,19 @@ def invoke(payload):
         "runtime_session_id": "Runtime session ID"
     }
     """
+    global _current_user_id
     try:
         print("=" * 80, flush=True)
         print("[ANALYST-AGENT] Handler invoked (Strands + Lambda Tools)", flush=True)
         print("=" * 80, flush=True)
-        
+
+        # Stash user_id so tools can attribute Lambda LLM calls.
+        _current_user_id = payload.get("user_id") or None
+        print(f"[ANALYST-AGENT] user_id={_current_user_id or 'unknown'}", flush=True)
+
         # Extract user message
         user_message = payload.get("prompt") or payload.get("text") or payload.get("message", "Hello! I'd like to create a BRD.")
-        
+
         print(f"[ANALYST-AGENT] User message: {user_message[:200]}...", flush=True)
         print(f"[ANALYST-AGENT] Payload keys: {list(payload.keys())}", flush=True)
         
@@ -382,7 +448,8 @@ Please help the user with their BRD requirements gathering or generation request
         try:
             # Invoke the agent (fallback only)
             result = agent(enhanced_prompt)
-            
+            _capture_strands_metrics(agent, _current_user_id, "analyst_agent_fallback")
+
             # Extract result text
             if hasattr(result, 'data'):
                 result_text = str(result.data) if result.data else str(result)
@@ -418,13 +485,15 @@ Please help the user with their BRD requirements gathering or generation request
         print(f"[ANALYST-AGENT] Error in invoke: {str(e)}", flush=True)
         import traceback
         print(traceback.format_exc(), flush=True)
-        
+
         session_id = payload.get("session_id", "unknown")
         return {
             "result": f"Error: {str(e)}",
             "session_id": session_id,
             "message": f"Error: {str(e)}"
         }
+    finally:
+        _current_user_id = None
 
 
 # Run the app when module is loaded (always run, not just when executed directly)

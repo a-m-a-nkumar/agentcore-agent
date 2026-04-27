@@ -9,8 +9,13 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-from dotenv import load_dotenv
-load_dotenv()
+# dotenv is only needed for local dev; Lambda/agent containers get env vars
+# from the runtime config, so make the import optional.
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ModuleNotFoundError:
+    pass
 
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")

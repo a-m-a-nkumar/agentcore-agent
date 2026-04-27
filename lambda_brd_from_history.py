@@ -151,22 +151,24 @@ def extract_text_from_docx(docx_bytes: bytes) -> str:
         raise
 
 
-def generate_brd_with_bedrock(template: str, conversation: str) -> str:
+def generate_brd_with_bedrock(template: str, conversation: str, user_id: str = None) -> str:
     """Generate BRD using Bedrock AI"""
     # Build the full prompt using the centralized prompt function
     prompt = get_brd_from_history_prompt(
         template=template,
         conversation=conversation
     )
-    
+
     logger.info(f"Calling Bedrock with prompt length: {len(prompt)} characters")
     logger.info(f"Model: {BEDROCK_MODEL_ID}, Max tokens: {MAX_TOKENS}")
-    
+
     try:
         brd_text = chat_completion(
             messages=[{"role": "user", "content": prompt}],
             temperature=TEMPERATURE,
             max_tokens=MAX_TOKENS,
+            user_id=user_id,
+            token_source="lambda_brd_from_history",
         )
         
         logger.info(f"Generated BRD: {len(brd_text)} characters")
@@ -353,6 +355,7 @@ def lambda_handler(event, context):
         # Extract inputs
         session_id = event.get('session_id')
         brd_id = event.get('brd_id')
+        user_id = event.get('user_id')  # for token attribution
         
         if not session_id:
             return {
@@ -393,7 +396,7 @@ def lambda_handler(event, context):
         
         # Step 4: Generate BRD using Bedrock
         logger.info("Step 4: Generating BRD with Bedrock...")
-        brd_text = generate_brd_with_bedrock(template_text, conversation_text)
+        brd_text = generate_brd_with_bedrock(template_text, conversation_text, user_id=user_id)
         
         # Step 5: Save BRD to S3
         logger.info("Step 5: Saving BRD to S3...")

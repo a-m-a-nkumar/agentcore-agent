@@ -243,13 +243,14 @@ def _extract_text_from_docx(docx_bytes: bytes) -> str:
         raise RuntimeError(f"Failed to extract text from DOCX: {e}")
 
 
-def _invoke_bedrock(prompt: str, max_tokens: int = None) -> str:
+def _invoke_bedrock(prompt: str, max_tokens: int = None, user_id: Optional[str] = None) -> str:
     """
     Invoke Bedrock model to generate BRD.
-    
+
     Args:
         prompt: The full prompt text
         max_tokens: Maximum tokens to generate. If None, uses MAX_TOKENS env var.
+        user_id: User to attribute token usage to.
     """
     effective_max_tokens = max_tokens if max_tokens is not None else MAX_TOKENS
 
@@ -261,6 +262,8 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None) -> str:
         messages=[{"role": "user", "content": prompt}],
         temperature=TEMPERATURE,
         max_tokens=effective_max_tokens,
+        user_id=user_id,
+        token_source="lambda_brd_generator",
     )
 
     logger.info(f"Generated BRD length: {len(brd_text)} characters")
@@ -366,12 +369,14 @@ def lambda_handler(event, context):
     template_s3_key = None
     transcript_s3_bucket = None
     transcript_s3_key = None
-    
+    user_id = None  # for token attribution
+
     # First, try direct access
     if isinstance(evt, dict):
         template_text = evt.get("template") or evt.get("template_text")
         transcript_text = evt.get("transcript") or evt.get("transcript_text")
         brd_id = evt.get("brd_id") or evt.get("brdId")
+        user_id = evt.get("user_id")
         
         # Check for S3 keys (new approach - files in S3, not in message)
         template_s3_bucket = evt.get("template_s3_bucket")
@@ -587,7 +592,7 @@ def lambda_handler(event, context):
         logger.warning(f"Prompt is very long ({estimated_prompt_tokens} tokens). Output limited to {dynamic_max_tokens} tokens.")
 
     try:
-        brd_text = _invoke_bedrock(prompt, max_tokens=dynamic_max_tokens)
+        brd_text = _invoke_bedrock(prompt, max_tokens=dynamic_max_tokens, user_id=user_id)
     except RuntimeError as exc:
         # RuntimeError usually means token limit or model issue
         error_msg = str(exc)

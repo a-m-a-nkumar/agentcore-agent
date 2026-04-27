@@ -34,6 +34,12 @@ AGENTCORE_GATEWAY_ID = DEFAULT_AGENTCORE_GATEWAY_ID
 AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
 AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
 
+# Per-invocation user_id (set by lambda_handler entry, read by invoke_claude_for_chat
+# when the caller didn't pass user_id explicitly). Lambda runs one event at a time
+# per process, so a module-level var is safe.
+_current_user_id: Optional[str] = None
+
+
 def _get_s3_client():
     """Get S3 client"""
     return boto3.client("s3", region_name=BEDROCK_REGION)
@@ -803,6 +809,7 @@ def invoke_claude_for_chat(
     prompt: str,
     conversation_history: List[Dict] = None,
     guard_content_text: Optional[str] = None,
+    user_id: Optional[str] = None,
 ) -> str:
     """
     Invoke gateway model with conversation context.
@@ -813,7 +820,7 @@ def invoke_claude_for_chat(
 
     # Convert history to plain text (safest approach - avoids toolUse/toolResult issues)
     history_text = _render_history_as_text(conversation_history or [])
-    
+
     # Build a single comprehensive prompt with history as text
     if history_text:
         full_prompt = f"{history_text}\n\nUser: {prompt}\nAssistant:"
@@ -825,6 +832,8 @@ def invoke_claude_for_chat(
             messages=[{"role": "user", "content": full_prompt}],
             temperature=0,
             max_tokens=BEDROCK_MAX_TOKENS,
+            user_id=user_id or _current_user_id,
+            token_source="lambda_brd_chat",
         )
         logger.info(f"Gateway response length: {len(text)} characters")
         return text
@@ -1789,14 +1798,21 @@ def lambda_handler(event, context):
         "transcript": "transcript text" (for create_session)
     }
     """
+    global _current_user_id
     try:
         logger.info(f"Chat Lambda invoked with event: {json.dumps(event)[:500]}")
+
+        # Capture user_id for token attribution (read by invoke_claude_for_chat fallback)
+        _current_user_id = event.get("user_id") if isinstance(event, dict) else None
 
         # Handle agent invocation format
         if "parameters" in event:
             # Agent is calling - extract parameters from nested structure
             event = event["parameters"]
             logger.info("Detected agent invocation format, extracted parameters")
+            # Some callers nest user_id inside parameters
+            if not _current_user_id and isinstance(event, dict):
+                _current_user_id = event.get("user_id")
         
         # Also handle context field if present (from agent function schema)
         if "context" in event and isinstance(event.get("context"), str):
@@ -3286,3 +3302,5 @@ Please provide a helpful, friendly response."""
                 "message": str(e)
             })
         }
+    finally:
+        _current_user_id = None

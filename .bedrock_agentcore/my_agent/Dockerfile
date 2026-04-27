@@ -19,7 +19,9 @@ ENV UV_SYSTEM_PYTHON=1 \
     LAMBDA_BRD_RETRIEVER=arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-retriever \
     LAMBDA_BRD_CHAT=arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-chat \
     DLXAI_GATEWAY_URL=https://dlxai-dev.deluxe.com/proxy \
-    GATEWAY_MODEL=Claude-4.5-Sonnet
+    GATEWAY_MODEL=Claude-4.5-Sonnet \
+    BACKEND_URL="" \
+    INTERNAL_API_KEY=""
 
 
 

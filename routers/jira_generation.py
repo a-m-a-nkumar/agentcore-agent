@@ -223,7 +223,7 @@ def convert_to_adf(text: str) -> Dict:
     }
 
 
-def generate_epics_and_stories_with_bedrock(confluence_content: str, page_title: str) -> Dict:
+def generate_epics_and_stories_with_bedrock(confluence_content: str, page_title: str, user_id: Optional[str] = None) -> Dict:
     """
     Use Bedrock to generate Epics and User Stories from Confluence content
     
@@ -339,7 +339,8 @@ START YOUR ANALYSIS NOW - BE THOROUGH AND COMPLETE:"""
             temperature=0.3,
             max_tokens=32768,
             return_metadata=True,
-            user_id=current_user.get("id"),
+            user_id=user_id,
+            token_source="jira_generate_from_confluence",
         )
 
         generated_text = response["content"]
@@ -481,7 +482,8 @@ def generate_jira_items_from_confluence(
     try:
         result = generate_epics_and_stories_with_bedrock(
             page_data['content'],
-            page_data['title']
+            page_data['title'],
+            user_id=current_user.get('id'),
         )
         
         # Count totals

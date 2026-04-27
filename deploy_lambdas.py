@@ -29,6 +29,18 @@ PROFILE = "590184044598_PowerUser"
 REGION = "us-east-1"
 KMS_KEY_ARN = "arn:aws:kms:us-east-1:590184044598:key/mrk-29bf4d8d90604305976882df6c91149e"
 
+# When AWS_ACCESS_KEY_ID is exported (env-based credentials, e.g. SSO temp keys),
+# skip --profile so AWS CLI picks up the env credentials instead.
+_USE_ENV_CREDS = bool(os.getenv("AWS_ACCESS_KEY_ID"))
+
+
+def _aws_common_args():
+    """Common AWS CLI args; omit --profile when env credentials are present."""
+    args = ["--region", REGION]
+    if not _USE_ENV_CREDS:
+        args += ["--profile", PROFILE]
+    return args
+
 # Lambda definitions: name -> {function_name, handler_file, needs_prompts}
 LAMBDAS = {
     "brd-chat": {
@@ -56,6 +68,9 @@ LAMBDAS = {
 # Shared local files every lambda needs
 SHARED_FILES = [
     "llm_gateway.py",
+    "environment.py",
+    "env_vdi.py",
+    "db_config.py",  # imported transitively by env_vdi
 ]
 
 # Shared directories (copied as-is)
@@ -167,8 +182,7 @@ def deploy_lambda(name: str, config: dict, zip_path: str):
             "aws", "lambda", "update-function-code",
             "--function-name", func_name,
             "--zip-file", f"fileb://{zip_path}",
-            "--profile", PROFILE,
-            "--region", REGION,
+            *_aws_common_args(),
         ],
         check=True,
         capture_output=True,
@@ -181,8 +195,7 @@ def deploy_lambda(name: str, config: dict, zip_path: str):
         [
             "aws", "lambda", "wait", "function-updated-v2",
             "--function-name", func_name,
-            "--profile", PROFILE,
-            "--region", REGION,
+            *_aws_common_args(),
         ],
         check=True,
         capture_output=True,
@@ -195,8 +208,7 @@ def deploy_lambda(name: str, config: dict, zip_path: str):
             "--function-name", func_name,
             "--query", "Environment.Variables",
             "--output", "json",
-            "--profile", PROFILE,
-            "--region", REGION,
+            *_aws_common_args(),
         ],
         check=True,
         capture_output=True,
@@ -205,13 +217,21 @@ def deploy_lambda(name: str, config: dict, zip_path: str):
     env_vars = json.loads(result.stdout) if result.stdout.strip() != "null" else {}
     env_vars["KMS_KEY_ARN"] = KMS_KEY_ARN
 
+    # Backend callback so Lambdas can attribute LLM token usage to a user.
+    # Read from environment so secrets aren't checked in. Skip if unset.
+    backend_url = os.getenv("BACKEND_URL", "")
+    internal_api_key = os.getenv("INTERNAL_API_KEY", "")
+    if backend_url:
+        env_vars["BACKEND_URL"] = backend_url
+    if internal_api_key:
+        env_vars["INTERNAL_API_KEY"] = internal_api_key
+
     subprocess.run(
         [
             "aws", "lambda", "update-function-configuration",
             "--function-name", func_name,
             "--environment", json.dumps({"Variables": env_vars}),
-            "--profile", PROFILE,
-            "--region", REGION,
+            *_aws_common_args(),
         ],
         check=True,
         capture_output=True,
