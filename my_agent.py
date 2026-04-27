@@ -46,15 +46,20 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
                   f"(would have recorded {total_tokens} tokens for {user_id})", flush=True)
             return
         try:
-            import requests as _requests
-            resp = _requests.post(
+            import json as _json
+            from urllib import request as _urlreq
+            body = _json.dumps({
+                "user_id": user_id, "tokens": total_tokens, "source": source,
+            }).encode("utf-8")
+            req = _urlreq.Request(
                 f"{backend_url}/api/internal/record-tokens",
+                data=body,
                 headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-                json={"user_id": user_id, "tokens": total_tokens, "source": source},
-                timeout=5,
+                method="POST",
             )
-            if not resp.ok:
-                print(f"[BRD-AGENT] record-tokens callback {resp.status_code}: {resp.text[:200]}", flush=True)
+            with _urlreq.urlopen(req, timeout=5) as resp:
+                if resp.status >= 400:
+                    print(f"[BRD-AGENT] record-tokens callback {resp.status}: {resp.read()[:200]!r}", flush=True)
         except Exception as e:
             print(f"[BRD-AGENT] record-tokens callback failed for {user_id}: {e}", flush=True)
 

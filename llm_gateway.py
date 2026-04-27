@@ -47,7 +47,9 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
         except Exception as e:
             logger.debug(f"[LLM Gateway] direct DB write skipped ({e}); falling back to HTTP callback")
 
-        # Fallback: HTTP callback to backend (Lambda / agent path)
+        # Fallback: HTTP callback to backend (Lambda / agent path).
+        # Use stdlib urllib so this works inside Lambda zips that don't ship
+        # python-requests.
         backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
         api_key = os.getenv("INTERNAL_API_KEY", "")
         if not backend_url or not api_key:
@@ -57,16 +59,25 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
             )
             return
         try:
-            import requests as _requests
-            resp = _requests.post(
+            import json as _json
+            from urllib import request as _urlreq
+            from urllib.error import HTTPError as _HTTPError, URLError as _URLError
+
+            body = _json.dumps({
+                "user_id": user_id, "tokens": total_tokens, "source": source,
+            }).encode("utf-8")
+            req = _urlreq.Request(
                 f"{backend_url}/api/internal/record-tokens",
+                data=body,
                 headers={"X-API-Key": api_key, "Content-Type": "application/json"},
-                json={"user_id": user_id, "tokens": total_tokens, "source": source},
-                timeout=5,
+                method="POST",
             )
-            if not resp.ok:
-                logger.warning(f"[LLM Gateway] record-tokens callback {resp.status_code}: {resp.text[:200]}")
-        except Exception as e:
+            with _urlreq.urlopen(req, timeout=5) as resp:
+                if resp.status >= 400:
+                    logger.warning(f"[LLM Gateway] record-tokens callback {resp.status}: {resp.read()[:200]!r}")
+        except _HTTPError as e:
+            logger.warning(f"[LLM Gateway] record-tokens callback HTTP {e.code}: {e.read()[:200]!r}")
+        except (_URLError, Exception) as e:
             logger.warning(f"[LLM Gateway] record-tokens callback failed for {user_id}: {e}")
 
     threading.Thread(target=_write, daemon=True).start()
