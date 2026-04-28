@@ -543,7 +543,7 @@ CONFLUENCE CONTENT:
 Output ONLY the completed prompt block starting with the ==== header line. Do not add any preamble or explanation before or after it."""
 
     logger.info(f"[DESIGN] Generating architecture prompt v3.0 from {len(request.page_contents)} page(s)")
-    prompt = _invoke_claude(ARCHITECTURE_SYSTEM_PROMPT, user_message, model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS, user_id=current_user.get("id"))
+    prompt = _invoke_claude(ARCHITECTURE_SYSTEM_PROMPT, user_message, model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS, user_id=current_user.get("user_id"))
     logger.info(f"[DESIGN] Prompt generated ({len(prompt)} chars)")
     return GeneratePromptResponse(prompt=prompt)
 
@@ -587,7 +587,7 @@ Requirements:
 Output ONLY the XML, starting with <mxGraphModel and ending with </mxGraphModel>."""
 
     logger.info("[DESIGN] Generating draw.io XML")
-    raw = _invoke_claude(system_prompt, user_message, user_id=current_user.get("id"))
+    raw = _invoke_claude(system_prompt, user_message, user_id=current_user.get("user_id"))
 
     # Strip any accidental markdown fences
     raw = raw.replace("```xml", "").replace("```", "").strip()
@@ -633,7 +633,7 @@ Then output the full architecture document in Markdown following your instructio
         user_message,
         model_id=DOCUMENT_MODEL_ID,
         max_tokens=DOCUMENT_MAX_TOKENS,
-        user_id=current_user.get("id"),
+        user_id=current_user.get("user_id"),
     )
     logger.info(f"[DESIGN] Document generated ({len(document)} chars)")
     return GenerateDocumentResponse(document=document)

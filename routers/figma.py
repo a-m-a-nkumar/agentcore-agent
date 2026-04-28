@@ -208,7 +208,7 @@ class FigmaPromptResponse(BaseModel):
 @router.post("/generate-prompt", response_model=FigmaPromptResponse)
 async def generate_figma_prompt(
     request: FigmaPromptRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Retrieve relevant Confluence context via semantic search, then call Claude
@@ -285,7 +285,7 @@ Output ONLY the filled prompt block starting with the === header line. Zero plac
     logger.info(f"[FIGMA] Generating prompt for story {story.key} in project {request.project_id}")
     for i, r in enumerate(results, 1):
         logger.info(f"[FIGMA] Chunk {i}: '{r['title']}' (source_id={r['source_id']}, similarity={r['similarity']:.3f}, url={r.get('url', 'N/A')})")
-    prompt = _invoke_claude(FIGMA_SYSTEM_PROMPT, user_message, user_id=current_user.get("id"))
+    prompt = _invoke_claude(FIGMA_SYSTEM_PROMPT, user_message, user_id=current_user.get("user_id"))
     logger.info(f"[FIGMA] Prompt generated ({len(prompt)} chars), {len(sources)} unique sources")
 
     return FigmaPromptResponse(prompt=prompt, sources=sources)

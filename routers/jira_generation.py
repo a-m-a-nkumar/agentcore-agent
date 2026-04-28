@@ -483,7 +483,7 @@ def generate_jira_items_from_confluence(
         result = generate_epics_and_stories_with_bedrock(
             page_data['content'],
             page_data['title'],
-            user_id=current_user.get('id'),
+            user_id=current_user.get('user_id'),
         )
         
         # Count totals
