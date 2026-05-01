@@ -839,6 +839,341 @@ def delete_session(session_id: str, hard_delete: bool = False) -> bool:
 
 
 # ============================================
+# DESIGN SESSION MANAGEMENT
+# ============================================
+# A design_session spans the Diagram phase + the SAD phase. Stage values:
+#   NEW | DIAGRAM_GATHERING | DIAGRAM_READY | SAD_GATHERING | SAD_GENERATING | SAD_REFINING
+
+_DESIGN_SESSION_STAGES = {
+    "NEW", "DIAGRAM_GATHERING", "DIAGRAM_READY",
+    "SAD_GATHERING", "SAD_GENERATING", "SAD_REFINING",
+}
+
+
+def _design_session_to_dict(row: Any) -> Dict[str, Any]:
+    s = dict(row)
+    if s.get("created_at"):
+        s["created_at"] = int(s["created_at"].timestamp() * 1000)
+    if s.get("last_activity_ts"):
+        s["last_activity_ts"] = int(s["last_activity_ts"].timestamp() * 1000)
+    # Normalize UUIDs to strings for JSON safety
+    for k in ("id", "project_id", "sad_id"):
+        if s.get(k) is not None:
+            s[k] = str(s[k])
+    return s
+
+
+def create_design_session(
+    session_id: str,
+    project_id: str,
+    user_id: str,
+    name: str,
+    stage: str = "NEW",
+) -> Dict[str, Any]:
+    """Create a new design_session row. Returns the inserted row as a dict."""
+    if stage not in _DESIGN_SESSION_STAGES:
+        raise ValueError(f"Invalid stage: {stage}")
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                INSERT INTO design_sessions (id, project_id, user_id, name, stage)
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (session_id, project_id, user_id, name, stage),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+            logger.info(f"design_session created: {session_id} (project {project_id}, stage {stage})")
+            return _design_session_to_dict(row)
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error creating design_session: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_design_session(session_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single design_session by id. Returns None if missing or soft-deleted."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT * FROM design_sessions
+                WHERE id = %s AND is_deleted = FALSE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            return _design_session_to_dict(row) if row else None
+    finally:
+        release_db_connection(conn)
+
+
+def list_design_sessions(
+    project_id: str,
+    user_id: str = None,
+) -> List[Dict[str, Any]]:
+    """List non-deleted design_sessions for a project, newest activity first."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            if user_id:
+                cursor.execute(
+                    """
+                    SELECT * FROM design_sessions
+                    WHERE project_id = %s AND user_id = %s AND is_deleted = FALSE
+                    ORDER BY last_activity_ts DESC
+                    """,
+                    (project_id, user_id),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT * FROM design_sessions
+                    WHERE project_id = %s AND is_deleted = FALSE
+                    ORDER BY last_activity_ts DESC
+                    """,
+                    (project_id,),
+                )
+            return [_design_session_to_dict(r) for r in cursor.fetchall()]
+    finally:
+        release_db_connection(conn)
+
+
+def update_design_session(
+    session_id: str,
+    name: str = None,
+    stage: str = None,
+    diagram_s3_key: str = None,
+    diagram_svg_s3_key: str = None,
+    sad_id: str = None,
+    confluence_page_id: str = None,
+    bump_activity: bool = True,
+) -> Dict[str, Any]:
+    """
+    Patch a design_session. Only the non-None fields are updated. Always
+    bumps last_activity_ts unless caller opts out.
+    """
+    if stage is not None and stage not in _DESIGN_SESSION_STAGES:
+        raise ValueError(f"Invalid stage: {stage}")
+    sets: List[str] = []
+    params: List[Any] = []
+    if name is not None:
+        sets.append("name = %s"); params.append(name)
+    if stage is not None:
+        sets.append("stage = %s"); params.append(stage)
+    if diagram_s3_key is not None:
+        sets.append("diagram_s3_key = %s"); params.append(diagram_s3_key)
+    if diagram_svg_s3_key is not None:
+        sets.append("diagram_svg_s3_key = %s"); params.append(diagram_svg_s3_key)
+    if sad_id is not None:
+        sets.append("sad_id = %s"); params.append(sad_id)
+    if confluence_page_id is not None:
+        sets.append("confluence_page_id = %s"); params.append(confluence_page_id)
+    if bump_activity:
+        sets.append("last_activity_ts = NOW()")
+    if not sets:
+        raise ValueError("No fields to update")
+    params.append(session_id)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                f"UPDATE design_sessions SET {', '.join(sets)} WHERE id = %s RETURNING *",
+                params,
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"design_session {session_id} not found")
+            conn.commit()
+            return _design_session_to_dict(row)
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating design_session {session_id}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def delete_design_session(session_id: str, hard_delete: bool = False) -> bool:
+    """Soft-delete by default; hard delete the row if requested."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            if hard_delete:
+                cursor.execute("DELETE FROM design_sessions WHERE id = %s", (session_id,))
+            else:
+                cursor.execute(
+                    "UPDATE design_sessions SET is_deleted = TRUE WHERE id = %s",
+                    (session_id,),
+                )
+            conn.commit()
+            logger.info(f"design_session {'hard' if hard_delete else 'soft'} deleted: {session_id}")
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error deleting design_session {session_id}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+# ============================================
+# DESIGN DIAGRAM SLOTS (per-type slot model)
+# ============================================
+# Each design_session has three slots — Logical, Infrastructure, Security.
+# Stored as JSONB on `design_sessions.diagram_slots`. The migration that
+# adds the column lives at `migrations/add_design_diagram_slots.py`.
+#
+# Slot status enum:
+#   pending | in_progress | done | skipped | skipped_saved | failed
+#
+# Per-slot shape:
+#   { status, tool?, artifact_key?, saved_at?, error? }
+
+_DIAGRAM_TYPES = ("logical", "infrastructure", "security")
+_SLOT_STATUSES = {
+    "pending", "in_progress", "done",
+    "skipped", "skipped_saved", "failed",
+}
+_AUTHORING_TOOLS = {"drawio", "lucid"}
+
+
+def get_diagram_slots(session_id: str) -> Dict[str, Any]:
+    """Return the diagram_slots JSONB + authoring_tool for a session.
+
+    Shape:
+        {
+          "tool": "drawio" | "lucid" | None,
+          "slots": {
+            "logical":        {...},
+            "infrastructure": {...},
+            "security":       {...}
+          }
+        }
+
+    Raises ValueError if the session doesn't exist.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT diagram_slots, authoring_tool
+                FROM design_sessions
+                WHERE id = %s AND is_deleted = FALSE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"design_session {session_id} not found")
+            slots = row["diagram_slots"] or {}
+            # Defensive defaulting — older rows might miss a key.
+            for t in _DIAGRAM_TYPES:
+                if t not in slots:
+                    slots[t] = {"status": "pending"}
+            return {"tool": row["authoring_tool"], "slots": slots}
+    finally:
+        release_db_connection(conn)
+
+
+def update_diagram_slot(
+    session_id: str,
+    diagram_type: str,
+    patch: Dict[str, Any],
+    *,
+    bump_activity: bool = True,
+) -> Dict[str, Any]:
+    """Merge `patch` into the slot for `diagram_type`. Returns the updated slot.
+
+    `patch` keys may include any of: status, tool, artifact_key, saved_at, error.
+    Unknown keys are dropped silently — the column stays JSON-clean.
+
+    Setting `status` to a terminal-clean state ("pending") clears `error`
+    automatically; callers don't need to remember to.
+    """
+    if diagram_type not in _DIAGRAM_TYPES:
+        raise ValueError(f"Invalid diagram_type: {diagram_type}")
+
+    allowed_keys = {"status", "tool", "artifact_key", "saved_at", "error"}
+    clean = {k: v for k, v in patch.items() if k in allowed_keys}
+    if "status" in clean:
+        if clean["status"] not in _SLOT_STATUSES:
+            raise ValueError(f"Invalid slot status: {clean['status']}")
+        # Clearing error when transitioning out of failed.
+        if clean["status"] != "failed":
+            clean.setdefault("error", None)
+    if "tool" in clean and clean["tool"] is not None and clean["tool"] not in _AUTHORING_TOOLS:
+        raise ValueError(f"Invalid tool: {clean['tool']}")
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            # Read existing slot so we can merge instead of overwrite —
+            # callers typically PATCH partial state.
+            cursor.execute(
+                "SELECT diagram_slots FROM design_sessions WHERE id = %s AND is_deleted = FALSE",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError(f"design_session {session_id} not found")
+            slots = row["diagram_slots"] or {}
+            current = slots.get(diagram_type, {"status": "pending"})
+            merged = {**current, **clean}
+            # Drop nulled keys so the row stays compact.
+            merged = {k: v for k, v in merged.items() if v is not None}
+            slots[diagram_type] = merged
+
+            sets = ["diagram_slots = %s"]
+            params: List[Any] = [json.dumps(slots)]
+            if bump_activity:
+                sets.append("last_activity_ts = NOW()")
+            params.append(session_id)
+
+            cursor.execute(
+                f"UPDATE design_sessions SET {', '.join(sets)} WHERE id = %s RETURNING diagram_slots",
+                params,
+            )
+            updated_row = cursor.fetchone()
+            conn.commit()
+            return (updated_row["diagram_slots"] or {}).get(diagram_type, merged)
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating diagram slot {session_id}.{diagram_type}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def set_session_authoring_tool(session_id: str, tool: Optional[str]) -> None:
+    """Set the session's preferred authoring tool. `None` clears it."""
+    if tool is not None and tool not in _AUTHORING_TOOLS:
+        raise ValueError(f"Invalid tool: {tool}")
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE design_sessions
+                SET authoring_tool = %s, last_activity_ts = NOW()
+                WHERE id = %s
+                """,
+                (tool, session_id),
+            )
+            conn.commit()
+    finally:
+        release_db_connection(conn)
+
+
+# ============================================
 # Atlassian Integration Functions
 # ============================================
 

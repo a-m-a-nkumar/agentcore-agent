@@ -34,6 +34,8 @@ from routers.orchestration_internal import router as orchestration_internal_rout
 from routers.test_generation import router as test_generation_router
 from routers.test_internal import router as test_internal_router
 from routers.design import router as design_router
+from routers.design_sessions import router as design_sessions_router
+from routers.sad import router as sad_router
 from routers.harness import router as harness_router
 from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
@@ -109,6 +111,8 @@ app.include_router(jira_generation_router)
 app.include_router(test_generation_router)
 app.include_router(test_internal_router)
 app.include_router(design_router)
+app.include_router(design_sessions_router)
+app.include_router(sad_router)
 app.include_router(harness_router)
 app.include_router(pipeline_generator_router)
 app.include_router(terraform_generator_router)

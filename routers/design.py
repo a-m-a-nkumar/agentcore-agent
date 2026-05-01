@@ -5,6 +5,7 @@ and draw.io XML diagrams directly from Confluence page content.
 Calls Bedrock Claude directly — no guardrails, no BRD session required.
 """
 
+import base64
 import json
 import os
 import logging
@@ -14,11 +15,18 @@ import re
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from auth import verify_azure_token, require_module
-from db_helper import create_or_update_user, get_user_atlassian_credentials, get_project
+from db_helper import (
+    create_or_update_user,
+    get_user_atlassian_credentials,
+    get_project,
+    get_design_session,
+    update_design_session,
+)
 from services.confluence_service import ConfluenceService
-from environment import chat_completion, chat_completion_stream
+from services.s3_service import s3_put_object, get_s3_client
+from environment import chat_completion, chat_completion_stream, S3_BUCKET_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +87,11 @@ def _invoke_claude(
 
 class GeneratePromptRequest(BaseModel):
     page_contents: List[str]   # Plain-text content of each selected Confluence page
+    # Which architectural view the prompt should target. Drives which of
+    # the three system prompts (infrastructure/logical/security) we
+    # dispatch to. Defaults to infrastructure for legacy compatibility —
+    # the original draw.io flow only had this one prompt.
+    diagram_type: str = "infrastructure"
 
 
 class GeneratePromptResponse(BaseModel):
@@ -131,28 +144,68 @@ class ListDiagramsResponse(BaseModel):
 
 
 class SaveDiagramRequest(BaseModel):
-    project_id: str            # Used to look up Confluence credentials
-    space_key: str             # Confluence space to save in
-    xml: str                   # draw.io XML
+    # Project-only (legacy) flow keeps these required.
+    project_id: str
+    space_key: str = ""        # Confluence space; optional when saving to a session-only S3 location
+    # Made Optional so the SAME endpoint can handle SVG-only updates — the
+    # frontend uses this to recover when its initial draw.io SVG export
+    # failed (the placeholder card's "Render diagram" button posts svg only).
+    # The session-aware path requires AT LEAST one of xml / svg; both being
+    # absent is a 400.
+    xml: Optional[str] = None  # draw.io XML
     page_title: str = ""       # Defaults to "Architecture Diagram — <space_key>"
+    # Multi-session flow (new). When provided:
+    #  - XML is written to s3://.../sessions/{session_id}/diagram/logical.xml
+    #  - If `svg` is also provided, it's written to .../diagram/logical.svg
+    #  - The design_sessions row is updated with the keys and stage transitions
+    #    NEW/DIAGRAM_GATHERING → DIAGRAM_READY.
+    #  - If `space_key` is also provided AND user has Atlassian linked, the XML
+    #    is *also* pushed to Confluence (sharing). If not, Confluence push is skipped.
+    session_id: Optional[str] = None
+    svg: Optional[str] = None  # rendered SVG from the draw.io iframe (xmlsvg export)
+    # Rendered PNG from the draw.io iframe (canvas-rasterise export). Sent
+    # as a `data:image/png;base64,...` URL string. Used by the DOCX export
+    # path for native python-docx embedding (no cairosvg conversion needed).
+    # PNG export is more reliable than SVG export when icon CDNs are slow
+    # or blocked in the user's environment.
+    png: Optional[str] = None
+    # SAD-redesign: which slot this diagram fills. One of
+    # "logical" | "infrastructure" | "security". Defaults to "logical" so
+    # any legacy caller continues hitting the existing single-slot path.
+    diagram_type: Optional[str] = None  # validated server-side
 
 
 class SaveDiagramResponse(BaseModel):
-    page_url: str
-    page_id: str
+    page_url: Optional[str] = None    # Confluence URL — only when pushed to Confluence
+    page_id: Optional[str] = None     # Confluence page id — only when pushed to Confluence
+    diagram_s3_key: Optional[str] = None
+    diagram_svg_s3_key: Optional[str] = None
+    session_stage: Optional[str] = None  # echoes the new stage on the design_sessions row
+    # Per-type slot snapshot after the save — frontend reads this back so the
+    # hub UI updates in lockstep with the server state.
+    diagram_slot: Optional[Dict[str, Any]] = None
 
 
 class LoadDiagramRequest(BaseModel):
     project_id: str
-    space_key: str
+    space_key: str = ""
     page_title: str = ""       # Must match the title used when saving
-    page_id: str = ""          # If provided, load directly by ID (avoids title-search issues)
+    page_id: str = ""          # If provided, load directly by Confluence page id
+    # Multi-session flow (new). When provided, S3 is the primary source.
+    session_id: Optional[str] = None
+    # Per-type slot identifier. When provided, the server reads
+    # sessions/{id}/diagram/{type}.xml. Defaults to "logical" for legacy
+    # callers (the SAD generator's section 4 path).
+    diagram_type: Optional[str] = None
 
 
 class LoadDiagramResponse(BaseModel):
     xml: str
-    page_url: str
-    page_id: str
+    page_url: str = ""           # populated only when loaded from Confluence
+    page_id: str = ""            # populated only when loaded from Confluence
+    diagram_s3_key: Optional[str] = None
+    diagram_svg_s3_key: Optional[str] = None
+    source: str = "confluence"   # "s3" | "confluence" — tells the frontend where the XML came from
 
 
 
@@ -349,6 +402,441 @@ Output only the populated prompt. Do not generate XML. Do not explain your choic
 """
 
 
+# ─── Per-view system prompts for the draw.io flow ─────────────────────────────
+#
+# The default `ARCHITECTURE_SYSTEM_PROMPT` above is INFRASTRUCTURE-flavoured
+# (AWS icons, networking layers, deployment topology). For parity with the
+# Lucid flow we offer two siblings — LOGICAL and SECURITY — that produce
+# the same overall scaffolding (NAME / COMPONENTS / CONNECTIONS / DIAGRAM
+# directives) so the XML generator behaves the same downstream, but tuned
+# to a different concern.
+
+LOGICAL_SYSTEM_PROMPT = """
+You are a senior solutions architect. You will be given content from one or more
+Confluence pages describing a software project. Read everything carefully, then output
+a single fully-populated prompt that any AI tool can use to generate a professional,
+visually-rich, draw.io-compatible XML LOGICAL architecture diagram.
+
+A LOGICAL diagram shows WHAT the system does and HOW data flows between capabilities.
+It is vendor-agnostic — no cloud provider names, no server types, no infrastructure
+deployment detail. But it is NOT plain. Every capability gets a recognisable shape
+(person, gear, database, queue, document, cloud) so the diagram reads at a glance.
+
+═══════════════════════════════════════════════════════════════
+STEP 1 — UNDERSTAND WHAT TO EXTRACT
+═══════════════════════════════════════════════════════════════
+
+Read the document and identify:
+  - Project name and what the system does (2–3 sentences)
+  - Actors / users / external systems on the periphery
+  - Core capabilities — focus on the most important ~8 to 14 (more is noise)
+  - The verb-phrase data flows between them
+  - Which logical layer each capability belongs to
+
+Target distribution per layer (don't force every layer to fill if irrelevant):
+  Actors / Users           → 1 to 3
+  Presentation             → 1 to 3
+  API / Mediation          → 1 to 2
+  Business Logic           → 3 to 6
+  Data / Persistence       → 1 to 3
+  Messaging / Events       → 0 to 2
+  External Systems         → 0 to 3
+
+═══════════════════════════════════════════════════════════════
+STEP 2 — VENDOR-AGNOSTIC SHAPE VOCABULARY (mandatory)
+═══════════════════════════════════════════════════════════════
+
+Each capability MUST use a shape that conveys its role at a glance.
+NEVER use AWS / Azure / GCP / cloud-provider icons — those belong in the
+Infrastructure view.
+
+ONLY use shapes from this whitelist. They are draw.io's built-in shapes
+plus the flowchart and EIP libraries that are guaranteed to render in the
+embed (https://embed.diagrams.net). Other libraries (bootstrap, gmdl,
+cisco_safe, networking, mxgraph.aws4, mscae) are NOT allowed — they fail
+to serialise on save in the embedded editor and corrupt the diagram.
+
+ROLE-TO-SHAPE TABLE (copy the `style=` string verbatim):
+
+  Actor / End User      →  shape=umlActor;
+  External System       →  shape=cloud;
+  Web / Mobile UI       →  shape=mxgraph.flowchart.display;
+  API / Gateway         →  shape=hexagon;perimeter=hexagonPerimeter2;
+  Service / Capability  →  rounded=1;whiteSpace=wrap;html=1;
+  Business Engine       →  shape=mxgraph.flowchart.predefined_process;
+  Authentication        →  shape=mxgraph.flowchart.protected_storage;
+  Database / Store      →  shape=cylinder3;boundedLbl=1;backgroundOutline=1;
+  Cache                 →  shape=mxgraph.flowchart.stored_data;
+  Queue / Event Bus     →  shape=mxgraph.eip.message_channel;
+  Topic / Pub-Sub       →  shape=mxgraph.eip.publish_subscribe_channel;
+  Document / Report     →  shape=mxgraph.flowchart.document;
+  Workflow / Process    →  shape=mxgraph.flowchart.predefined_process;
+  Notification          →  shape=mxgraph.flowchart.display;
+  Search / Query        →  shape=mxgraph.flowchart.manual_input;
+  File / Storage        →  shape=mxgraph.flowchart.stored_data;
+  Decision / Router     →  shape=rhombus;
+
+If a capability doesn't cleanly match a row above, use the rounded
+rectangle (Service / Capability default — `rounded=1;whiteSpace=wrap;html=1;`).
+DO NOT invent shapes outside this table. DO NOT use any `mxgraph.bootstrap`,
+`mxgraph.gmdl`, `mxgraph.cisco_safe`, `mxgraph.aws4`, `mxgraph.azure`,
+`mxgraph.gcp2`, `mscae`, or `mxgraph.networking` shapes — they break the
+embedded editor's save flow with a serialisation error.
+
+Each component cell follows this exact XML form:
+
+  <mxCell id="auth_svc" value="Auth Gateway"
+    style="<style from table>;
+           fillColor=<layer fill>;strokeColor=#1F2937;
+           fontColor=#FFFFFF;fontSize=12;fontStyle=1;
+           labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;"
+    vertex="1" parent="1">
+    <mxGeometry x="..." y="..." width="64" height="64" as="geometry"/>
+  </mxCell>
+
+═══════════════════════════════════════════════════════════════
+STEP 3 — LOGICAL LAYER PALETTE (vendor-agnostic, mandatory)
+═══════════════════════════════════════════════════════════════
+
+Each capability is coloured by which LAYER it belongs to. White text on the
+dark fills, navy text on the light layers.
+
+  Actors / Users         →  fillColor=#374151  fontColor=#FFFFFF   (graphite — outside the system boundary)
+  Presentation           →  fillColor=#6B7BFF  fontColor=#FFFFFF   (cool blue — what users see)
+  API / Mediation        →  fillColor=#FFB347  fontColor=#1F2937   (warm orange — request gateway)
+  Business Logic         →  fillColor=#FF6B6B  fontColor=#FFFFFF   (coral — the system's verbs)
+  Data / Persistence     →  fillColor=#4CAF50  fontColor=#FFFFFF   (forest — the system's nouns)
+  Messaging / Events     →  fillColor=#9C27B0  fontColor=#FFFFFF   (violet — async)
+  External Systems       →  fillColor=#757575  fontColor=#FFFFFF   (slate — outside the boundary)
+
+LAYER CONTAINER COLOURS (swimlane backgrounds, hairline strokes — not loud):
+  Presentation container  →  fill=#EEF1FF  stroke=#6B7BFF
+  API container           →  fill=#FFF7EE  stroke=#FFB347
+  Business container      →  fill=#FFEFEF  stroke=#FF6B6B
+  Data container          →  fill=#EBF7EE  stroke=#4CAF50
+  Messaging container     →  fill=#F5EEF8  stroke=#9C27B0
+  External container      →  fill=#F5F5F5  stroke=#9CA3AF
+
+CONTAINER STYLE STRING:
+  shape=swimlane;swimlaneFillColor=<container fill>;fillColor=<container fill>;
+  strokeColor=<container stroke>;rounded=1;startSize=24;
+  fontStyle=1;fontSize=11;fontColor=#1F2937;
+  whiteSpace=wrap;html=1;horizontal=0;
+
+═══════════════════════════════════════════════════════════════
+STEP 4 — CANVAS, SPACING, AND EDGE RULES
+═══════════════════════════════════════════════════════════════
+
+  Canvas              →  1600 × 1000
+  Component size      →  64 × 64 (icons) — labels sit BELOW the icon, never inside
+  Container padding   →  20px around children; 24px header for the layer name
+  Horizontal spacing  →  ≥ 140px between component centres
+  Vertical spacing    →  ≥ 110px between rows within a container
+  Layer order (left → right)  →  Actors → Presentation → API → Business → Data → External
+  Layer order (top → bottom)  →  Messaging container spans the bottom under Business + Data
+
+Edges (data flows):
+  - Always orthogonal: edgeStyle=orthogonalEdgeStyle;rounded=0;curved=0;
+  - Stroke #1F2937, strokeWidth=1.5
+  - LABEL is the exact verb phrase from CONNECTIONS — never generic
+    ("uses", "calls", "talks to" are FORBIDDEN). Use specifics:
+    "authenticates", "queries", "publishes", "streams", "subscribes to",
+    "validates", "issues", "fetches", "writes", "consumes".
+  - Label rendering: edgeLabel;html=1;background=#FFFFFFCC;align=center;
+    fontSize=10;fontColor=#1F2937;
+  - Mark async/event flows with dashed stroke (dashed=1) and a different
+    arrow style (endArrow=open) so they're visually distinct from sync calls.
+
+═══════════════════════════════════════════════════════════════
+STEP 5 — OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════
+
+Output a single block in exactly this shape (no markdown fences, no preamble):
+
+==== LOGICAL ARCHITECTURE PROMPT ====
+Name: <Project Name> – Logical Architecture
+Description: <2–3 sentence plain-English description of what the system does and who uses it>
+
+LAYERS
+  Actors        – outside the system boundary; people or peer systems
+  Presentation  – user-facing surfaces (web, mobile, embedded SDK)
+  API           – request mediation and protocol translation
+  Business      – domain logic, the system's verbs
+  Data          – stores, caches, search indexes
+  Messaging     – async pipes, event buses, topics
+  External      – third-party services the system depends on
+
+COMPONENTS
+  | id | layer | label | role | shape |
+  |----|-------|-------|------|-------|
+  <one row per capability — aim for 8 to 14. Keep labels 2–4 words like
+   "Auth Gateway", "Order Engine", "Notification Service". Pick `role`
+   and `shape` from the STEP 2 table.>
+
+CONTAINERS
+  | layer        | components            |
+  |--------------|-----------------------|
+  | Actors       | <ids of actor rows>   |
+  | Presentation | <ids of UI rows>      |
+  | API          | <ids of API rows>     |
+  | Business     | <ids of business rows>|
+  | Data         | <ids of data rows>    |
+  | Messaging    | <ids of msg rows>     |
+  | External     | <ids of external rows>|
+
+CONNECTIONS
+  <source_id> → <target_id> : <verb phrase> [sync|async]
+  <one per meaningful interaction; aim for 10 to 18>
+
+DIAGRAM DIRECTIVES
+  - Use the role-to-shape mapping from STEP 2 verbatim. Every component
+    gets an icon, never a plain rectangle (unless the role is generic
+    Service / Capability).
+  - Fill colour comes from the LAYER PALETTE in STEP 3. Container
+    backgrounds come from the same palette's "container" colours.
+  - Group components by layer using swimlane containers — Actors and
+    External float free outside the system boundary; the other five
+    sit inside an enclosing rounded box titled with the project name.
+  - Edge labels MUST be the verb phrase from CONNECTIONS — never
+    generic verbs ("uses", "calls", "talks to" are forbidden).
+  - Async / event flows render with dashed strokes (dashed=1) and an
+    open arrowhead. Sync calls are solid with a filled arrowhead.
+  - Canvas 1600×1000, component size 64×64, h-spacing ≥ 140, v-spacing ≥ 110.
+  - DO NOT use any AWS / Azure / GCP icon shapes. This is the logical
+    view; vendor branding belongs in the Infrastructure diagram.
+
+═══════════════════════════════════════════════════════════════
+RULES
+═══════════════════════════════════════════════════════════════
+- Output ONLY the populated prompt block — no preamble, no markdown fences,
+  no explanation.
+- Keep capability names short (2–4 words). No vendor names ("AWS Lambda",
+  "Stripe API" → wrong; "Order Service", "Payments Gateway" → right).
+- Verb labels on connections must be specific: "authenticates", "queries",
+  "publishes", "streams", "validates", "issues" — not "uses" or "calls".
+- If a detail is not in the documents, infer what a senior architect would
+  include and append (inferred).
+- Aim for 8 to 14 capabilities and 10 to 18 data flows. Density beyond that
+  hurts readability.
+- The diagram must read at a glance: layer colour + recognisable icon should
+  tell you what the component IS without reading the label.
+"""
+
+
+SECURITY_SYSTEM_PROMPT = """
+You are a senior security architect. You will be given content from one or more
+Confluence pages describing a software project. Read everything carefully, then output
+a single fully-populated prompt that any AI tool can use to generate a professional,
+visually-rich, draw.io-compatible XML SECURITY architecture diagram.
+
+A SECURITY diagram shows trust boundaries, WHO accesses WHAT, WHERE controls sit,
+and HOW data is protected. It is organised by trust zones, not deployment layers.
+Every actor and control gets a recognisable shape (person, gateway, lock, key,
+audit log, gear) so the diagram reads at a glance.
+
+═══════════════════════════════════════════════════════════════
+STEP 1 — UNDERSTAND WHAT TO EXTRACT
+═══════════════════════════════════════════════════════════════
+
+Read the document and identify:
+  - Project name, data sensitivity, and compliance context (2–3 sentences)
+  - The actors / clients who access the system from each trust zone
+  - The components that handle data — services, stores, secret managers
+  - The auth mechanisms protecting each cross-zone interaction
+  - The security controls (WAF, MFA, TLS, RBAC, encryption, audit) and what they enforce
+
+Target distribution per zone (don't force a zone if it's irrelevant):
+  Internet / Untrusted     → 1 to 3 actors
+  DMZ / Low Trust          → 1 to 3 components (gateway, WAF, edge controls)
+  Application / Medium     → 3 to 6 services
+  Data / High Trust        → 1 to 3 stores + secret manager
+  Admin / Privileged       → 1 to 2 (admin console, ops jump host)
+  CI/CD / Privileged       → 0 to 2 (pipelines, artifact store)
+
+═══════════════════════════════════════════════════════════════
+STEP 2 — VENDOR-AGNOSTIC SHAPE VOCABULARY (mandatory)
+═══════════════════════════════════════════════════════════════
+
+Each component MUST use a shape that conveys its security role at a glance.
+ONLY use shapes from this whitelist. They are draw.io's built-in shapes plus
+the flowchart and EIP libraries that render reliably in the embed
+(https://embed.diagrams.net). Other libraries (bootstrap, gmdl, cisco_safe,
+networking, mxgraph.aws4, mscae) are NOT allowed — they fail to serialise on
+save in the embedded editor and corrupt the diagram with "u.substring is
+not a function" errors.
+
+ROLE-TO-SHAPE TABLE (copy the `style=` string verbatim):
+
+  External User / Client    →  shape=umlActor;
+  External System           →  shape=cloud;
+  WAF / Firewall            →  shape=mxgraph.flowchart.protected_storage;
+  API Gateway / Edge        →  shape=hexagon;perimeter=hexagonPerimeter2;
+  Auth Server / IdP         →  shape=mxgraph.flowchart.protected_storage;
+  Service / Microservice    →  rounded=1;whiteSpace=wrap;html=1;
+  Database / Store          →  shape=cylinder3;boundedLbl=1;backgroundOutline=1;
+  Cache                     →  shape=mxgraph.flowchart.stored_data;
+  Secret Store / Vault      →  shape=mxgraph.flowchart.protected_storage;
+  Audit Log / SIEM          →  shape=mxgraph.flowchart.document;
+  Message Queue / Bus       →  shape=mxgraph.eip.message_channel;
+  Admin Console             →  shape=mxgraph.flowchart.display;
+  CI/CD Pipeline            →  shape=mxgraph.flowchart.predefined_process;
+  Decision / Policy Engine  →  shape=rhombus;
+  Manual Input / Form       →  shape=mxgraph.flowchart.manual_input;
+
+If a component doesn't cleanly match a row above, use the rounded
+rectangle (Service / Microservice default — `rounded=1;whiteSpace=wrap;html=1;`).
+DO NOT invent shapes outside this table. DO NOT use any `mxgraph.bootstrap`,
+`mxgraph.gmdl`, `mxgraph.cisco_safe`, `mxgraph.aws4`, `mxgraph.azure`,
+`mxgraph.gcp2`, `mscae`, or `mxgraph.networking` shapes.
+
+Each component cell follows this exact XML form:
+
+  <mxCell id="auth_idp" value="Auth IdP"
+    style="<style from table>;
+           fillColor=<zone fill stroke>;strokeColor=<zone stroke darker>;
+           fontColor=#FFFFFF;fontSize=12;fontStyle=1;
+           labelPosition=center;verticalLabelPosition=bottom;verticalAlign=top;align=center;html=1;"
+    vertex="1" parent="<zone container id>">
+    <mxGeometry x="..." y="..." width="64" height="64" as="geometry"/>
+  </mxCell>
+
+═══════════════════════════════════════════════════════════════
+STEP 3 — TRUST ZONE PALETTE (mandatory)
+═══════════════════════════════════════════════════════════════
+
+Each component is coloured by which TRUST ZONE it lives in. White text on
+component fills, dark navy on container backgrounds. Containers use the
+lighter pale tone for their background and the saturated stroke for their
+border, making the trust boundary visually obvious.
+
+  Zone               Trust       Component fill   Container fill   Container stroke
+  ----               -----       --------------   --------------   ----------------
+  Internet           Untrusted   #C62828          #FFEBEE          #C62828
+  DMZ                Low         #E65100          #FFF3E0          #E65100
+  Application        Medium      #2E7D32          #E8F5E9          #2E7D32
+  Data               High        #1565C0          #E3F2FD          #1565C0
+  Admin              High        #6A1B9A          #F3E5F5          #6A1B9A
+  CI/CD              Privileged  #455A64          #ECEFF1          #455A64
+
+Zone container style string:
+
+  shape=swimlane;swimlaneFillColor=<container fill>;fillColor=<container fill>;
+  strokeColor=<container stroke>;strokeWidth=2;rounded=1;startSize=24;
+  fontStyle=1;fontSize=11;fontColor=#1F2937;
+  whiteSpace=wrap;html=1;horizontal=0;dashed=0;
+
+═══════════════════════════════════════════════════════════════
+STEP 4 — ACCESS FLOWS, CONTROLS, AND CANVAS
+═══════════════════════════════════════════════════════════════
+
+Canvas              →  1600 × 1000
+Component size      →  64 × 64 (icons) — labels sit BELOW the icon, never inside
+Container padding   →  20px around children; 28px header for the zone title
+Horizontal spacing  →  ≥ 140px between component centres
+Zone order (left → right)  →  Internet → DMZ → Application → Data
+                              (Admin and CI/CD float ABOVE Application as separate boxes)
+
+Edges (access flows):
+  - Always orthogonal: edgeStyle=orthogonalEdgeStyle;rounded=0;curved=0;
+  - Stroke #1F2937, strokeWidth=1.5
+  - LABEL is the auth mechanism + scope from ACCESS FLOWS — never generic
+    ("uses", "accesses", "talks to" are FORBIDDEN). Use specifics:
+    "OAuth 2.0 + MFA", "mTLS", "API key", "JWT", "service account",
+    "SSH + bastion", "private link", "SAML SSO".
+  - Label rendering: edgeLabel;html=1;background=#FFFFFFCC;align=center;
+    fontSize=10;fontColor=#1F2937;rounded=1;
+  - Cross-zone flows are drawn DASHED with strokeColor=#C62828 (the
+    Internet stroke) so trust-boundary crossings are visually loud.
+  - Same-zone flows are SOLID with strokeColor=#9CA3AF (muted graphite).
+
+Security control callouts:
+  Each enforced control renders as a SMALL red rhombus (32×32) attached
+  near the boundary it protects, labelled with the control type
+  (e.g. "WAF", "MFA", "RBAC"). Style:
+    shape=rhombus;fillColor=#C62828;strokeColor=#7F0000;fontColor=#FFFFFF;
+    fontSize=9;fontStyle=1;html=1;
+  Wire each callout to its target component with a thin dashed line:
+    edgeStyle=none;dashed=1;strokeColor=#C62828;strokeWidth=1;endArrow=none;
+
+═══════════════════════════════════════════════════════════════
+STEP 5 — OUTPUT FORMAT
+═══════════════════════════════════════════════════════════════
+
+Output a single block in exactly this shape (no markdown fences, no preamble):
+
+==== SECURITY ARCHITECTURE PROMPT ====
+Name: <Project Name> – Security Architecture
+Description: <2–3 sentences on the system, data sensitivity, and compliance context>
+Compliance scope: <GDPR | HIPAA | SOC 2 | ISO 27001 | PCI-DSS — or "None identified">
+
+TRUST ZONES
+  | zone_id | name        | trust       |
+  |---------|-------------|-------------|
+  <pick 4–6 from STEP 3 table; reference each by zone_id below>
+
+COMPONENTS
+  | id | zone_id | type | label | role | shape |
+  |----|---------|------|-------|------|------|-------|
+  <one row per actor / control / data store; aim for 10–18.
+   `type` is the human-readable role (User, WAF, Auth Server, Database, etc.).
+   `shape` is picked from STEP 2 table.>
+
+ACCESS FLOWS
+  <source_id> → <target_id> : <auth mechanism + scope> [cross-zone|same-zone]
+  <one per meaningful interaction; aim for 8–15>
+
+SECURITY CONTROLS
+  | control_id | type | enforces                                | attached_to |
+  |------------|------|-----------------------------------------|-------------|
+  <one row per control. Type ∈ {WAF, MFA, TLS, RBAC, Encryption-at-Rest,
+   Rate-Limiting, SIEM, Audit-Logging, Secret-Rotation, Network-Policy}.
+   `attached_to` is a component_id or boundary descriptor.>
+
+DIAGRAM DIRECTIVES
+  - Use the role-to-shape mapping from STEP 2 verbatim. Every component
+    gets an icon, never a plain rectangle (unless the role is generic
+    Service / Microservice).
+  - Wrap each trust zone in a swimlane container using the fill / stroke
+    from STEP 3. Containers visually separate the zones — the boundary
+    IS the diagram's main signal.
+  - Component fill colour comes from the TRUST ZONE the component lives in
+    (the saturated stroke colour, not the pale container fill).
+  - Cross-zone access flows render dashed with crimson stroke (#C62828) and
+    a labelled auth mechanism. Same-zone flows render solid muted grey.
+  - Security controls render as small red rhombus callouts attached to
+    the component or boundary they protect, with the control type as label.
+  - Canvas 1600×1000, component size 64×64, h-spacing ≥ 140, v-spacing ≥ 110.
+  - DO NOT use any AWS / Azure / GCP / cisco_safe / bootstrap icon shapes —
+    only the whitelist in STEP 2.
+
+═══════════════════════════════════════════════════════════════
+RULES
+═══════════════════════════════════════════════════════════════
+- Output ONLY the populated prompt block — no preamble, no markdown fences,
+  no explanation.
+- Every ACCESS FLOW must specify the auth mechanism + scope. Internal calls
+  within the same zone are still access flows but render with the muted
+  stroke; cross-zone flows render crimson dashed.
+- Control names must be specific: "Azure AD MFA" not just "MFA";
+  "AES-256 at rest" not just "encryption".
+- If a detail is not in the documents, infer what a senior security
+  architect would include and append (inferred).
+- Aim for 10–18 components, 4–6 zones, 8–15 access flows, 5–10 controls.
+- The diagram must read at a glance: the trust-zone container colour +
+  the recognisable component icon should tell you what the component IS
+  and where it sits without reading the label.
+"""
+
+
+def _get_drawio_system_prompt(diagram_type: str) -> str:
+    """Pick the system prompt for the draw.io flow based on diagram type."""
+    if diagram_type == "logical":
+        return LOGICAL_SYSTEM_PROMPT
+    if diagram_type == "security":
+        return SECURITY_SYSTEM_PROMPT
+    return ARCHITECTURE_SYSTEM_PROMPT
+
+
 DOCUMENT_SYSTEM_PROMPT = """
 You are a senior AWS solutions architect writing formal architecture documentation.
 You will be given two inputs:
@@ -542,8 +1030,16 @@ CONFLUENCE CONTENT:
 
 Output ONLY the completed prompt block starting with the ==== header line. Do not add any preamble or explanation before or after it."""
 
-    logger.info(f"[DESIGN] Generating architecture prompt v3.0 from {len(request.page_contents)} page(s)")
-    prompt = _invoke_claude(ARCHITECTURE_SYSTEM_PROMPT, user_message, model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS, user_id=current_user.get("user_id"))
+    system_prompt = _get_drawio_system_prompt(request.diagram_type)
+    logger.info(
+        f"[DESIGN] Generating draw.io {request.diagram_type} prompt from "
+        f"{len(request.page_contents)} page(s)"
+    )
+    prompt = _invoke_claude(
+        system_prompt, user_message,
+        model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS,
+        user_id=current_user.get("user_id"),
+    )
     logger.info(f"[DESIGN] Prompt generated ({len(prompt)} chars)")
     return GeneratePromptResponse(prompt=prompt)
 
@@ -667,9 +1163,15 @@ CONFLUENCE CONTENT:
 
 Output ONLY the completed prompt block starting with the ==== header line. Do not add any preamble or explanation before or after it."""
 
+    system_prompt = _get_drawio_system_prompt(request.diagram_type)
+    logger.info(
+        f"[DESIGN] Streaming draw.io {request.diagram_type} prompt from "
+        f"{len(request.page_contents)} page(s)"
+    )
+
     def stream():
         try:
-            yield from _invoke_claude_stream(ARCHITECTURE_SYSTEM_PROMPT, user_message, PROMPT_MODEL_ID, PROMPT_MAX_TOKENS)
+            yield from _invoke_claude_stream(system_prompt, user_message, PROMPT_MODEL_ID, PROMPT_MAX_TOKENS)
         except Exception as e:
             logger.error(f"[DESIGN] Prompt stream error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -832,79 +1334,285 @@ def _extract_xml_from_confluence(storage_html: str) -> str:
 
 
 @router.post("/save-diagram", response_model=SaveDiagramResponse)
-async def save_diagram_to_confluence(
+async def save_diagram(
     request: SaveDiagramRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Save (or update) the draw.io XML as a Confluence page.
-    If a page with the same title already exists it is updated; otherwise a new page is created.
+    Save the draw.io XML (and optionally a rendered SVG) for a project.
+
+    Two routes:
+      • session-aware (new): if `session_id` is provided, the XML and SVG are
+        written to S3 under the session's prefix, the design_sessions row is
+        updated, and a Confluence push is attempted only as an optional copy
+        when `space_key` + Atlassian credentials are present.
+      • legacy: if `session_id` is omitted, the previous Confluence-only flow
+        is preserved (backward compatibility for any caller still on the
+        single-diagram-per-project model).
     """
-    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not request.xml.strip():
+        raise HTTPException(status_code=400, detail="XML must not be empty")
+
+    user_id = current_user["id"]
+
+    # ── Session-aware path ───────────────────────────────────────────────
+    if request.session_id:
+        session = get_design_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="You don't have access to this session")
+        if session["project_id"] != request.project_id:
+            raise HTTPException(status_code=400, detail="session_id does not belong to project_id")
+
+        # Resolve the diagram type. Defaults to "logical" for legacy callers
+        # (the previous single-slot model). The redesign hub passes one of
+        # the three explicit values per save.
+        diagram_type = (request.diagram_type or "logical").lower()
+        if diagram_type not in ("logical", "infrastructure", "security"):
+            raise HTTPException(
+                status_code=400,
+                detail="diagram_type must be one of: logical, infrastructure, security",
+            )
+
+        xml_provided = bool(request.xml and request.xml.strip())
+        svg_provided = bool(request.svg and request.svg.strip())
+        png_provided = bool(request.png and request.png.strip())
+        if not xml_provided and not svg_provided and not png_provided:
+            raise HTTPException(
+                status_code=400,
+                detail="At least one of `xml`, `svg`, or `png` is required for a session save",
+            )
+
+        # Per-type S3 keys. When `diagram_type == "logical"` the keys match
+        # the legacy locations exactly so existing readers (DOCX export,
+        # the SAD orchestrator's pre-redesign codepath) keep working.
+        xml_key: Optional[str] = (
+            f"sessions/{request.session_id}/diagram/{diagram_type}.xml" if xml_provided else None
+        )
+        svg_key: Optional[str] = None
+        png_key: Optional[str] = None
+        try:
+            if xml_provided:
+                s3_put_object(key=xml_key, body=request.xml.encode("utf-8"), content_type="application/xml")
+            if svg_provided:
+                svg_key = f"sessions/{request.session_id}/diagram/{diagram_type}.svg"
+                s3_put_object(key=svg_key, body=request.svg.encode("utf-8"), content_type="image/svg+xml")
+            if png_provided:
+                # Strip the data-URL prefix and decode the base64 to raw PNG bytes.
+                png_url = request.png.strip()
+                if png_url.startswith("data:image/png;base64,"):
+                    png_b64 = png_url.split(",", 1)[1]
+                else:
+                    png_b64 = png_url  # Tolerate raw base64 without the prefix.
+                png_bytes = base64.b64decode(png_b64)
+                png_key = f"sessions/{request.session_id}/diagram/{diagram_type}.png"
+                s3_put_object(key=png_key, body=png_bytes, content_type="image/png")
+        except Exception as e:
+            logger.error(f"[DESIGN] S3 put for diagram failed (session {request.session_id}, type {diagram_type}): {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to save diagram to S3: {e}")
+
+        page_url: Optional[str] = None
+        page_id: Optional[str] = None
+        # Optional: also push to Confluence (sharing). Skipped silently if user
+        # hasn't linked Atlassian, no space_key was supplied, or no XML was
+        # in this request (svg-only update from the SAD-page recovery flow).
+        if request.space_key and xml_provided:
+            credentials = get_user_atlassian_credentials(user_id)
+            if credentials and credentials.get("atlassian_api_token"):
+                try:
+                    page_url, page_id = _push_xml_to_confluence(
+                        credentials, request.space_key, request.page_title, request.xml,
+                    )
+                except Exception as e:
+                    # Don't fail the save just because Confluence is unhappy.
+                    logger.warning(f"[DESIGN] Confluence push failed (non-fatal, session save succeeded): {e}")
+
+        # Update the per-type slot in JSONB.
+        from db_helper import update_diagram_slot
+        slot_patch: Dict[str, Any] = {
+            "status": "done",
+            "saved_at": int(datetime.now().timestamp()),
+        }
+        # Prefer the SVG key as the artifact pointer (what the SAD generator
+        # embeds); fall back to XML if SVG wasn't in this request.
+        if svg_key:
+            slot_patch["artifact_key"] = svg_key
+        elif xml_key:
+            slot_patch["artifact_key"] = xml_key
+        try:
+            slot = update_diagram_slot(request.session_id, diagram_type, slot_patch)
+        except Exception as e:
+            logger.warning(f"[DESIGN] Failed to update diagram_slots for {request.session_id}.{diagram_type}: {e}")
+            slot = None
+
+        # For backward compat: when saving the LOGICAL slot, also bump the
+        # legacy single-slot columns so anything that hasn't been migrated
+        # yet (e.g. DOCX export reading session.diagram_svg_s3_key) keeps
+        # working. Other types only update the JSONB slot.
+        legacy_xml_key: Optional[str] = session.get("diagram_s3_key")
+        legacy_svg_key: Optional[str] = session.get("diagram_svg_s3_key")
+        if diagram_type == "logical":
+            legacy_xml_key = xml_key or legacy_xml_key
+            legacy_svg_key = svg_key or legacy_svg_key
+
+        # Bump session: record legacy S3 keys (logical only) + stage.
+        new_stage = session["stage"] if session["stage"] in ("SAD_GATHERING", "SAD_GENERATING", "SAD_REFINING") else "DIAGRAM_READY"
+        updated = update_design_session(
+            session_id=request.session_id,
+            diagram_s3_key=legacy_xml_key,
+            diagram_svg_s3_key=legacy_svg_key,
+            stage=new_stage,
+            confluence_page_id=page_id,
+        )
+        return SaveDiagramResponse(
+            page_url=page_url,
+            page_id=page_id,
+            diagram_s3_key=xml_key or legacy_xml_key,
+            diagram_svg_s3_key=svg_key or legacy_svg_key,
+            session_stage=updated["stage"],
+            diagram_slot=slot,
+        )
+
+    # ── Legacy Confluence-only path (preserved for old callers) ────────────
+    if not request.xml or not request.xml.strip():
+        raise HTTPException(status_code=400, detail="xml is required for the legacy Confluence-only save path")
+    credentials = get_user_atlassian_credentials(user_id)
     if not credentials or not credentials.get("atlassian_api_token"):
         raise HTTPException(
             status_code=400,
             detail="Atlassian account not linked. Please link your account in Settings first.",
         )
-
-    if not request.xml.strip():
-        raise HTTPException(status_code=400, detail="XML must not be empty")
-
-    page_title = request.page_title.strip() or f"Architecture Diagram — {request.space_key} — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    content = _wrap_xml_for_confluence(request.xml)
+    if not request.space_key:
+        raise HTTPException(status_code=400, detail="space_key is required when session_id is not provided")
 
     try:
-        confluence = ConfluenceService(
-            credentials["atlassian_domain"],
-            credentials["atlassian_email"],
-            credentials["atlassian_api_token"],
+        page_url, page_id = _push_xml_to_confluence(
+            credentials, request.space_key, request.page_title, request.xml,
         )
-
-        existing = confluence.find_page_by_title(request.space_key, page_title)
-        if existing:
-            page = confluence.update_page(
-                page_id=existing["id"],
-                title=page_title,
-                content=content,
-                current_version=existing["version"]["number"],
-            )
-            logger.info(f"[DESIGN] Diagram page updated: {page['id']}")
-        else:
-            page = confluence.create_page(
-                space_key=request.space_key,
-                title=page_title,
-                content=content,
-            )
-            logger.info(f"[DESIGN] Diagram page created: {page['id']}")
-
-        return SaveDiagramResponse(
-            page_url=page["web_url"],
-            page_id=page["id"],
-        )
+        return SaveDiagramResponse(page_url=page_url, page_id=page_id)
     except Exception as e:
         logger.error(f"[DESIGN] Save diagram error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save diagram: {str(e)}")
 
 
+def _push_xml_to_confluence(
+    credentials: dict,
+    space_key: str,
+    page_title: str,
+    xml: str,
+) -> tuple[str, str]:
+    """Create or update a Confluence page holding the draw.io XML. Returns (web_url, page_id)."""
+    title = (page_title or "").strip() or f"Architecture Diagram — {space_key} — {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    content = _wrap_xml_for_confluence(xml)
+    confluence = ConfluenceService(
+        credentials["atlassian_domain"],
+        credentials["atlassian_email"],
+        credentials["atlassian_api_token"],
+    )
+    existing = confluence.find_page_by_title(space_key, title)
+    if existing:
+        page = confluence.update_page(
+            page_id=existing["id"],
+            title=title,
+            content=content,
+            current_version=existing["version"]["number"],
+        )
+        logger.info(f"[DESIGN] Diagram page updated: {page['id']}")
+    else:
+        page = confluence.create_page(space_key=space_key, title=title, content=content)
+        logger.info(f"[DESIGN] Diagram page created: {page['id']}")
+    return page["web_url"], page["id"]
+
+
 @router.post("/load-diagram", response_model=LoadDiagramResponse)
-async def load_diagram_from_confluence(
+async def load_diagram(
     request: LoadDiagramRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    Load a previously saved draw.io XML diagram from Confluence.
-    Returns the XML string so the frontend can push it into the draw.io editor.
-    Returns 404 if no saved diagram is found.
+    Load a saved draw.io XML diagram.
+
+    Resolution order:
+      1. If `session_id` is provided and the session has `diagram_s3_key`,
+         load the XML from S3 (primary source for the new flow).
+      2. Otherwise (or if S3 read fails), fall back to Confluence using
+         `page_id` if given, else by title within `space_key`.
     """
-    credentials = get_user_atlassian_credentials(current_user["id"])
+    user_id = current_user["id"]
+
+    # ── 1. Session-aware path ───────────────────────────────────────────
+    if request.session_id:
+        session = get_design_session(request.session_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+        if session["user_id"] != user_id:
+            raise HTTPException(status_code=403, detail="You don't have access to this session")
+
+        # Per-type lookup. Default to "logical" so legacy callers behave as before.
+        diagram_type = (request.diagram_type or "logical").lower()
+        if diagram_type not in ("logical", "infrastructure", "security"):
+            raise HTTPException(
+                status_code=400,
+                detail="diagram_type must be one of: logical, infrastructure, security",
+            )
+
+        # Try the per-type S3 key first (where the redesign saves), then
+        # fall back to the legacy single-slot keys for the logical type
+        # (where pre-redesign saves went).
+        per_type_xml_key = f"sessions/{request.session_id}/diagram/{diagram_type}.xml"
+        per_type_svg_key = f"sessions/{request.session_id}/diagram/{diagram_type}.svg"
+        s3 = get_s3_client()
+
+        try:
+            obj = s3.get_object(Bucket=S3_BUCKET_NAME, Key=per_type_xml_key)
+            xml = obj["Body"].read().decode("utf-8")
+            logger.info(f"[DESIGN] {diagram_type} diagram loaded from S3 for session {request.session_id}")
+            return LoadDiagramResponse(
+                xml=xml,
+                diagram_s3_key=per_type_xml_key,
+                diagram_svg_s3_key=per_type_svg_key,
+                source="s3",
+            )
+        except Exception as e:
+            logger.info(
+                f"[DESIGN] No per-type {diagram_type} diagram for session {request.session_id} "
+                f"({e!r}) — checking legacy single-slot keys"
+            )
+
+        # Legacy single-slot fallback: only meaningful for the logical
+        # type (which is what the pre-redesign codepath was implicitly
+        # writing to anyway).
+        if diagram_type == "logical":
+            xml_key = session.get("diagram_s3_key")
+            svg_key = session.get("diagram_svg_s3_key")
+            if xml_key:
+                try:
+                    obj = s3.get_object(Bucket=S3_BUCKET_NAME, Key=xml_key)
+                    xml = obj["Body"].read().decode("utf-8")
+                    logger.info(f"[DESIGN] Legacy diagram loaded from S3 for session {request.session_id}")
+                    return LoadDiagramResponse(
+                        xml=xml,
+                        diagram_s3_key=xml_key,
+                        diagram_svg_s3_key=svg_key,
+                        source="s3",
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[DESIGN] Legacy S3 diagram read failed for session {request.session_id}: "
+                        f"{e} — falling back to Confluence"
+                    )
+        # else: session has no S3 diagram for this type yet → fall through to Confluence
+
+    # ── 2. Confluence fallback (legacy + recovery path) ─────────────────
+    credentials = get_user_atlassian_credentials(user_id)
     if not credentials or not credentials.get("atlassian_api_token"):
         raise HTTPException(
-            status_code=400,
-            detail="Atlassian account not linked. Please link your account in Settings first.",
+            status_code=404,
+            detail="No diagram in S3 for this session and Atlassian is not linked for the Confluence fallback.",
         )
 
     page_title = request.page_title.strip() or f"Architecture Diagram — {request.space_key}"
-
     try:
         confluence = ConfluenceService(
             credentials["atlassian_domain"],
@@ -912,7 +1620,6 @@ async def load_diagram_from_confluence(
             credentials["atlassian_api_token"],
         )
 
-        # Prefer direct page_id lookup (avoids title-search issues with special chars)
         if request.page_id.strip():
             page_content = confluence.get_content_page_by_id(
                 request.page_id.strip(), expand="body.storage,version,_links"
@@ -922,24 +1629,406 @@ async def load_diagram_from_confluence(
                 raise HTTPException(status_code=422, detail="Saved diagram page found but XML could not be extracted.")
             web_url = f"https://{credentials['atlassian_domain']}/wiki{page_content.get('_links', {}).get('webui', '')}"
             logger.info(f"[DESIGN] Diagram loaded by page_id {request.page_id}")
-            return LoadDiagramResponse(xml=xml, page_url=web_url, page_id=request.page_id.strip())
+            return LoadDiagramResponse(xml=xml, page_url=web_url, page_id=request.page_id.strip(), source="confluence")
+
+        if not request.space_key:
+            raise HTTPException(status_code=400, detail="Either session_id, page_id, or space_key is required to load a diagram")
 
         existing = confluence.find_page_by_title(request.space_key, page_title)
         if not existing:
-            raise HTTPException(status_code=404, detail="No saved diagram found for this project.")
+            raise HTTPException(status_code=404, detail="No saved diagram found.")
 
         page_content = confluence.get_page_content(existing["id"])
         xml = _extract_xml_from_confluence(page_content["content"])
-
         if not xml:
             raise HTTPException(status_code=422, detail="Saved diagram page found but XML could not be extracted.")
 
         web_url = f"https://{credentials['atlassian_domain']}/wiki{existing.get('_links', {}).get('webui', '')}"
         logger.info(f"[DESIGN] Diagram loaded from Confluence page {existing['id']}")
-        return LoadDiagramResponse(xml=xml, page_url=web_url, page_id=existing["id"])
+        return LoadDiagramResponse(xml=xml, page_url=web_url, page_id=existing["id"], source="confluence")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[DESIGN] Load diagram error: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load diagram: {str(e)}")
+
+
+# ============================================================================
+# Lucidchart integration
+# ============================================================================
+#
+# Lucid is offered alongside draw.io as a second authoring path for the
+# diagram phase. The flow:
+#   1. User picks Confluence pages and a diagram type (logical / infra / security).
+#   2. /generate-lucid-prompt(-stream) calls Claude with one of the three
+#      LUCID_*_PROMPT_SYSTEM templates and returns a structured brief.
+#   3. User connects their Lucid account via OAuth (/lucid-auth-url →
+#      lucid.app → /lucid-callback). Token is held in-memory keyed by
+#      user_id so subsequent /create-lucid-mcp calls authenticate as them.
+#   4. /create-lucid-mcp invokes Lucid's MCP `lucid_create_diagram_from_description`
+#      tool through services.lucid_mcp_client and returns the edit URL.
+
+import httpx
+from urllib.parse import urlencode
+from fastapi.responses import RedirectResponse
+from services.lucid_mcp_client import create_diagram_from_description as _lucid_mcp_create
+
+LUCID_PROMPT_MODEL_ID = os.getenv(
+    "DESIGN_LUCID_PROMPT_MODEL_ID",
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+)
+LUCID_PROMPT_MAX_TOKENS = int(os.getenv("DESIGN_LUCID_PROMPT_MAX_TOKENS", "8192"))
+
+LUCID_CLIENT_ID = os.getenv("LUCID_CLIENT_ID", "")
+LUCID_CLIENT_SECRET = os.getenv("LUCID_CLIENT_SECRET", "")
+LUCID_REDIRECT_URI = os.getenv(
+    "LUCID_REDIRECT_URI",
+    "http://localhost:8000/api/design/lucid-callback",
+)
+LUCID_FRONTEND_URL = os.getenv("LUCID_FRONTEND_URL", "http://localhost:5173")
+
+# user_id → access_token. In-memory only — fine for single-Pod dev/VDI;
+# move to a DB column or KMS-encrypted store before scaling horizontally.
+_lucid_tokens: dict = {}
+
+
+# ─── Lucid prompt templates (one per diagram type) ────────────────────────────
+
+LUCID_LOGICAL_PROMPT_SYSTEM = """
+You are a senior solutions architect. You will be given content from one or more Confluence pages
+or design documents describing a software project. Read everything carefully, then produce a
+concise, structured diagram brief that Lucid AI can directly consume to generate a
+professional logical architecture diagram.
+
+A LOGICAL diagram shows WHAT the system does and HOW data flows between capabilities.
+It is vendor-agnostic — no cloud provider names, no server types, no infrastructure details.
+
+══════════════════════════════════════════════════
+OUTPUT — write exactly this block, plain text only
+══════════════════════════════════════════════════
+
+Create a logical architecture diagram titled "[Project Name] – Logical Architecture".
+
+OVERVIEW
+[Project Name] is [2–3 sentence plain-English description of what the system does and who uses it].
+
+ACTORS
+[Actor Name] ([type: End User | Admin | External System | Partner]): [one sentence — what they do in the system]
+[repeat for each actor, one per line]
+
+CAPABILITIES
+[Capability Name] ([layer: Presentation | API | Business Logic | Data | Messaging | External]): [one sentence — what this capability is responsible for]
+[aim for 8–15 capabilities, one per line]
+
+DATA FLOWS
+[Source] → [Target]: [verb phrase describing what moves, e.g. "submits login request", "returns user profile", "publishes order event", "queries transaction history"]
+[one flow per line — list every meaningful interaction]
+
+GROUPS
+[Group/Layer Name]: [Capability1], [Capability2], [Capability3]
+[group capabilities into 3–5 logical layers, one group per line]
+
+NOTES
+[Any key business rules, constraints, or open questions — one bullet per line starting with -]
+
+══════════════════════════════════════════════════
+RULES
+══════════════════════════════════════════════════
+- Output ONLY the diagram brief above — no preamble, no explanation, no markdown fences
+- No cloud provider names (AWS, Azure, GCP), no server types, no infrastructure
+- Keep capability names short (2–4 words): "Order Service", "Auth Gateway", "Notification Engine"
+- Data flow verbs must be specific: "authenticates", "queries", "publishes", "streams", "validates" — not generic "uses" or "calls"
+- If a detail is not in the documents, infer what a senior architect would include and append (inferred)
+- Aim for 8–15 capabilities and 10–20 data flows — enough to make a meaningful diagram, not overwhelming
+"""
+
+LUCID_ARCHITECTURE_PROMPT_SYSTEM = """
+You are a senior infrastructure architect. You will be given content from one or more Confluence pages
+describing a software project. Read everything carefully, then produce a concise, structured
+diagram brief that Lucid AI can directly consume to generate a professional infrastructure
+architecture diagram.
+
+An INFRASTRUCTURE diagram shows WHERE the system runs and HOW components connect —
+cloud services, compute, databases, networking, security, and external integrations.
+
+══════════════════════════════════════════════════
+OUTPUT — write exactly this block, plain text only
+══════════════════════════════════════════════════
+
+Create an infrastructure architecture diagram titled "[Project Name] – Infrastructure Architecture".
+
+OVERVIEW
+[Project Name] is [2–3 sentence description of the system, its cloud platform, and scale context].
+
+COMPONENTS
+[Component Name] ([type: Web App | REST API | GraphQL API | Microservice | Serverless Function | Container | Load Balancer | CDN | API Gateway | Database | Cache | Object Storage | Message Queue | Event Bus | Auth Service | WAF | Secret Store | Monitoring | External API | SaaS Integration]): [one sentence — what it does]
+[aim for 12–20 components, one per line]
+
+CONNECTIONS
+[Source Component] → [Target Component]: [verb phrase, e.g. "routes HTTPS traffic to", "reads and writes records in", "publishes events to", "authenticates requests via", "caches responses in", "triggers on message from"]
+[one connection per line — every meaningful link between components]
+
+GROUPS
+[Layer/Zone Name]: [Component1], [Component2], [Component3]
+[group components into 4–6 infrastructure layers, e.g. "Public Layer", "Compute Layer", "Data Layer", "Security Layer", "Monitoring", "External Services"]
+
+NOTES
+[Key architectural decisions, inferred components, or important constraints — one bullet per line starting with -]
+
+══════════════════════════════════════════════════
+RULES
+══════════════════════════════════════════════════
+- Output ONLY the diagram brief above — no preamble, no explanation, no markdown fences
+- Component names must match real service names where known (e.g. "AWS Lambda", "Redis Cache", "PostgreSQL", "Azure AD")
+- Connection verbs must be precise: "routes", "queries", "caches", "validates", "streams", "writes to" — not "uses" or "talks to"
+- If a detail is not in the documents, infer what a senior architect would include and append (inferred)
+- Aim for 12–20 components and 15–25 connections — enough for a complete, meaningful diagram
+"""
+
+LUCID_SECURITY_PROMPT_SYSTEM = """
+You are a senior security architect. You will be given content from one or more Confluence pages
+or design documents describing a software project. Read everything carefully, then produce a
+concise, structured diagram brief that Lucid AI can directly consume to generate a professional
+security architecture diagram.
+
+A SECURITY diagram shows trust boundaries, WHO accesses WHAT, WHERE controls sit,
+and HOW data is protected. It is organized by trust zones, not deployment layers.
+
+══════════════════════════════════════════════════
+OUTPUT — write exactly this block, plain text only
+══════════════════════════════════════════════════
+
+Create a security architecture diagram titled "[Project Name] – Security Architecture".
+
+OVERVIEW
+[Project Name] is [2–3 sentence description of the system, its data sensitivity, and compliance context].
+Compliance scope: [list frameworks: GDPR, HIPAA, SOC 2, ISO 27001, PCI-DSS — or "None identified"]
+
+TRUST ZONES
+[Zone Name] (trust: [Untrusted | Low | Medium | High | Privileged]): [one sentence — what lives here and why this trust level]
+[list 4–6 zones, one per line: e.g. "Internet Zone", "DMZ", "Application Zone", "Data Zone", "Admin Zone", "CI/CD Zone"]
+
+COMPONENTS
+[Component Name] ([type: User | External Client | API Gateway | WAF | Firewall | Auth Server | Service | Database | Secret Store | Audit Log | Admin Console | CI/CD Pipeline]): [zone it belongs to] — [one sentence security role]
+[aim for 10–18 components, one per line]
+
+ACCESS FLOWS
+[Actor/Component] → [Target Component]: [auth mechanism + what they can do, e.g. "authenticates via OAuth 2.0 + MFA, can read user profile", "uses mTLS, can publish events to queue", "uses API key, read-only access to metrics"]
+[one flow per line — every trust boundary crossing]
+
+SECURITY CONTROLS
+[Control Name] ([type: WAF | MFA | TLS | RBAC | Encryption at Rest | Rate Limiting | SIEM | Audit Logging | Secret Rotation | Network Policy]): enforces [what rule] at [which boundary or component]
+[one control per line]
+
+GROUPS
+[Zone Name]: [Component1], [Component2], [Component3]
+[map every component to its zone — one group per zone]
+
+NOTES
+[Security gaps, compliance mappings, or inferred controls — one bullet per line starting with -]
+
+══════════════════════════════════════════════════
+RULES
+══════════════════════════════════════════════════
+- Output ONLY the diagram brief above — no preamble, no explanation, no markdown fences
+- Every access flow must cross a trust boundary — internal calls within the same zone are not access flows
+- Control names must be specific: "Azure AD MFA" not just "MFA", "AES-256 at rest" not just "encryption"
+- If a detail is not in the documents, infer what a senior security architect would include and append (inferred)
+- Aim for 10–18 components, 4–6 trust zones, and 8–15 access flows
+"""
+
+
+# ─── Lucid request / response models ──────────────────────────────────────────
+
+class GenerateLucidPromptRequest(BaseModel):
+    project_id: str
+    page_contents: List[str]
+    diagram_type: str = "infrastructure"  # logical | infrastructure | security
+
+
+class GenerateLucidPromptResponse(BaseModel):
+    prompt: str
+
+
+class CreateLucidMcpRequest(BaseModel):
+    prompt: str
+    title: str
+
+
+class CreateLucidMcpResponse(BaseModel):
+    edit_url: str
+    document_id: str
+    raw: str = ""
+
+
+def _get_lucid_system_prompt(diagram_type: str) -> str:
+    if diagram_type == "logical":
+        return LUCID_LOGICAL_PROMPT_SYSTEM
+    if diagram_type == "security":
+        return LUCID_SECURITY_PROMPT_SYSTEM
+    return LUCID_ARCHITECTURE_PROMPT_SYSTEM
+
+
+# ─── Lucid prompt-generation endpoints ────────────────────────────────────────
+
+@router.post("/generate-lucid-prompt", response_model=GenerateLucidPromptResponse)
+async def generate_lucid_prompt(
+    request: GenerateLucidPromptRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Build a structured architecture brief from selected Confluence pages.
+    Returns the full prompt as a single string (non-streamed)."""
+    if not request.page_contents:
+        raise HTTPException(status_code=400, detail="No page contents provided")
+
+    combined = "\n\n---\n\n".join(request.page_contents)
+    user_message = (
+        "Read the following Confluence documentation carefully and produce the diagram brief "
+        "following your instructions exactly.\n\n"
+        f"CONFLUENCE CONTENT:\n{combined}\n\n"
+        "Output ONLY the diagram brief — starting with the \"Create a ... diagram titled\" line. "
+        "No preamble, no explanation."
+    )
+    system_prompt = _get_lucid_system_prompt(request.diagram_type)
+    prompt = _invoke_claude(
+        system_prompt,
+        user_message,
+        LUCID_PROMPT_MODEL_ID,
+        LUCID_PROMPT_MAX_TOKENS,
+        user_id=current_user.get("user_id") or current_user.get("id"),
+    )
+    logger.info(f"[DESIGN] Lucid {request.diagram_type} prompt generated ({len(prompt)} chars)")
+    return GenerateLucidPromptResponse(prompt=prompt)
+
+
+@router.post("/generate-lucid-prompt-stream")
+async def generate_lucid_prompt_stream(
+    request: GenerateLucidPromptRequest,
+    _current_user: dict = Depends(get_current_user),
+):
+    """SSE-streaming variant of /generate-lucid-prompt for progressive UI."""
+    if not request.page_contents:
+        raise HTTPException(status_code=400, detail="No page contents provided")
+
+    combined = "\n\n---\n\n".join(request.page_contents)
+    user_message = (
+        "Read the following Confluence documentation carefully and produce the diagram brief "
+        "following your instructions exactly.\n\n"
+        f"CONFLUENCE CONTENT:\n{combined}\n\n"
+        "Output ONLY the diagram brief — starting with the \"Create a ... diagram titled\" line. "
+        "No preamble, no explanation."
+    )
+    system_prompt = _get_lucid_system_prompt(request.diagram_type)
+
+    def stream():
+        try:
+            yield from _invoke_claude_stream(
+                system_prompt, user_message, LUCID_PROMPT_MODEL_ID, LUCID_PROMPT_MAX_TOKENS
+            )
+        except Exception as e:
+            logger.error(f"[DESIGN] Lucid prompt stream error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ─── Lucid OAuth ──────────────────────────────────────────────────────────────
+
+@router.get("/lucid-auth-url")
+async def get_lucid_auth_url(current_user: dict = Depends(get_current_user)):
+    if not LUCID_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="LUCID_CLIENT_ID not configured")
+    user_id = str(current_user.get("id") or current_user.get("user_id") or "default")
+    state = base64.urlsafe_b64encode(user_id.encode()).decode().rstrip("=")
+    params = urlencode({
+        "client_id": LUCID_CLIENT_ID,
+        "redirect_uri": LUCID_REDIRECT_URI,
+        "response_type": "code",
+        "scope": "lucidchart.document.content offline_access",
+        "state": state,
+    })
+    return {"url": f"https://lucid.app/oauth2/authorize?{params}"}
+
+
+@router.get("/lucid-status")
+async def get_lucid_status(current_user: dict = Depends(get_current_user)):
+    user_id = str(current_user.get("id") or current_user.get("user_id") or "default")
+    connected = bool(_lucid_tokens.get(user_id) or os.getenv("LUCID_OAUTH_TOKEN", ""))
+    return {"connected": connected}
+
+
+@router.get("/lucid-callback")
+async def lucid_oauth_callback(code: str = None, state: str = "", error: str = None):
+    """OAuth redirect target — exchanges the auth code for an access token,
+    stashes it under the user, and bounces the browser back to the SPA."""
+    if error or not code:
+        return RedirectResponse(url=f"{LUCID_FRONTEND_URL}/design-assistant?lucid=error")
+
+    try:
+        padded = state + "=" * (4 - len(state) % 4)
+        user_id = base64.urlsafe_b64decode(padded).decode()
+    except Exception:
+        user_id = "default"
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            "https://api.lucid.co/oauth2/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "client_id": LUCID_CLIENT_ID,
+                "client_secret": LUCID_CLIENT_SECRET,
+                "redirect_uri": LUCID_REDIRECT_URI,
+            },
+        )
+        data = r.json()
+
+    access_token = data.get("access_token", "")
+    if not access_token:
+        logger.error(f"[LUCID_AUTH] Token exchange failed: {data}")
+        return RedirectResponse(url=f"{LUCID_FRONTEND_URL}/design-assistant?lucid=error")
+
+    _lucid_tokens[user_id] = access_token
+    logger.info(f"[LUCID_AUTH] Token stored for user: {user_id[:30]}")
+    return RedirectResponse(url=f"{LUCID_FRONTEND_URL}/design-assistant?lucid=connected")
+
+
+# ─── Lucid MCP — diagram creation ─────────────────────────────────────────────
+
+@router.post("/create-lucid-mcp", response_model=CreateLucidMcpResponse)
+async def create_lucid_diagram_via_mcp(
+    request: CreateLucidMcpRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    if not request.prompt.strip():
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    user_id = str(current_user.get("id") or current_user.get("user_id") or "default")
+    token = _lucid_tokens.get(user_id) or os.getenv("LUCID_OAUTH_TOKEN", "").strip()
+    if not token:
+        raise HTTPException(status_code=401, detail="Not connected to Lucid. Click 'Connect to Lucid' first.")
+
+    title = request.title.strip() or "Architecture Diagram"
+
+    try:
+        result = await _lucid_mcp_create(description=request.prompt, title=title, token=token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+    except Exception as e:
+        logger.error(f"[DESIGN] Lucid MCP error: {e}")
+        raise HTTPException(status_code=502, detail=f"Lucid MCP error: {str(e)}")
+
+    if not result.get("edit_url"):
+        logger.warning(f"[DESIGN] MCP call returned no URL. Raw: {result.get('raw', '')[:200]}")
+        raise HTTPException(status_code=502, detail="Diagram created but no URL returned")
+
+    return CreateLucidMcpResponse(
+        edit_url=result["edit_url"],
+        document_id=result["document_id"],
+        raw=result.get("raw", ""),
+    )

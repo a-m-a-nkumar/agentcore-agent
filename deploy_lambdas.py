@@ -63,6 +63,11 @@ LAMBDAS = {
         "handler_file": "lambda_requirements_gathering.py",
         "needs_prompts": True,
     },
+    "sad-orchestrator": {
+        "function_name": "sdlc-dev-sad-orchestrator",
+        "handler_file": "lambda_sad_orchestrator.py",
+        "needs_prompts": True,
+    },
 }
 
 # Shared local files every lambda needs
