@@ -897,15 +897,16 @@ def create_design_session(
 
 
 def get_design_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """Fetch a single design_session by id. Returns None if missing or soft-deleted."""
+    """Fetch a single design_session by id. Returns None if missing.
+
+    Hard-delete model — there's no soft-deleted state to filter for. If the
+    row exists in the table it's a real session; if not, it was deleted.
+    """
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
-                """
-                SELECT * FROM design_sessions
-                WHERE id = %s AND is_deleted = FALSE
-                """,
+                "SELECT * FROM design_sessions WHERE id = %s",
                 (session_id,),
             )
             row = cursor.fetchone()
@@ -918,7 +919,7 @@ def list_design_sessions(
     project_id: str,
     user_id: str = None,
 ) -> List[Dict[str, Any]]:
-    """List non-deleted design_sessions for a project, newest activity first."""
+    """List design_sessions for a project, newest activity first."""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -926,7 +927,7 @@ def list_design_sessions(
                 cursor.execute(
                     """
                     SELECT * FROM design_sessions
-                    WHERE project_id = %s AND user_id = %s AND is_deleted = FALSE
+                    WHERE project_id = %s AND user_id = %s
                     ORDER BY last_activity_ts DESC
                     """,
                     (project_id, user_id),
@@ -935,7 +936,7 @@ def list_design_sessions(
                 cursor.execute(
                     """
                     SELECT * FROM design_sessions
-                    WHERE project_id = %s AND is_deleted = FALSE
+                    WHERE project_id = %s
                     ORDER BY last_activity_ts DESC
                     """,
                     (project_id,),
@@ -1001,20 +1002,17 @@ def update_design_session(
         release_db_connection(conn)
 
 
-def delete_design_session(session_id: str, hard_delete: bool = False) -> bool:
-    """Soft-delete by default; hard delete the row if requested."""
+def delete_design_session(session_id: str) -> bool:
+    """Hard-delete a design_session row. S3 artefacts are intentionally NOT
+    cleaned up — they stay under sessions/{id}/* in case the user wants to
+    pull them back via direct S3 access. Add an explicit S3 cleanup
+    helper later if/when product wants true scrubbing."""
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:
-            if hard_delete:
-                cursor.execute("DELETE FROM design_sessions WHERE id = %s", (session_id,))
-            else:
-                cursor.execute(
-                    "UPDATE design_sessions SET is_deleted = TRUE WHERE id = %s",
-                    (session_id,),
-                )
+            cursor.execute("DELETE FROM design_sessions WHERE id = %s", (session_id,))
             conn.commit()
-            logger.info(f"design_session {'hard' if hard_delete else 'soft'} deleted: {session_id}")
+            logger.info(f"design_session deleted: {session_id}")
             return True
     except Exception as e:
         conn.rollback()
@@ -1067,7 +1065,7 @@ def get_diagram_slots(session_id: str) -> Dict[str, Any]:
                 """
                 SELECT diagram_slots, authoring_tool
                 FROM design_sessions
-                WHERE id = %s AND is_deleted = FALSE
+                WHERE id = %s
                 """,
                 (session_id,),
             )
@@ -1119,7 +1117,7 @@ def update_diagram_slot(
             # Read existing slot so we can merge instead of overwrite —
             # callers typically PATCH partial state.
             cursor.execute(
-                "SELECT diagram_slots FROM design_sessions WHERE id = %s AND is_deleted = FALSE",
+                "SELECT diagram_slots FROM design_sessions WHERE id = %s",
                 (session_id,),
             )
             row = cursor.fetchone()

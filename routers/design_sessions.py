@@ -73,7 +73,6 @@ class DesignSessionResponse(BaseModel):
     diagram_svg_s3_key: Optional[str] = None
     sad_id: Optional[str] = None
     confluence_page_id: Optional[str] = None
-    is_deleted: bool
     created_at: int
     last_activity_ts: int
 
@@ -220,7 +219,9 @@ def delete(
     session_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """Soft-delete a session (artefacts in S3 are kept; row marked is_deleted=true)."""
+    """Hard-delete the session row from the DB. S3 artefacts under
+    sessions/{id}/* stay in place — operators can scrub them via the AWS
+    console if needed. The row + its diagram_slots JSONB go immediately."""
     _ensure_owns_session(session_id, current_user["id"])
     delete_design_session(session_id)
     return {"ok": True, "session_id": session_id}
