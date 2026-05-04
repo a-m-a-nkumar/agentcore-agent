@@ -4,13 +4,13 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
 import { API_CONFIG } from "@/config/api";
-import { apiPost } from "@/services/api";
+import { apiPost, apiGet } from "@/services/api";
 import { getAccessToken } from "@/services/authService";
 import {
   ChevronRight, ChevronLeft, Loader2, CheckCircle2,
   Download, Copy, RefreshCw, FileCode2, FolderTree,
   Database, Cloud, Shield, Layers, Server, Package,
-  GitBranch, ExternalLink, Lock, Unlock, FileUp,
+  GitBranch, ExternalLink, Lock, Unlock, FileUp, AlertCircle,
 } from "lucide-react";
 
 const BACKEND = API_CONFIG.BASE_URL;
@@ -97,9 +97,39 @@ export function TerraformGeneratorCore() {
   // Step 4
   const [isDownloading, setIsDownloading] = useState(false);
 
+  // Checkov scan
+  const [showScanPanel, setShowScanPanel]           = useState(false);
+  const [isScanning, setIsScanning]                 = useState(false);
+  const [isAutoFixing, setIsAutoFixing]             = useState(false);
+  const [scanResults, setScanResults]               = useState<{
+    passed: number; failed: number;
+    passed_checks: {check_id: string; check_name?: string; resource: string; file: string}[];
+    failed_checks: {check_id: string; check_name?: string; resource: string; file: string; guideline?: string; lines?: number[]}[];
+    parse_errors: {file: string; detail: string}[];
+    status: "passed" | "failed" | "unavailable" | null;
+  } | null>(null);
+  const [showPassedChecks, setShowPassedChecks]     = useState(false);
+  const [scanHistory, setScanHistory]               = useState<{iteration: number; passed: number; failed: number}[]>([]);
+  const [selectedScanModule, setSelectedScanModule] = useState<string | null>(null);
+
+  // Load from Bitbucket panel
+  const [showFetchPanel, setShowFetchPanel]         = useState(false);
+  const [fetchWs, setFetchWs]                       = useState("");
+  const [fetchRepo, setFetchRepo]                   = useState("");
+  const [fetchBranch, setFetchBranch]               = useState("main");
+  const [fetchPath, setFetchPath]                   = useState("");
+  const [fetchWorkspaces, setFetchWorkspaces]       = useState<{slug: string; name: string}[]>([]);
+  const [fetchRepos, setFetchRepos]                 = useState<{slug: string; name: string}[]>([]);
+  const [fetchBranches, setFetchBranches]           = useState<string[]>([]);
+  const [fetchConnected, setFetchConnected]         = useState<string | null>(null); // display_name if connected
+  const [isFetchConnecting, setIsFetchConnecting]   = useState(false);
+  const [isFetchLoadingRepos, setIsFetchLoadingRepos] = useState(false);
+  const [isFetchLoadingBranches, setIsFetchLoadingBranches] = useState(false);
+  const [isFetching, setIsFetching]                 = useState(false);
+
   // Push panel
   const [showPushPanel, setShowPushPanel] = useState(false);
-  const [pushTarget, setPushTarget]       = useState<"github" | "harness">("github");
+  const [pushTarget, setPushTarget]       = useState<"github" | "harness" | "bitbucket">("github");
   const [isPushing, setIsPushing]         = useState(false);
   const [pushResult, setPushResult]       = useState<{ repo_url: string; commit_sha: string; files_pushed: number } | null>(null);
 
@@ -118,6 +148,15 @@ export function TerraformGeneratorCore() {
   const [harnessFolder, setHarnessFolder]     = useState("");
   const [harnessCommitMsg, setHarnessCommitMsg] = useState("feat: add Terraform infrastructure code");
 
+  // Bitbucket push fields
+  const [bbWorkspace, setBbWorkspace]       = useState("");
+  const [bbRepo, setBbRepo]                 = useState("");
+  const [bbBranch, setBbBranch]             = useState("main");
+  const [bbFolder, setBbFolder]             = useState("");
+  const [bbCommitMsg, setBbCommitMsg]       = useState("feat: add Terraform infrastructure code");
+  const [bbWorkspaces, setBbWorkspaces]     = useState<{slug: string; name: string}[]>([]);
+  const [bbLoadingWs, setBbLoadingWs]       = useState(false);
+  const [bbStatus, setBbStatus]             = useState<{linked: boolean; display_name?: string; error?: string} | null>(null);
 
   const [step, setStep] = useState(1);
 
@@ -250,6 +289,8 @@ export function TerraformGeneratorCore() {
     setIsGenerating(true);
     setGenProgress([]);
     setFiles({});
+    setScanResults(null);
+    setSelectedScanModule(null);
     setStep(3);
 
     try {
@@ -323,9 +364,14 @@ export function TerraformGeneratorCore() {
         toast({ title: "Repository name required", description: "Enter a repository name to push to.", variant: "destructive" });
         return;
       }
-    } else {
+    } else if (pushTarget === "harness") {
       if (!harnessApiKey.trim() || !harnessRepoUrl.trim()) {
         toast({ title: "Fields required", description: "Enter your Harness API key and repo URL.", variant: "destructive" });
+        return;
+      }
+    } else {
+      if (!bbWorkspace.trim() || !bbRepo.trim()) {
+        toast({ title: "Fields required", description: "Select a workspace and enter a repository slug.", variant: "destructive" });
         return;
       }
     }
@@ -350,7 +396,7 @@ export function TerraformGeneratorCore() {
           private: ghPrivate,
           folder_prefix: ghFolder,
         });
-      } else {
+      } else if (pushTarget === "harness") {
         res = await apiPost(`${BACKEND}/api/terraform/push-harness`, {
           files,
           api_key: harnessApiKey,
@@ -359,17 +405,26 @@ export function TerraformGeneratorCore() {
           commit_message: harnessCommitMsg,
           folder_prefix: harnessFolder,
         });
+      } else {
+        res = await apiPost(`${BACKEND}/api/terraform/push-bitbucket`, {
+          files,
+          workspace: bbWorkspace,
+          repo_slug: bbRepo,
+          branch: bbBranch || "main",
+          commit_message: bbCommitMsg,
+          folder_prefix: bbFolder,
+        });
       }
 
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Push failed");
 
       setPushResult({ repo_url: data.repo_url, commit_sha: data.commit_sha, files_pushed: data.files_pushed });
-      const target = pushTarget === "github" ? "GitHub" : "Harness Code";
-      toast({ title: `Pushed to ${target}!`, description: `${data.files_pushed} files pushed — commit ${data.commit_sha}` });
+      const targetLabel = pushTarget === "github" ? "GitHub" : pushTarget === "harness" ? "Harness Code" : "Bitbucket";
+      toast({ title: `Pushed to ${targetLabel}!`, description: `${data.files_pushed} files pushed${data.commit_sha ? ` — commit ${data.commit_sha}` : ""}` });
     } catch (err: any) {
-      const target = pushTarget === "github" ? "GitHub" : "Harness Code";
-      toast({ title: `${target} push failed`, description: err.message, variant: "destructive" });
+      const targetLabel = pushTarget === "github" ? "GitHub" : pushTarget === "harness" ? "Harness Code" : "Bitbucket";
+      toast({ title: `${targetLabel} push failed`, description: err.message, variant: "destructive" });
     } finally {
       setIsPushing(false);
     }
@@ -408,6 +463,211 @@ export function TerraformGeneratorCore() {
     if (activeFile && files[activeFile]) {
       navigator.clipboard.writeText(files[activeFile]);
       toast({ title: "Copied to clipboard" });
+    }
+  };
+
+  // ── Checkov scan ──────────────────────────────────────────────────────────
+
+  // Returns file paths belonging to a given module (+ root-level files always included)
+  const getModuleFiles = (moduleName: string) =>
+    Object.fromEntries(
+      Object.entries(files).filter(([path]) =>
+        path.startsWith(`modules/${moduleName}/`) || !path.startsWith("modules/")
+      )
+    );
+
+  // Derive unique module names from the current file tree
+  const moduleNames = Object.keys(files).reduce<string[]>((acc, path) => {
+    const m = path.match(/^modules\/([^/]+)\//);
+    if (m && !acc.includes(m[1])) acc.push(m[1]);
+    return acc;
+  }, []).sort();
+
+  const handleScan = async (moduleName?: string) => {
+    if (Object.keys(files).length === 0) return;
+    const target = moduleName ?? selectedScanModule;
+    if (moduleName !== undefined) setSelectedScanModule(moduleName);
+    setIsScanning(true);
+    setScanResults(null);
+    setScanHistory([]);
+    const filesToScan = target ? getModuleFiles(target) : files;
+    try {
+      const res = await apiPost(`${BACKEND}/api/terraform/scan`, { files: filesToScan });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Scan failed");
+
+      if (!data.checkov_available) {
+        setScanResults({ passed: 0, failed: 0, passed_checks: [], failed_checks: [], parse_errors: [], status: "unavailable" });
+        toast({ title: "Checkov not installed", description: data.results?.error || "Run: pip install checkov on the backend.", variant: "destructive" });
+        return;
+      }
+      const r = data.results;
+      const failedChecks = r.failed_checks || [];
+      const passedChecks = r.passed_checks || [];
+      setScanResults({
+        passed: r.summary?.passed ?? passedChecks.length,
+        failed: r.summary?.failed ?? failedChecks.length,
+        passed_checks: passedChecks,
+        failed_checks: failedChecks,
+        parse_errors: r.parse_errors || [],
+        status: failedChecks.length === 0 ? "passed" : "failed",
+      });
+      setShowPassedChecks(false);
+      if (failedChecks.length === 0) toast({ title: "All Checkov checks passed!" });
+      else toast({ title: `${failedChecks.length} security check(s) failed`, description: "Click Auto-Fix to let AI resolve them.", variant: "destructive" });
+    } catch (err: any) {
+      toast({ title: "Scan failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleAutoFix = async () => {
+    const filesToFix = selectedScanModule ? getModuleFiles(selectedScanModule) : files;
+    setIsAutoFixing(true);
+    setScanHistory([]);
+    try {
+      const res = await apiPost(`${BACKEND}/api/terraform/scan-fix`, { files: filesToFix, max_iterations: 3 });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Auto-fix failed");
+
+      setScanHistory(data.history || []);
+
+      if (data.final_status === "passed") {
+        // Merge fixed files back without overwriting unrelated modules
+        setFiles(prev => ({ ...prev, ...data.files }));
+        const firstFile = Object.keys(data.files)[0];
+        if (firstFile) setActiveFile(firstFile);
+        setScanResults({ passed: data.history?.at(-1)?.passed ?? 0, failed: 0, passed_checks: [], failed_checks: [], parse_errors: [], status: "passed" });
+        toast({ title: "All checks pass after auto-fix!", description: data.message });
+      } else if (data.final_status === "manual_review_required") {
+        setFiles(prev => ({ ...prev, ...data.files }));
+        const lastRound = data.history?.at(-1);
+        setScanResults({ passed: lastRound?.passed ?? 0, failed: lastRound?.failed ?? 0, passed_checks: [], failed_checks: lastRound?.failed_checks || [], parse_errors: [], status: "failed" });
+        toast({ title: "Some checks still failing", description: data.message, variant: "destructive" });
+      } else {
+        toast({ title: data.message || "Auto-fix done", variant: "destructive" });
+      }
+    } catch (err: any) {
+      toast({ title: "Auto-fix failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsAutoFixing(false);
+    }
+  };
+
+  // ── Fetch from Bitbucket handlers ─────────────────────────────────────────
+
+  const connectFetchBitbucket = async () => {
+    setIsFetchConnecting(true);
+    setFetchConnected(null);
+    setFetchWorkspaces([]);
+    setFetchRepos([]);
+    setFetchBranches([]);
+    try {
+      const statusRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/status`);
+      const status = await statusRes.json();
+      if (!status.linked) {
+        toast({ title: "Bitbucket not connected", description: status.error || "Link your Atlassian account first.", variant: "destructive" });
+        return;
+      }
+      setFetchConnected(status.display_name || status.username);
+      const wsRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/workspaces`);
+      const wsData = await wsRes.json();
+      setFetchWorkspaces(wsData.workspaces || []);
+      if (wsData.workspaces?.length === 1) {
+        setFetchWs(wsData.workspaces[0].slug);
+        await loadFetchRepos(wsData.workspaces[0].slug);
+      }
+    } catch (err: any) {
+      toast({ title: "Connection failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsFetchConnecting(false);
+    }
+  };
+
+  const loadFetchRepos = async (workspace: string) => {
+    setIsFetchLoadingRepos(true);
+    setFetchRepos([]);
+    setFetchRepo("");
+    setFetchBranches([]);
+    try {
+      const res = await apiGet(`${BACKEND}/api/integrations/bitbucket/repositories/${workspace}`);
+      const data = await res.json();
+      setFetchRepos(data.repositories || []);
+    } catch (err: any) {
+      toast({ title: "Failed to load repos", description: err.message, variant: "destructive" });
+    } finally {
+      setIsFetchLoadingRepos(false);
+    }
+  };
+
+  const loadFetchBranches = async (workspace: string, repo: string) => {
+    setIsFetchLoadingBranches(true);
+    setFetchBranches([]);
+    setFetchBranch("main");
+    try {
+      const res = await apiGet(`${BACKEND}/api/integrations/bitbucket/branches/${workspace}/${repo}`);
+      const data = await res.json();
+      setFetchBranches(data.branches || []);
+      if (data.branches?.length > 0) setFetchBranch(data.branches[0]);
+    } catch {
+      setFetchBranches([]);
+    } finally {
+      setIsFetchLoadingBranches(false);
+    }
+  };
+
+  const handleFetchFromBitbucket = async () => {
+    if (!fetchWs || !fetchRepo) {
+      toast({ title: "Select workspace and repository", variant: "destructive" });
+      return;
+    }
+    setIsFetching(true);
+    try {
+      const params = new URLSearchParams({ ref: fetchBranch || "main", path: fetchPath });
+      const res = await apiGet(
+        `${BACKEND}/api/integrations/bitbucket/fetch-files/${fetchWs}/${fetchRepo}?${params}`
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error((data as any).detail || "Fetch failed");
+
+      if (data.count === 0) {
+        toast({ title: "No Terraform files found", description: "No .tf or .tfvars files in that path.", variant: "destructive" });
+        return;
+      }
+
+      setFiles(data.files);
+      const firstFile = Object.keys(data.files)[0];
+      setActiveFile(firstFile || "");
+      setShowFetchPanel(false);
+      setStep(3);
+      toast({ title: `Loaded ${data.count} files from Bitbucket`, description: `${fetchWs}/${fetchRepo} @ ${fetchBranch}` });
+    } catch (err: any) {
+      toast({ title: "Fetch failed", description: err.message, variant: "destructive" });
+    } finally {
+      setIsFetching(false);
+    }
+  };
+
+  // ── Push-to-Bitbucket workspace loader ────────────────────────────────────
+  const loadBitbucketWorkspaces = async () => {
+    setBbLoadingWs(true);
+    setBbStatus(null);
+    setBbWorkspaces([]);
+    try {
+      const statusRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/status`);
+      const status = await statusRes.json();
+      setBbStatus(status);
+      if (!status.linked) return;
+
+      const wsRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/workspaces`);
+      const wsData = await wsRes.json();
+      setBbWorkspaces(wsData.workspaces || []);
+      if (wsData.workspaces?.length === 1) setBbWorkspace(wsData.workspaces[0].slug);
+    } catch (err: any) {
+      setBbStatus({ linked: false, error: err.message });
+    } finally {
+      setBbLoadingWs(false);
     }
   };
 
@@ -796,7 +1056,19 @@ export function TerraformGeneratorCore() {
                   <RefreshCw className="w-4 h-4 mr-1" /> Regenerate
                 </Button>
                 <Button variant="outline"
-                  onClick={() => setShowPushPanel((v) => !v)}
+                  onClick={() => { setShowFetchPanel((v) => !v); setShowPushPanel(false); setShowScanPanel(false); }}
+                >
+                  <GitBranch className="w-4 h-4 mr-1" /> Load from Bitbucket
+                </Button>
+                <Button variant="outline"
+                  onClick={() => { setShowScanPanel((v) => !v); setShowPushPanel(false); setShowFetchPanel(false); }}
+                  disabled={isGenerating || Object.keys(files).length === 0}
+                >
+                  <Shield className="w-4 h-4 mr-1" />
+                  {scanResults?.status === "passed" ? "Scan ✓" : scanResults?.status === "failed" ? `Scan (${scanResults.failed} issues)` : "Security Scan"}
+                </Button>
+                <Button variant="outline"
+                  onClick={() => { setShowPushPanel((v) => !v); setShowFetchPanel(false); setShowScanPanel(false); }}
                   disabled={isGenerating || Object.keys(files).length === 0}
                 >
                   <GitBranch className="w-4 h-4 mr-1" /> Push to Repository
@@ -810,12 +1082,316 @@ export function TerraformGeneratorCore() {
               </div>
             </div>
 
+            {/* ── Load from Bitbucket Panel ────────────────────────────── */}
+            {showFetchPanel && (
+              <Card className="border-2 border-dashed border-blue-300 dark:border-blue-700">
+                <CardContent className="p-5 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <GitBranch className="w-4 h-4 text-blue-600" />
+                    <span className="font-semibold text-sm">Load existing Terraform files from Bitbucket</span>
+                    <span className="text-xs text-muted-foreground ml-1">— edit and push back when done</span>
+                  </div>
+
+                  {/* Step 1 — Connect */}
+                  {!fetchConnected ? (
+                    <div className="flex items-center gap-3">
+                      <p className="text-sm text-muted-foreground flex-1">
+                        Uses your linked Atlassian account (same as Jira & Confluence).
+                      </p>
+                      <Button variant="outline" size="sm" onClick={connectFetchBitbucket} disabled={isFetchConnecting}>
+                        {isFetchConnecting
+                          ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Connecting...</>
+                          : "Connect to Bitbucket"
+                        }
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 dark:bg-green-950/30 border border-green-200 rounded px-3 py-2">
+                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                      Connected as <strong>{fetchConnected}</strong>
+                    </div>
+                  )}
+
+                  {/* Step 2 — Pick workspace / repo / branch */}
+                  {fetchConnected && (
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Workspace *</label>
+                        <select
+                          className="w-full border rounded px-3 py-2 text-sm bg-background"
+                          value={fetchWs}
+                          onChange={(e) => {
+                            setFetchWs(e.target.value);
+                            setFetchRepo("");
+                            setFetchBranches([]);
+                            if (e.target.value) loadFetchRepos(e.target.value);
+                          }}
+                        >
+                          <option value="">Select workspace...</option>
+                          {fetchWorkspaces.map(ws => (
+                            <option key={ws.slug} value={ws.slug}>{ws.name} ({ws.slug})</option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Repository *</label>
+                        {isFetchLoadingRepos ? (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground pt-2">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...
+                          </div>
+                        ) : (
+                          <select
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={fetchRepo}
+                            onChange={(e) => {
+                              setFetchRepo(e.target.value);
+                              setFetchBranches([]);
+                              if (e.target.value) loadFetchBranches(fetchWs, e.target.value);
+                            }}
+                            disabled={!fetchWs}
+                          >
+                            <option value="">Select repository...</option>
+                            {fetchRepos.map(r => (
+                              <option key={r.slug} value={r.slug}>{r.name}</option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+
+                      <div>
+                        <label className="text-xs text-muted-foreground mb-1 block">Branch</label>
+                        {isFetchLoadingBranches ? (
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground pt-2">
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...
+                          </div>
+                        ) : (
+                          <select
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={fetchBranch}
+                            onChange={(e) => setFetchBranch(e.target.value)}
+                            disabled={!fetchRepo}
+                          >
+                            {fetchBranches.length === 0 && <option value="main">main</option>}
+                            {fetchBranches.map(b => <option key={b} value={b}>{b}</option>)}
+                          </select>
+                        )}
+                      </div>
+
+                      <div className="sm:col-span-3">
+                        <label className="text-xs text-muted-foreground mb-1 block">Subfolder (optional)</label>
+                        <input
+                          className="w-full border rounded px-3 py-2 text-sm bg-background"
+                          value={fetchPath}
+                          onChange={(e) => setFetchPath(e.target.value)}
+                          placeholder="e.g. terraform/  — leave empty to fetch entire repo"
+                        />
+                        <p className="text-xs text-muted-foreground mt-1">Only .tf, .tfvars, and .hcl files are loaded</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {fetchConnected && (
+                    <div className="flex justify-end">
+                      <Button
+                        onClick={handleFetchFromBitbucket}
+                        disabled={isFetching || !fetchWs || !fetchRepo}
+                      >
+                        {isFetching
+                          ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Loading files...</>
+                          : <><GitBranch className="w-4 h-4 mr-2" /> Load Files</>
+                        }
+                      </Button>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
+            {/* ── Checkov Scan Panel ──────────────────────────────────── */}
+            {showScanPanel && (
+              <Card className="border-2 border-dashed border-orange-300 dark:border-orange-700">
+                <CardContent className="p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Shield className="w-4 h-4 text-orange-500" />
+                      <span className="font-semibold text-sm">Checkov Security Scan</span>
+                      <span className="text-xs text-muted-foreground">— CIS / NIST / PCI-DSS compliance checks</span>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => { setSelectedScanModule(null); handleScan(undefined); }} disabled={isScanning || isAutoFixing}>
+                        {isScanning && !selectedScanModule
+                          ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Scanning...</>
+                          : <><Shield className="w-3.5 h-3.5 mr-1" /> Scan All</>
+                        }
+                      </Button>
+                      {scanResults?.status === "failed" && (
+                        <Button size="sm" onClick={handleAutoFix} disabled={isScanning || isAutoFixing}>
+                          {isAutoFixing
+                            ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Auto-fixing...</>
+                            : <><RefreshCw className="w-3.5 h-3.5 mr-1" /> Auto-Fix{selectedScanModule ? ` (${selectedScanModule.replace(/_/g, " ")})` : ""}</>
+                          }
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Per-module scan badges */}
+                  {moduleNames.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {moduleNames.map(name => {
+                        const isActive = selectedScanModule === name;
+                        const isLoadingThis = isScanning && selectedScanModule === name;
+                        const label = name.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+                        return (
+                          <button
+                            key={name}
+                            onClick={() => handleScan(name)}
+                            disabled={isScanning || isAutoFixing}
+                            title={`Scan ${label} module only`}
+                            className={`flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium border transition-all disabled:opacity-50 ${
+                              isActive
+                                ? "bg-orange-100 border-orange-500 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
+                                : "border-muted-foreground/30 text-muted-foreground hover:border-orange-400 hover:text-orange-600 dark:hover:text-orange-400"
+                            }`}
+                          >
+                            {isLoadingThis
+                              ? <Loader2 className="w-3 h-3 animate-spin" />
+                              : <Shield className="w-3 h-3" />
+                            }
+                            {label}
+                          </button>
+                        );
+                      })}
+                      <span className="text-xs text-muted-foreground self-center pl-1">← click a module to scan it</span>
+                    </div>
+                  )}
+
+                  {/* Scan iteration history */}
+                  {scanHistory.length > 1 && (
+                    <div className="flex gap-2 flex-wrap">
+                      {scanHistory.map((h: any) => (
+                        <span key={h.iteration} className={`text-xs px-2 py-0.5 rounded-full border font-mono ${h.failed === 0 && !h.parse_errors?.length ? "bg-green-50 border-green-300 text-green-700" : "bg-orange-50 border-orange-300 text-orange-700"}`}>
+                          iter {h.iteration}: {h.passed}✓ {h.failed}✗{h.parse_errors?.length ? ` ${h.parse_errors.length}⚠` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {scanResults?.status === "unavailable" && (
+                    <div className="flex items-start gap-2 text-sm text-gray-600 bg-gray-50 border border-gray-200 rounded p-3">
+                      <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
+                      Checkov is not installed. Run <code className="bg-gray-100 px-1 rounded mx-1">pip install checkov</code> on the backend server.
+                    </div>
+                  )}
+
+                  {/* ── CLI-style output ── */}
+                  {scanResults && scanResults.status !== "unavailable" && (
+                    <div className="bg-gray-950 dark:bg-black rounded-lg overflow-hidden border border-gray-800">
+                      {/* Terminal header */}
+                      <div className="flex items-center gap-1.5 px-4 py-2 bg-gray-900 border-b border-gray-800">
+                        <div className="w-3 h-3 rounded-full bg-red-500" />
+                        <div className="w-3 h-3 rounded-full bg-yellow-500" />
+                        <div className="w-3 h-3 rounded-full bg-green-500" />
+                        <span className="ml-2 text-xs text-gray-400 font-mono">
+                          checkov — {selectedScanModule
+                            ? `modules/${selectedScanModule}`
+                            : "all modules"}
+                        </span>
+                      </div>
+
+                      <div className="p-4 font-mono text-xs space-y-1 max-h-[520px] overflow-y-auto">
+                        {/* Summary line */}
+                        <div className="text-gray-300 mb-3">
+                          <span className="text-white font-semibold">Passed checks: </span>
+                          <span className="text-green-400 font-semibold">{scanResults.passed}</span>
+                          <span className="text-gray-400">, </span>
+                          <span className="text-white font-semibold">Failed checks: </span>
+                          <span className={`font-semibold ${scanResults.failed > 0 ? "text-red-400" : "text-green-400"}`}>{scanResults.failed}</span>
+                          <span className="text-gray-400">, </span>
+                          <span className="text-white font-semibold">Skipped checks: </span>
+                          <span className="text-yellow-400 font-semibold">0</span>
+                          {(scanResults.parse_errors?.length ?? 0) > 0 && (
+                            <>
+                              <span className="text-gray-400">, </span>
+                              <span className="text-white font-semibold">Parse errors: </span>
+                              <span className="text-yellow-400 font-semibold">{scanResults.parse_errors.length} file(s) skipped</span>
+                            </>
+                          )}
+                        </div>
+
+                        {/* Parsing error warning */}
+                        {(scanResults.parse_errors?.length ?? 0) > 0 && (
+                          <div className="mb-3 border border-yellow-600/40 rounded bg-yellow-950/30 p-3 space-y-1">
+                            <div className="text-yellow-400 font-semibold text-xs">
+                              ⚠ {scanResults.parse_errors.length} file(s) had HCL parse errors — Checkov skipped these entirely:
+                            </div>
+                            {scanResults.parse_errors.map((e, i) => (
+                              <div key={i} className="text-yellow-300/70 text-xs pl-2">
+                                <span className="text-blue-300">{e.file}</span>
+                                {e.detail && <span className="text-gray-400"> → {e.detail}</span>}
+                              </div>
+                            ))}
+                            <div className="text-gray-500 text-xs pt-1">Regenerate the affected module or click Auto-Fix to attempt a repair.</div>
+                          </div>
+                        )}
+
+                        <div className="border-t border-gray-800 mb-3" />
+
+                        {/* Failed checks */}
+                        {scanResults.failed_checks.map((c, i) => (
+                          <div key={`f-${i}`} className="mb-4">
+                            <div className="text-gray-300">
+                              Check: <span className="text-yellow-300">"{c.check_name}"</span>
+                            </div>
+                            <div className="text-red-400 font-semibold">
+                              &nbsp;FAILED for resource: <span className="text-red-300">{c.resource}</span>
+                            </div>
+                            <div className="text-gray-400">
+                              &nbsp;File: <span className="text-blue-300">{c.file}{c.lines?.length === 2 ? `:${c.lines[0]}-${c.lines[1]}` : ""}</span>
+                            </div>
+                            <div className="text-gray-500">&nbsp;Check ID: {c.check_id}</div>
+                          </div>
+                        ))}
+
+                        {/* Passed checks */}
+                        {(scanResults.passed_checks?.length ?? 0) > 0 && (
+                          <>
+                            <button
+                              onClick={() => setShowPassedChecks(v => !v)}
+                              className="text-gray-500 hover:text-gray-300 text-xs mb-2"
+                            >
+                              {showPassedChecks ? "▼" : "▶"} {scanResults.passed_checks.length} passed checks {showPassedChecks ? "(click to hide)" : "(click to show)"}
+                            </button>
+                            {showPassedChecks && scanResults.passed_checks.map((c, i) => (
+                              <div key={`p-${i}`} className="mb-4">
+                                <div className="text-gray-300">
+                                  Check: <span className="text-yellow-300">"{c.check_name}"</span>
+                                </div>
+                                <div className="text-green-400 font-semibold">
+                                  &nbsp;PASSED for resource: <span className="text-green-300">{c.resource}</span>
+                                </div>
+                                <div className="text-gray-400">
+                                  &nbsp;File: <span className="text-blue-300">{c.file}</span>
+                                </div>
+                                <div className="text-gray-500">&nbsp;Check ID: {c.check_id}</div>
+                              </div>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+            )}
+
             {/* ── Push to Repo Panel ───────────────────────────────────── */}
             {showPushPanel && (
               <Card className="border-2 border-dashed border-muted-foreground/30">
                 <CardContent className="p-5 space-y-4">
                   {/* Target toggle */}
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
                     <GitBranch className="w-4 h-4 flex-shrink-0" />
                     <span className="font-semibold text-sm mr-2">Push to:</span>
                     <div className="flex rounded-md border overflow-hidden text-sm">
@@ -830,6 +1406,12 @@ export function TerraformGeneratorCore() {
                         className={`px-4 py-1.5 transition-colors ${pushTarget === "harness" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted"}`}
                       >
                         Harness Code
+                      </button>
+                      <button
+                        onClick={() => setPushTarget("bitbucket")}
+                        className={`px-4 py-1.5 transition-colors ${pushTarget === "bitbucket" ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:bg-muted"}`}
+                      >
+                        Bitbucket
                       </button>
                     </div>
                   </div>
@@ -953,10 +1535,117 @@ export function TerraformGeneratorCore() {
                     </div>
                   )}
 
+                  {/* ── Bitbucket fields ── */}
+                  {pushTarget === "bitbucket" && (
+                    <div className="space-y-3">
+                      {/* Connection check */}
+                      {!bbStatus ? (
+                        <div className="flex items-center gap-3">
+                          <p className="text-sm text-muted-foreground flex-1">
+                            Uses your linked Atlassian account — same credentials as Jira & Confluence.
+                          </p>
+                          <button
+                            onClick={loadBitbucketWorkspaces}
+                            disabled={bbLoadingWs}
+                            className="flex items-center gap-1.5 text-sm text-primary hover:underline disabled:opacity-50"
+                          >
+                            {bbLoadingWs
+                              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Connecting...</>
+                              : <><RefreshCw className="w-3.5 h-3.5" /> Connect to Bitbucket</>
+                            }
+                          </button>
+                        </div>
+                      ) : bbStatus.linked ? (
+                        <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 dark:bg-green-950/30 border border-green-200 rounded px-3 py-2">
+                          <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                          Connected as <strong>{bbStatus.display_name}</strong>
+                          <button onClick={loadBitbucketWorkspaces} className="ml-auto text-xs text-muted-foreground hover:text-foreground">
+                            <RefreshCw className="w-3 h-3" />
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex items-start gap-2 text-sm text-red-700 bg-red-50 dark:bg-red-950/30 border border-red-200 rounded px-3 py-2">
+                          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
+                          <span>{bbStatus.error || "Could not connect to Bitbucket."}</span>
+                          <button onClick={loadBitbucketWorkspaces} className="ml-auto text-xs underline">Retry</button>
+                        </div>
+                      )}
+
+                      {/* Fields — shown only after successful connection */}
+                      {bbStatus?.linked && (
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Workspace *</label>
+                            {bbWorkspaces.length > 0 ? (
+                              <select
+                                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                                value={bbWorkspace}
+                                onChange={(e) => setBbWorkspace(e.target.value)}
+                              >
+                                <option value="">Select workspace...</option>
+                                {bbWorkspaces.map(ws => (
+                                  <option key={ws.slug} value={ws.slug}>{ws.name} ({ws.slug})</option>
+                                ))}
+                              </select>
+                            ) : (
+                              <input
+                                className="w-full border rounded px-3 py-2 text-sm bg-background"
+                                value={bbWorkspace}
+                                onChange={(e) => setBbWorkspace(e.target.value)}
+                                placeholder="your-workspace-slug"
+                              />
+                            )}
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Repository Slug *</label>
+                            <input
+                              className="w-full border rounded px-3 py-2 text-sm bg-background"
+                              value={bbRepo}
+                              onChange={(e) => setBbRepo(e.target.value)}
+                              placeholder="e.g. my-infra-terraform"
+                            />
+                            <p className="text-xs text-muted-foreground mt-1">Created automatically if it doesn't exist</p>
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Branch</label>
+                            <input
+                              className="w-full border rounded px-3 py-2 text-sm bg-background"
+                              value={bbBranch}
+                              onChange={(e) => setBbBranch(e.target.value)}
+                              placeholder="main"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground mb-1 block">Subfolder (optional)</label>
+                            <input
+                              className="w-full border rounded px-3 py-2 text-sm bg-background"
+                              value={bbFolder}
+                              onChange={(e) => setBbFolder(e.target.value)}
+                              placeholder="e.g. terraform/"
+                            />
+                          </div>
+                          <div className="sm:col-span-2">
+                            <label className="text-xs text-muted-foreground mb-1 block">Commit Message</label>
+                            <input
+                              className="w-full border rounded px-3 py-2 text-sm bg-background"
+                              value={bbCommitMsg}
+                              onChange={(e) => setBbCommitMsg(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
                   <div className="flex justify-end">
                     <Button
                       onClick={handlePush}
-                      disabled={isPushing || (pushTarget === "github" ? (!ghToken || !ghRepo) : (!harnessApiKey || !harnessRepoUrl))}
+                      disabled={
+                        isPushing ||
+                        (pushTarget === "github" ? (!ghToken || !ghRepo) :
+                         pushTarget === "harness" ? (!harnessApiKey || !harnessRepoUrl) :
+                         (!bbStatus?.linked || !bbWorkspace || !bbRepo))
+                      }
                     >
                       {isPushing
                         ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Pushing...</>
