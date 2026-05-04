@@ -18,6 +18,7 @@ from db_helper import (
 )
 from services.jira_service import JiraService
 from services.confluence_service import ConfluenceService
+from services.bitbucket_service import BitbucketService
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 logger = logging.getLogger(__name__)
@@ -580,3 +581,136 @@ def upload_brd_to_confluence(
         )
 
 
+# ============================================
+# BITBUCKET ENDPOINTS
+# ============================================
+
+@router.get("/bitbucket/status")
+def get_bitbucket_status(current_user: dict = Depends(get_current_user)):
+    """
+    Test whether the saved Atlassian credentials also work with Bitbucket Cloud.
+    Returns the connected Bitbucket user profile on success.
+    """
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        return {"linked": False, "error": "Atlassian account not linked."}
+
+    try:
+        svc = BitbucketService(
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        ok, error_msg = svc.test_connection()
+        if not ok:
+            return {"linked": False, "error": error_msg}
+
+        user_profile = svc.get_user()
+        return {
+            "linked": True,
+            "username": user_profile.get("username") or user_profile.get("account_id"),
+            "display_name": user_profile.get("display_name"),
+            "account_id": user_profile.get("account_id"),
+        }
+    except Exception as e:
+        logger.error(f"Bitbucket status check failed: {e}")
+        return {"linked": False, "error": str(e)}
+
+
+@router.get("/bitbucket/workspaces")
+def list_bitbucket_workspaces(current_user: dict = Depends(get_current_user)):
+    """List all Bitbucket workspaces accessible with the saved Atlassian credentials."""
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+
+    try:
+        svc = BitbucketService(
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        workspaces = svc.get_workspaces()
+        return {"workspaces": workspaces}
+    except Exception as e:
+        logger.error(f"Error fetching Bitbucket workspaces: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/repositories/{workspace}")
+def list_bitbucket_repositories(workspace: str, current_user: dict = Depends(get_current_user)):
+    """List all repositories in a Bitbucket workspace."""
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+
+    try:
+        svc = BitbucketService(
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        repos = svc.get_repositories(workspace)
+        return {"repositories": repos}
+    except Exception as e:
+        logger.error(f"Error fetching Bitbucket repositories for {workspace}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/branches/{workspace}/{repo_slug}")
+def list_bitbucket_branches(workspace: str, repo_slug: str, current_user: dict = Depends(get_current_user)):
+    """List branches for a Bitbucket repository."""
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+    try:
+        svc = BitbucketService(credentials["atlassian_email"], credentials["atlassian_api_token"])
+        branches = svc.get_branches(workspace, repo_slug)
+        return {"branches": branches}
+    except Exception as e:
+        logger.error(f"Error fetching branches for {workspace}/{repo_slug}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/files/{workspace}/{repo_slug}")
+def list_bitbucket_files(
+    workspace: str,
+    repo_slug: str,
+    ref: str = "main",
+    path: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """List all files in a Bitbucket repository at the given branch/ref."""
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+    try:
+        svc = BitbucketService(credentials["atlassian_email"], credentials["atlassian_api_token"])
+        files = svc.list_files(workspace, repo_slug, ref=ref, path=path)
+        return {"files": files}
+    except Exception as e:
+        logger.error(f"Error listing files for {workspace}/{repo_slug}@{ref}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/fetch-files/{workspace}/{repo_slug}")
+def fetch_bitbucket_files(
+    workspace: str,
+    repo_slug: str,
+    ref: str = "main",
+    path: str = "",
+    extensions: str = ".tf,.tfvars,.hcl",
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Fetch file contents from a Bitbucket repo, filtered by extension.
+    Returns {path: content} map ready to load into the Terraform editor.
+    """
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(status_code=400, detail="Atlassian account not linked.")
+    try:
+        svc = BitbucketService(credentials["atlassian_email"], credentials["atlassian_api_token"])
+        ext_list = [e.strip() for e in extensions.split(",") if e.strip()]
+        files = svc.get_files_bulk(workspace, repo_slug, ref=ref, path=path, extensions=ext_list or None)
+        return {"files": files, "count": len(files)}
+    except Exception as e:
+        logger.error(f"Error fetching files from {workspace}/{repo_slug}@{ref}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
