@@ -1045,25 +1045,38 @@ def _diagram_block_for_section(
             "alt": _DIAGRAM_TYPE_LABEL.get(diagram_type, "Architecture diagram"),
         }
 
-    # Skipped (or any non-Done state without an artifact): explicit
-    # placeholder paragraph. Never silent.
+    # Anything other than Done with an artifact: explicit placeholder
+    # paragraph. The SAD viewer renders this as italic prose; never as a
+    # broken `<img>` pointing at an S3 key we know is empty.
+    label = _DIAGRAM_TYPE_LABEL.get(diagram_type, diagram_type.title())
+
     if status in ("skipped", "skipped_saved"):
-        label = _DIAGRAM_TYPE_LABEL.get(diagram_type, diagram_type.title())
         return {
             "type": "paragraph",
             "text": (
-                f"_{label} skipped for this SAD. Open the Diagram hub in Veluxe "
+                f"_{label} skipped for this SAD. Open the Diagram hub in Velox "
                 f"and author this view to include it on regeneration._"
             ),
         }
 
-    # Pending / in_progress / failed: try the per-type S3 path optimistically
-    # (the slot column may be stale on legacy sessions), then fall back to
-    # the same explicit-skipped placeholder if the slot truly has nothing.
+    if status == "failed":
+        return {
+            "type": "paragraph",
+            "text": (
+                f"_{label} authoring failed and was not included. Retry from "
+                f"the Diagram hub in Velox._"
+            ),
+        }
+
+    # Pending / in_progress: not authored yet. Same placeholder shape as
+    # the skipped case — different copy, same trust contract: never a
+    # diagram block when nothing is saved.
     return {
-        "type": "diagram",
-        "s3_key": f"sessions/{session_id}/diagram/{diagram_type}.svg",
-        "alt": _DIAGRAM_TYPE_LABEL.get(diagram_type, "Architecture diagram"),
+        "type": "paragraph",
+        "text": (
+            f"_{label} not yet authored. Open the Diagram hub in Velox and "
+            f"author this view to include it on regeneration._"
+        ),
     }
 
 

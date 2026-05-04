@@ -1600,11 +1600,20 @@ async def load_diagram(
                 except Exception as e:
                     logger.warning(
                         f"[DESIGN] Legacy S3 diagram read failed for session {request.session_id}: "
-                        f"{e} — falling back to Confluence"
+                        f"{e} — returning 404 (caller should treat as unsaved)"
                     )
-        # else: session has no S3 diagram for this type yet → fall through to Confluence
 
-    # ── 2. Confluence fallback (legacy + recovery path) ─────────────────
+        # Session-aware path: nothing in S3 for this type. Return 404 directly
+        # rather than falling through to the Confluence fallback — that fallback
+        # requires `space_key`/`page_id`, which the redesigned hub doesn't pass,
+        # and would otherwise produce a misleading 400. The new flow stores
+        # diagrams in S3 only; Confluence push is opt-in and informational.
+        raise HTTPException(
+            status_code=404,
+            detail=f"No {diagram_type} diagram saved for this session yet",
+        )
+
+    # ── 2. Confluence fallback (legacy non-session path only) ──────────
     credentials = get_user_atlassian_credentials(user_id)
     if not credentials or not credentials.get("atlassian_api_token"):
         raise HTTPException(
