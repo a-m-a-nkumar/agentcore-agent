@@ -6,16 +6,25 @@ never surfacing them anywhere — no trash bin, no undo, no audit view —
 so the column was dead weight that bloated every SELECT with a
 'WHERE is_deleted = FALSE' filter and accumulated invisible rows.
 
-This migration:
-  1. Hard-deletes any rows currently marked is_deleted = TRUE.
-  2. Drops the is_deleted column from design_sessions.
+DEPLOY ORDER (important — running this before the new code is live
+will break every running FastAPI / Lambda that still queries
+WHERE is_deleted = FALSE):
+
+  1. Deploy backend code that no longer references is_deleted in any
+     query (commit 7a777ce or later).
+  2. Wait until ALL running instances have picked up the new code.
+  3. THEN run this migration:
+        python migrations/drop_design_sessions_is_deleted.py
+
+What it does:
+  • Hard-deletes any rows currently marked is_deleted = TRUE.
+  • Drops the is_deleted column from design_sessions.
+  • Recreates the project + user indexes without the partial
+    'WHERE is_deleted = FALSE' clause they used to carry.
 
 After this lands, design_sessions is plain "row exists = real session",
 "row gone = deleted". S3 artefacts under sessions/{id}/* are preserved
 either way (operators can scrub them via the AWS console).
-
-Run once:
-    python migrations/drop_design_sessions_is_deleted.py
 """
 
 import os
