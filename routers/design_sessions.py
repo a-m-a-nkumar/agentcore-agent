@@ -120,9 +120,36 @@ def _ensure_owns_session(session_id: str, user_id: str):
 
 
 def _next_session_name(project_id: str, user_id: str) -> str:
-    """Default name for a new session: 'Session N' where N is one past the count."""
-    existing = list_design_sessions(project_id, user_id)
-    return f"Session {len(existing) + 1}"
+    """Default name: 'Session N' where N is one past the highest 'Session N'
+    ever used for this project + user — including soft-deleted rows.
+
+    Counting only visible sessions caused collisions: e.g. with 9 visible
+    plus a soft-deleted Session 5, len+1 = 10 even though a Session 10
+    already exists from an earlier batch. Numbers must be monotonic across
+    the lifetime of the project, not just the visible set.
+    """
+    import re
+    from db_helper import get_db_connection, release_db_connection
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT name FROM design_sessions
+                WHERE project_id = %s AND user_id = %s
+                """,
+                (project_id, user_id),
+            )
+            max_n = 0
+            for (name,) in cursor.fetchall() or []:
+                m = re.match(r"^\s*Session\s+(\d+)\s*$", name or "")
+                if m:
+                    n = int(m.group(1))
+                    if n > max_n:
+                        max_n = n
+            return f"Session {max_n + 1}"
+    finally:
+        release_db_connection(conn)
 
 
 # ============================================
