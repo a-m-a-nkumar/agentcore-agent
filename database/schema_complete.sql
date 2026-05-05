@@ -95,7 +95,38 @@ COMMENT ON COLUMN analyst_sessions.brd_id IS 'Associated BRD ID if generated';
 COMMENT ON COLUMN analyst_sessions.message_count IS 'Number of messages in this session';
 
 -- ============================================
--- 4. AUTO-UPDATE TRIGGERS
+-- 4. USER MODULE ACTIVITY TABLE
+-- ============================================
+-- Per-event log of user actions across modules. Powers the Organization
+-- Usage dashboard's per-developer drill-in (module breakdown + event timeline).
+-- Single envelope shared across all module owners; per-event detail goes in
+-- the JSONB metadata column so adding a new event_type never requires a
+-- schema change.
+CREATE TABLE IF NOT EXISTS user_module_activity (
+    id            BIGSERIAL PRIMARY KEY,
+    user_id       VARCHAR(255) NOT NULL,
+    project_id    VARCHAR(255),                          -- nullable: not every event has a project
+    module        VARCHAR(64)  NOT NULL,                 -- canonical module id (auth.ALL_MODULES)
+    event_type    VARCHAR(128) NOT NULL,                 -- e.g. "pm_agent_brd_generated"
+    source        VARCHAR(32)  NOT NULL DEFAULT 'web',   -- "web" | "mcp" | future surfaces
+    occurred_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    metadata      JSONB        NOT NULL DEFAULT '{}'::jsonb,
+
+    CONSTRAINT fk_uma_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE,
+    CONSTRAINT fk_uma_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_uma_user_time   ON user_module_activity(user_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uma_module_time ON user_module_activity(module, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uma_event_time  ON user_module_activity(event_type, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_uma_user_module ON user_module_activity(user_id, module);
+
+COMMENT ON TABLE user_module_activity IS 'Per-event log of user actions across modules — feeds Organization Usage dashboard';
+COMMENT ON COLUMN user_module_activity.module IS 'Canonical module id (matches auth.ALL_MODULES)';
+COMMENT ON COLUMN user_module_activity.metadata IS 'Per-event detail (event-type-specific shape)';
+
+-- ============================================
+-- 5. AUTO-UPDATE TRIGGERS
 -- ============================================
 
 -- Function to update last_updated timestamp

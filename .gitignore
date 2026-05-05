@@ -57,3 +57,6 @@ lambda_builds/
 # Temporary files
 *.tmp
 *.bak
+
+# Cloned upstream MCP repo (independent git repo, tracked separately)
+src/mcp/
