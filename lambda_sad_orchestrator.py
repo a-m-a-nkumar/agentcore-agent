@@ -1194,11 +1194,12 @@ def handle_generate_sad(event: Dict[str, Any]) -> Dict[str, Any]:
             if current:
                 previous_by_n[n] = current
                 stack = sec.setdefault("previous_versions", [])
-                stack.append({
-                    "ts": int(time.time()),
-                    "reason": "regen-merge",
-                    "content": current,
-                })
+                # Push the PLAIN block array — same shape the revert handler
+                # restores, same shape /save-section pushes. We used to wrap
+                # in {ts, reason, content} for telemetry; the wrapper made
+                # revert restore the envelope as section.content and the
+                # frontend's RenderBlock crashed because dict has no .map.
+                stack.append(current)
                 # Cap the history so the JSON doesn't grow without bound.
                 if len(stack) > 5:
                     sec["previous_versions"] = stack[-5:]
@@ -1437,6 +1438,20 @@ def handle_revert_section(event: Dict[str, Any]) -> Dict[str, Any]:
         return {"reverted": False, "error": "no previous version"}
     # Pop most recent prior content
     prev = versions.pop(0)
+
+    # Self-heal: older sessions have entries shaped like
+    # {"ts": ..., "reason": "regen-merge", "content": [<blocks>]}.
+    # The revert handler used to assign the envelope directly to
+    # section.content, which crashed RenderBlock (dict has no .map).
+    # If we see that shape, unwrap it before assigning.
+    if isinstance(prev, dict) and isinstance(prev.get("content"), list):
+        prev = prev["content"]
+
+    # Final guard: if it's still not a list, treat as no-op (caller
+    # surfaces the error to the user instead of corrupting the section).
+    if not isinstance(prev, list):
+        return {"reverted": False, "error": "previous version is malformed"}
+
     section["previous_versions"] = versions
     section["content"] = prev
     section["status"] = "user_edited"
