@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import asyncio
+import time
 import boto3
 from botocore.exceptions import ClientError
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
@@ -967,6 +968,7 @@ async def generate_brd_from_s3(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate BRD from transcript(s) in S3 and template in S3"""
+    t0 = time.time()
     try:
         print("\n" + "="*80)
         print("[APP] Starting BRD generation from S3")
@@ -1141,6 +1143,23 @@ async def generate_brd_from_s3(
                             except Exception as e:
                                 print(f"[APP] ⚠️  Failed to persist BRD session: {e}")
                         
+                        try:
+                            from db_helper import track_event
+                            track_event(
+                                current_user["user_id"],
+                                module="brd",
+                                event_type="pm_agent_brd_generated",
+                                project_id=project_id,
+                                metadata={
+                                    "transcript_s3_paths": s3_paths,
+                                    "transcript_count": len(s3_paths),
+                                    "brd_id": brd_id,
+                                    "duration_ms": int((time.time() - t0) * 1000),
+                                },
+                            )
+                        except Exception as _track_err:
+                            print(f"[APP] track_event failed (non-fatal): {_track_err}")
+
                         return JSONResponse(content={
                             'result': agent_data['brd'],
                             'brd_id': brd_id,
@@ -2136,6 +2155,7 @@ async def analyst_generate_brd(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate BRD from analyst conversation history stored in AgentCore Memory"""
+    t0 = time.time()
     try:
         print(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
         
@@ -2310,6 +2330,20 @@ async def analyst_generate_brd(
             if brd_id_from_response:
                 brd_id = brd_id_from_response
                 print(f"[ANALYST-GENERATE-BRD] ✅ BRD generated successfully: {brd_id}")
+                try:
+                    from db_helper import track_event
+                    track_event(
+                        current_user["user_id"],
+                        module="brd",
+                        event_type="analyst_agent_brd_generated",
+                        metadata={
+                            "session_id": session_id,
+                            "brd_id": brd_id,
+                            "duration_ms": int((time.time() - t0) * 1000),
+                        },
+                    )
+                except Exception as _track_err:
+                    print(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
                 return JSONResponse(content={
                     "result": f"BRD generated successfully",
                     "brd_id": brd_id,
@@ -2351,6 +2385,7 @@ async def analyst_generate_brd(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate BRD from analyst conversation history stored in AgentCore Memory"""
+    t0 = time.time()
     try:
         print(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
         
@@ -2556,6 +2591,20 @@ async def analyst_generate_brd(
             if brd_id_from_response:
                 brd_id = brd_id_from_response
                 print(f"[ANALYST-GENERATE-BRD] ✅ BRD generated successfully: {brd_id}")
+                try:
+                    from db_helper import track_event
+                    track_event(
+                        current_user["user_id"],
+                        module="brd",
+                        event_type="analyst_agent_brd_generated",
+                        metadata={
+                            "session_id": session_id,
+                            "brd_id": brd_id,
+                            "duration_ms": int((time.time() - t0) * 1000),
+                        },
+                    )
+                except Exception as _track_err:
+                    print(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
                 return JSONResponse(content={
                     "result": f"BRD generated successfully",
                     "brd_id": brd_id,
@@ -2597,6 +2646,7 @@ async def analyst_generate_brd(
     current_user: dict = Depends(get_current_user)
 ):
     """Generate BRD from analyst conversation history stored in AgentCore Memory"""
+    t0 = time.time()
     try:
         print(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
         
@@ -2824,6 +2874,20 @@ async def analyst_generate_brd(
             if brd_id_from_response:
                 brd_id = brd_id_from_response
                 print(f"[ANALYST-GENERATE-BRD] ✅ BRD generated successfully: {brd_id}")
+                try:
+                    from db_helper import track_event
+                    track_event(
+                        current_user["user_id"],
+                        module="brd",
+                        event_type="analyst_agent_brd_generated",
+                        metadata={
+                            "session_id": session_id,
+                            "brd_id": brd_id,
+                            "duration_ms": int((time.time() - t0) * 1000),
+                        },
+                    )
+                except Exception as _track_err:
+                    print(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
                 return JSONResponse(content={
                     "result": f"BRD generated successfully",
                     "brd_id": brd_id,
@@ -3341,6 +3405,73 @@ async def get_user_info(current_user: dict = Depends(get_current_user)):
         "identity_arn": identity_arn,
         "groups": current_user.get("groups", []),
         "allowed_modules": current_user.get("allowed_modules", []),
+    })
+
+
+@app.get("/api/user/me/usage")
+async def get_my_usage(current_user: dict = Depends(get_current_user)):
+    """Return the current user's own usage row (last_login + cumulative tokens)
+    plus per-module rollup and recent events."""
+    from db_helper import get_user_usage, get_user_module_rollup, get_user_recent_events
+    user_id = current_user["user_id"]
+    row = get_user_usage(user_id)
+    modules = get_user_module_rollup(user_id)
+    recent_events = get_user_recent_events(user_id, limit=20)
+    if not row:
+        return JSONResponse(content={
+            "user_id": user_id,
+            "email": current_user.get("email"),
+            "name": current_user.get("name"),
+            "created_at": None,
+            "last_login": None,
+            "token_usage": 0,
+            "modules": modules,
+            "recent_events": recent_events,
+        })
+    return JSONResponse(content={
+        "user_id": row["id"],
+        "email": row["email"],
+        "name": row["name"],
+        "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
+        "last_login": row["last_login"].isoformat() if row.get("last_login") else None,
+        "token_usage": int(row.get("token_usage") or 0),
+        "modules": modules,
+        "recent_events": recent_events,
+    })
+
+
+@app.get("/api/users/usage")
+async def get_organization_usage(current_user: dict = Depends(get_current_user)):
+    """Roster of all users with token usage, last login, per-module rollup,
+    and recent events. Visible to any authenticated user.
+
+    Per-user `recent_events` is capped at 10 to keep payload size bounded;
+    `/api/user/me/usage` returns 20 for the caller's own drill-down.
+    """
+    from db_helper import (
+        list_all_users_usage,
+        get_user_module_rollup,
+        get_user_recent_events,
+    )
+    rows = list_all_users_usage()
+    users_payload = []
+    for r in rows:
+        uid = r["id"]
+        users_payload.append({
+            "user_id": uid,
+            "email": r["email"],
+            "name": r["name"],
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+            "last_login": r["last_login"].isoformat() if r.get("last_login") else None,
+            "token_usage": int(r.get("token_usage") or 0),
+            "is_active": bool(r.get("is_active", True)),
+            "modules": get_user_module_rollup(uid),
+            "recent_events": get_user_recent_events(uid, limit=10),
+        })
+    return JSONResponse(content={
+        "users": users_payload,
+        "total_users": len(rows),
+        "total_tokens": sum(int(r.get("token_usage") or 0) for r in rows),
     })
 
 

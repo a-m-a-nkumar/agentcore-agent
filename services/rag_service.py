@@ -241,6 +241,48 @@ class RAGService:
                 'message': f'An error occurred: {str(e)}'
             }
    
+    def get_rag_context(
+        self,
+        project_id: str,
+        user_query: str,
+        max_chunks: int = 5,
+        source_filter: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve raw RAG chunks for downstream consumers that want to format
+        the context themselves (e.g. the pipeline-analyzer MCP, which embeds
+        an "Organizational Context" section in its failure-analysis blob).
+
+        Does NOT call the LLM. Returns a list of dicts with keys:
+            source_type, source_id, title, content, url, similarity
+        """
+        try:
+            results = self._multi_query_search(
+                project_id=project_id,
+                user_query=user_query,
+                max_chunks=max_chunks,
+                source_type=source_filter,
+                include_context=True,
+                user_id=user_id,
+            )
+
+            cleaned = []
+            for r in results:
+                cleaned.append({
+                    'source_type': r.get('source_type', ''),
+                    'source_id': r.get('source_id', ''),
+                    'title': r.get('title', ''),
+                    'content': _strip_html(r.get('content', '')),
+                    'url': r.get('url', ''),
+                    'similarity': float(r.get('similarity', 0)),
+                })
+            return cleaned
+
+        except Exception as e:
+            logger.error(f"Error retrieving RAG context: {e}")
+            raise
+
     async def get_enhanced_prompt(
         self,
         project_id: str,

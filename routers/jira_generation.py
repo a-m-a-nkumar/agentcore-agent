@@ -6,6 +6,7 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from html import unescape
 # Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
@@ -15,7 +16,8 @@ from auth import verify_azure_token, require_module
 from db_helper import (
     get_user_atlassian_credentials,
     create_or_update_user,
-    get_project
+    get_project,
+    track_event,
 )
 from services.confluence_service import ConfluenceService
 from services.jira_service import JiraService
@@ -443,7 +445,8 @@ def generate_jira_items_from_confluence(
     4. Return for user review/selection
     """
     logger.info(f"Generating Jira items from Confluence page {request.confluence_page_id}")
-    
+    t0 = time.time()
+
     # 1. Get user's Atlassian credentials
     credentials = get_user_atlassian_credentials(current_user['id'])
     
@@ -491,7 +494,24 @@ def generate_jira_items_from_confluence(
         total_stories = sum(len(epic['user_stories']) for epic in result['epics'])
         
         logger.info(f"Generated {total_epics} epics and {total_stories} user stories")
-        
+
+        try:
+            track_event(
+                current_user["id"],
+                module="confluence",
+                event_type="jira_items_generated_confluence",
+                project_id=request.project_id,
+                metadata={
+                    "confluence_page_id": request.confluence_page_id,
+                    "page_title": page_data["title"],
+                    "total_epics": total_epics,
+                    "total_stories": total_stories,
+                    "duration_ms": int((time.time() - t0) * 1000),
+                },
+            )
+        except Exception as _track_err:
+            logger.warning(f"track_event failed (non-fatal): {_track_err}")
+
         return {
             "epics": result['epics'],
             "total_epics": total_epics,

@@ -13,12 +13,13 @@ import json
 import os
 import re
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from html import unescape
 
 from auth import verify_azure_token, require_module
-from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
+from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project, track_event
 from services.confluence_service import ConfluenceService
 from services.github_service import GitHubService
 from services.lineage_service import record_lineage
@@ -517,7 +518,8 @@ async def generate_test_scenarios_stream(
     def stream_generator():
         # Send page title first so frontend can set the title immediately
         yield f"data: {json.dumps({'type': 'title', 'page_title': page_data['title']})}\n\n"
-
+        t0 = time.time()
+        stream_succeeded = False
         try:
             yield from chat_completion_stream(
                 messages=[{"role": "user", "content": prompt}],
@@ -525,9 +527,26 @@ async def generate_test_scenarios_stream(
                 temperature=0,
                 max_tokens=16000,
             )
+            stream_succeeded = True
         except Exception as e:
             logger.error(f"Streaming error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+        if stream_succeeded:
+            try:
+                track_event(
+                    current_user["id"],
+                    module="confluence",
+                    event_type="test_scenarios_generated_confluence",
+                    project_id=request.project_id,
+                    metadata={
+                        "confluence_page_id": request.confluence_page_id,
+                        "page_title": page_data["title"],
+                        "duration_ms": int((time.time() - t0) * 1000),
+                    },
+                )
+            except Exception as _track_err:
+                logger.warning(f"track_event failed (non-fatal): {_track_err}")
 
     return StreamingResponse(
         stream_generator(),

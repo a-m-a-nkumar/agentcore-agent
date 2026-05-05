@@ -164,8 +164,28 @@ def _run_migrations(db_params: dict, sslmode: str):
                 END $$;
             """)
 
+            # user_module_activity — per-event log feeding Organization Usage dashboard
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_module_activity (
+                    id            BIGSERIAL PRIMARY KEY,
+                    user_id       VARCHAR(255) NOT NULL,
+                    project_id    VARCHAR(255),
+                    module        VARCHAR(64)  NOT NULL,
+                    event_type    VARCHAR(128) NOT NULL,
+                    source        VARCHAR(32)  NOT NULL DEFAULT 'web',
+                    occurred_at   TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    metadata      JSONB        NOT NULL DEFAULT '{}'::jsonb,
+                    CONSTRAINT fk_uma_user    FOREIGN KEY (user_id)    REFERENCES users(id)    ON DELETE CASCADE,
+                    CONSTRAINT fk_uma_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL
+                );
+            """)
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_uma_user_time   ON user_module_activity(user_id, occurred_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_uma_module_time ON user_module_activity(module, occurred_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_uma_event_time  ON user_module_activity(event_type, occurred_at DESC)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_uma_user_module ON user_module_activity(user_id, module)")
+
             conn.commit()
-            logger.info("Database migrations completed (brd_id, agentcore_session_id, artifact_lineage, token_usage)")
+            logger.info("Database migrations completed (brd_id, agentcore_session_id, artifact_lineage, token_usage, user_module_activity)")
     except Exception as e:
         conn.rollback()
         logger.error(f"Migration error (non-fatal): {e}")
@@ -1331,3 +1351,174 @@ def increment_user_token_usage(user_id: str, tokens: int) -> None:
             release_db_connection(conn)
     except Exception as e:
         logger.warning(f"[token_usage] Failed to increment for user {user_id}: {e}")
+
+
+def get_user_usage(user_id: str) -> Optional[Dict[str, Any]]:
+    """Return a single user's usage row: id, email, name, created_at, last_login, token_usage."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT id, email, name, created_at, last_login,
+                       COALESCE(token_usage, 0) AS token_usage
+                FROM users
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    finally:
+        release_db_connection(conn)
+
+
+def track_event(
+    user_id: str,
+    module: str,
+    event_type: str,
+    *,
+    project_id: Optional[str] = None,
+    source: str = "web",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Insert one row into user_module_activity.
+
+    Wrapped in try/except so a tracking failure never breaks the user-facing
+    request — mirrors the increment_user_token_usage contract.
+    """
+    if not user_id or not module or not event_type:
+        return
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO user_module_activity
+                        (user_id, project_id, module, event_type, source, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+                    """,
+                    (
+                        user_id,
+                        project_id,
+                        module,
+                        event_type,
+                        source,
+                        json.dumps(metadata or {}),
+                    ),
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+    except Exception as e:
+        logger.warning(
+            f"[track_event] failed user={user_id} module={module} event={event_type}: {e}"
+        )
+
+
+def get_user_module_rollup(user_id: str) -> List[Dict[str, Any]]:
+    """Per-module rollup for a single user — events_count and last_event_at.
+
+    Token counts are not derivable from the activity log alone (tokens live on
+    users.token_usage as a single cumulative number), so `tokens` is returned
+    as 0 for now and the dashboard's bars are sized by event count.
+    """
+    if not user_id:
+        return []
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT module,
+                       COUNT(*) AS events_count,
+                       MAX(occurred_at) AS last_event_at
+                FROM user_module_activity
+                WHERE user_id = %s
+                GROUP BY module
+                ORDER BY events_count DESC
+                """,
+                (user_id,),
+            )
+            rows = cursor.fetchall() or []
+            return [
+                {
+                    "id": r["module"],
+                    "label": r["module"],
+                    "tokens": 0,
+                    "events_count": int(r["events_count"]),
+                    "last_event_at": (
+                        r["last_event_at"].isoformat() if r["last_event_at"] else None
+                    ),
+                }
+                for r in rows
+            ]
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_recent_events(user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Latest N events for a user, newest first. Shape matches frontend UsageEvent type."""
+    if not user_id:
+        return []
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT id, module, event_type, occurred_at, metadata
+                FROM user_module_activity
+                WHERE user_id = %s
+                ORDER BY occurred_at DESC
+                LIMIT %s
+                """,
+                (user_id, int(limit)),
+            )
+            rows = cursor.fetchall() or []
+            return [
+                {
+                    "id": str(r["id"]),
+                    "module": r["module"],
+                    "action": _humanize_event(r["event_type"], r["metadata"]),
+                    "timestamp": r["occurred_at"].isoformat() if r["occurred_at"] else None,
+                }
+                for r in rows
+            ]
+    finally:
+        release_db_connection(conn)
+
+
+def _humanize_event(event_type: str, metadata: Optional[Dict[str, Any]]) -> str:
+    """Map machine event_type → display string. Falls back to title-cased event_type."""
+    labels = {
+        "pm_agent_brd_generated": "PM Agent · BRD generated",
+        "analyst_agent_brd_generated": "Analyst Agent · BRD generated",
+        "test_scenarios_generated_confluence": "Confluence · Test scenarios generated",
+        "jira_items_generated_confluence": "Confluence · Jira items generated",
+    }
+    return labels.get(event_type, event_type.replace("_", " ").capitalize())
+
+
+def list_all_users_usage() -> List[Dict[str, Any]]:
+    """Return every user's usage row, ordered by token_usage desc.
+
+    Used by the admin Organization Usage view. Returns an empty list if the
+    table is empty or on read failure (caller decides how to surface).
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT id, email, name, created_at, last_login,
+                       COALESCE(token_usage, 0) AS token_usage,
+                       COALESCE(is_active, TRUE) AS is_active
+                FROM users
+                ORDER BY token_usage DESC NULLS LAST, last_login DESC NULLS LAST
+                """
+            )
+            rows = cursor.fetchall() or []
+            return [dict(r) for r in rows]
+    finally:
+        release_db_connection(conn)
