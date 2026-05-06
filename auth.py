@@ -71,6 +71,23 @@ def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
         return []
 
 
+def compute_access_role(groups: List[str]) -> str:
+    """Derive a single-string access tier from the user's Azure AD group OIDs.
+
+    Returns one of: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. Persisted to
+    `users.access_role` on every authenticated request (see app.get_current_user).
+    """
+    has_business = BUSINESS_GROUP_OID in groups
+    has_tech = TECH_GROUP_OID in groups
+    if has_business and has_tech:
+        return "BOTH"
+    if has_tech:
+        return "TECH"
+    if has_business:
+        return "BUSINESS"
+    return "NONE"
+
+
 def compute_allowed_modules(groups: List[str]) -> List[str]:
     modules = set()
     for group_oid in groups:

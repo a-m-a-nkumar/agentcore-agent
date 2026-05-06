@@ -164,6 +164,22 @@ def _run_migrations(db_params: dict, sslmode: str):
                 END $$;
             """)
 
+            # Add access_role column to users table — derived from Azure AD group
+            # membership and refreshed on every authenticated request. Acceptable
+            # values: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. See auth.py
+            # `compute_access_role()` for the mapping.
+            cursor.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_name = 'users' AND column_name = 'access_role'
+                    ) THEN
+                        ALTER TABLE users ADD COLUMN access_role VARCHAR(16) NOT NULL DEFAULT 'NONE';
+                    END IF;
+                END $$;
+            """)
+
             # user_module_activity — per-event log feeding Organization Usage dashboard
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS user_module_activity (
@@ -1330,6 +1346,44 @@ def get_user_figma_credentials(user_id: str):
         release_db_connection(conn)
 
 
+_VALID_ACCESS_ROLES = frozenset({"BOTH", "TECH", "BUSINESS", "NONE"})
+
+
+def update_user_access_role(user_id: str, access_role: str) -> None:
+    """Update users.access_role for the given user_id.
+
+    Acceptable roles: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. The UPDATE is a no-op
+    when the stored value already matches (cheap on repeat calls). Silently
+    skips on missing user_id or invalid role. Never raises — auth flow must
+    not break on a tracking write.
+    """
+    if not user_id:
+        return
+    if access_role not in _VALID_ACCESS_ROLES:
+        logger.warning(
+            f"[access_role] Invalid role '{access_role}' for user {user_id}; skipping"
+        )
+        return
+    try:
+        conn = get_db_connection()
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE users
+                       SET access_role = %s
+                     WHERE id = %s
+                       AND (access_role IS NULL OR access_role <> %s)
+                    """,
+                    (access_role, user_id, access_role),
+                )
+                conn.commit()
+        finally:
+            release_db_connection(conn)
+    except Exception as e:
+        logger.warning(f"[access_role] Failed to update for user {user_id}: {e}")
+
+
 def increment_user_token_usage(user_id: str, tokens: int) -> None:
     """Atomically add `tokens` to users.token_usage for the given user_id.
 
@@ -1354,14 +1408,16 @@ def increment_user_token_usage(user_id: str, tokens: int) -> None:
 
 
 def get_user_usage(user_id: str) -> Optional[Dict[str, Any]]:
-    """Return a single user's usage row: id, email, name, created_at, last_login, token_usage."""
+    """Return a single user's usage row: id, email, name, created_at, last_login,
+    token_usage, access_role."""
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute(
                 """
                 SELECT id, email, name, created_at, last_login,
-                       COALESCE(token_usage, 0) AS token_usage
+                       COALESCE(token_usage, 0) AS token_usage,
+                       COALESCE(access_role, 'NONE') AS access_role
                 FROM users
                 WHERE id = %s
                 """,
@@ -1513,7 +1569,8 @@ def list_all_users_usage() -> List[Dict[str, Any]]:
                 """
                 SELECT id, email, name, created_at, last_login,
                        COALESCE(token_usage, 0) AS token_usage,
-                       COALESCE(is_active, TRUE) AS is_active
+                       COALESCE(is_active, TRUE) AS is_active,
+                       COALESCE(access_role, 'NONE') AS access_role
                 FROM users
                 ORDER BY token_usage DESC NULLS LAST, last_login DESC NULLS LAST
                 """

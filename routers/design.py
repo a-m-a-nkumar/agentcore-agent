@@ -1038,7 +1038,7 @@ Output ONLY the completed prompt block starting with the ==== header line. Do no
     prompt = _invoke_claude(
         system_prompt, user_message,
         model_id=PROMPT_MODEL_ID, max_tokens=PROMPT_MAX_TOKENS,
-        user_id=current_user.get("user_id"),
+        user_id=current_user.get("id"),
     )
     logger.info(f"[DESIGN] Prompt generated ({len(prompt)} chars)")
     return GeneratePromptResponse(prompt=prompt)
@@ -1083,7 +1083,7 @@ Requirements:
 Output ONLY the XML, starting with <mxGraphModel and ending with </mxGraphModel>."""
 
     logger.info("[DESIGN] Generating draw.io XML")
-    raw = _invoke_claude(system_prompt, user_message, user_id=current_user.get("user_id"))
+    raw = _invoke_claude(system_prompt, user_message, user_id=current_user.get("id"))
 
     # Strip any accidental markdown fences
     raw = raw.replace("```xml", "").replace("```", "").strip()
@@ -1129,7 +1129,7 @@ Then output the full architecture document in Markdown following your instructio
         user_message,
         model_id=DOCUMENT_MODEL_ID,
         max_tokens=DOCUMENT_MAX_TOKENS,
-        user_id=current_user.get("user_id"),
+        user_id=current_user.get("id"),
     )
     logger.info(f"[DESIGN] Document generated ({len(document)} chars)")
     return GenerateDocumentResponse(document=document)
@@ -1905,7 +1905,7 @@ async def generate_lucid_prompt(
         user_message,
         LUCID_PROMPT_MODEL_ID,
         LUCID_PROMPT_MAX_TOKENS,
-        user_id=current_user.get("user_id") or current_user.get("id"),
+        user_id=current_user.get("id") or current_user.get("id"),
     )
     logger.info(f"[DESIGN] Lucid {request.diagram_type} prompt generated ({len(prompt)} chars)")
     return GenerateLucidPromptResponse(prompt=prompt)
@@ -1952,7 +1952,7 @@ async def generate_lucid_prompt_stream(
 async def get_lucid_auth_url(current_user: dict = Depends(get_current_user)):
     if not LUCID_CLIENT_ID:
         raise HTTPException(status_code=500, detail="LUCID_CLIENT_ID not configured")
-    user_id = str(current_user.get("id") or current_user.get("user_id") or "default")
+    user_id = str(current_user.get("id") or current_user.get("id") or "default")
     state = base64.urlsafe_b64encode(user_id.encode()).decode().rstrip("=")
     params = urlencode({
         "client_id": LUCID_CLIENT_ID,
@@ -1966,7 +1966,7 @@ async def get_lucid_auth_url(current_user: dict = Depends(get_current_user)):
 
 @router.get("/lucid-status")
 async def get_lucid_status(current_user: dict = Depends(get_current_user)):
-    user_id = str(current_user.get("id") or current_user.get("user_id") or "default")
+    user_id = str(current_user.get("id") or current_user.get("id") or "default")
     connected = bool(_lucid_tokens.get(user_id) or os.getenv("LUCID_OAUTH_TOKEN", ""))
     return {"connected": connected}
 
@@ -2017,7 +2017,7 @@ async def create_lucid_diagram_via_mcp(
     if not request.prompt.strip():
         raise HTTPException(status_code=400, detail="Prompt is required")
 
-    user_id = str(current_user.get("id") or current_user.get("user_id") or "default")
+    user_id = str(current_user.get("id") or current_user.get("id") or "default")
     token = _lucid_tokens.get(user_id) or os.getenv("LUCID_OAUTH_TOKEN", "").strip()
     if not token:
         raise HTTPException(status_code=401, detail="Not connected to Lucid. Click 'Connect to Lucid' first.")

@@ -471,7 +471,7 @@ async def generate_test_scenarios(
         markdown_content = generate_test_scenarios_with_bedrock(
             page_data['content'],
             page_data['title'],
-            user_id=current_user.get("user_id"),
+            user_id=current_user.get("id"),
         )
         return {
             "page_title": page_data['title'],
@@ -667,7 +667,7 @@ async def parse_scenarios_from_confluence(
         result = extract_scenarios_with_bedrock(
             page_data['content'],
             page_data['title'],
-            user_id=current_user.get("user_id"),
+            user_id=current_user.get("id"),
         )
         return {
             "page_title": page_data['title'],

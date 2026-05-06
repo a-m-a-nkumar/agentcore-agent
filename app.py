@@ -42,7 +42,7 @@ from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
 from routers.figma import router as figma_router
 # Import database helpers for session persistence
-from db_helper import save_project_brd_session, create_or_update_user
+from db_helper import save_project_brd_session, create_or_update_user, update_user_access_role
 # Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
 from environment import s3_put_object, get_s3_client  # noqa: F401
 
@@ -178,8 +178,15 @@ from auth import (
     revoke_brd_access_via_agentcore,
     extract_user_groups,
     compute_allowed_modules,
+    compute_access_role,
     require_module,
 )
+
+# In-process cache: avoid hitting the DB on every authenticated request when
+# the role hasn't changed. Per-worker dict; eventual consistency across
+# workers is fine because the DB UPDATE itself is idempotent (WHERE
+# access_role <> new_value short-circuits no-ops).
+_LAST_ACCESS_ROLE_CACHE: dict[str, str] = {}
 
 # Setup templates
 templates = Jinja2Templates(directory="templates")
@@ -284,7 +291,17 @@ async def get_current_user(request: Request) -> dict:
 
     groups = extract_user_groups(user_info)
     allowed_modules = compute_allowed_modules(groups)
-    print(f"[AUTH] Groups: {groups}, Allowed modules: {allowed_modules}")
+    access_role = compute_access_role(groups)
+    print(f"[AUTH] Groups: {groups}, Allowed modules: {allowed_modules}, access_role: {access_role}")
+
+    # Persist access_role to users.access_role (cached per worker so we only
+    # write when the role actually changes for this user).
+    if user_id and _LAST_ACCESS_ROLE_CACHE.get(user_id) != access_role:
+        try:
+            update_user_access_role(user_id, access_role)
+            _LAST_ACCESS_ROLE_CACHE[user_id] = access_role
+        except Exception as e:
+            print(f"[AUTH] Warning: Failed to persist access_role for {user_id}: {e}")
 
     # Store user identity in AgentCore if not exists
     try:
@@ -3425,6 +3442,7 @@ async def get_my_usage(current_user: dict = Depends(get_current_user)):
             "created_at": None,
             "last_login": None,
             "token_usage": 0,
+            "access_role": "NONE",
             "modules": modules,
             "recent_events": recent_events,
         })
@@ -3435,6 +3453,7 @@ async def get_my_usage(current_user: dict = Depends(get_current_user)):
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "last_login": row["last_login"].isoformat() if row.get("last_login") else None,
         "token_usage": int(row.get("token_usage") or 0),
+        "access_role": row.get("access_role") or "NONE",
         "modules": modules,
         "recent_events": recent_events,
     })
@@ -3465,6 +3484,7 @@ async def get_organization_usage(current_user: dict = Depends(get_current_user))
             "last_login": r["last_login"].isoformat() if r.get("last_login") else None,
             "token_usage": int(r.get("token_usage") or 0),
             "is_active": bool(r.get("is_active", True)),
+            "access_role": r.get("access_role") or "NONE",
             "modules": get_user_module_rollup(uid),
             "recent_events": get_user_recent_events(uid, limit=10),
         })

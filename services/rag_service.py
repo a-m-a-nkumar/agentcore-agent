@@ -427,6 +427,7 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
                 temperature=0.3,
                 max_tokens=256,
                 user_id=user_id,
+                token_source="rag_query_rewrite",
             )
 
             if not response:
@@ -588,6 +589,7 @@ Answer:"""
                 temperature=0.7,
                 max_tokens=4096,
                 user_id=user_id,
+                token_source="rag_answer",
             )
  
             if text:
