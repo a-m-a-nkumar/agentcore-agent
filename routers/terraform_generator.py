@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from auth import verify_azure_token
 from environment import chat_completion
+from services.checkov_service import run_checkov, format_failures_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -917,3 +918,152 @@ async def push_to_bitbucket(req: BitbucketPushRequest, token_data: dict = Depend
             status_code=400,
             detail=f"Bitbucket push failed ({push_resp.status_code}): {push_resp.text[:400]}"
         )
+
+
+# ─── Checkov scan models ───────────────────────────────────────────────────────
+
+class ScanRequest(BaseModel):
+    files: dict[str, str]
+
+class ScanFixRequest(BaseModel):
+    files: dict[str, str]
+    max_iterations: Optional[int] = 3
+
+
+# ─── Checkov endpoints ─────────────────────────────────────────────────────────
+
+@router.post("/scan")
+async def scan_terraform(req: ScanRequest, _=Depends(verify_azure_token)):
+    """Run Checkov on the provided Terraform files and return pass/fail results."""
+    results, available = run_checkov(req.files)
+    return {
+        "checkov_available": available,
+        "results": results,
+    }
+
+
+_PARSE_FIX_RULES = (
+    "- Return ONLY raw HCL. No markdown fences, no explanation.\n"
+    "- Ensure ALL blocks are properly closed with }\n"
+    "- NEVER use <<~EOF heredoc; use <<EOF or plain quoted strings\n"
+    "- NEVER use validation{}, precondition{}, postcondition{}, nullable, or sensitive on variable{}\n"
+    "- For ECS task definitions: container_definitions MUST use jsonencode([{...}]) inline\n"
+    "- For aws_lb_listener: use only 'type' and 'target_group_arn' in default_action — no forward{} sub-block\n"
+    "- Keep all string interpolations on a SINGLE line\n"
+)
+
+
+@router.post("/scan-fix")
+async def scan_and_fix_terraform(req: ScanFixRequest, _=Depends(verify_azure_token)):
+    """Scan → fix parse errors → fix Checkov failures → re-scan. Loops up to max_iterations."""
+    files = dict(req.files)
+    history = []
+    max_iter = min(req.max_iterations or 3, 5)
+
+    for iteration in range(1, max_iter + 1):
+        results, available = run_checkov(files)
+
+        if not available:
+            return {
+                "files": files,
+                "history": history,
+                "final_status": "checkov_unavailable",
+                "message": results.get("error", "Checkov not installed"),
+            }
+
+        failed = results.get("failed_checks", [])
+        parse_errors = results.get("parse_errors", [])
+        history.append({
+            "iteration": iteration,
+            "passed": results["summary"].get("passed", 0),
+            "failed": results["summary"].get("failed", 0),
+            "failed_checks": failed,
+            "parse_errors": parse_errors,
+        })
+
+        if not failed and not parse_errors:
+            return {
+                "files": files,
+                "history": history,
+                "final_status": "passed",
+                "message": f"All checks passed after {iteration} iteration(s).",
+            }
+
+        for pe in parse_errors:
+            rel_path = pe.get("file", "")
+            detail = pe.get("detail", "")
+            if rel_path not in files:
+                continue
+            broken_content = files[rel_path]
+            parse_fix_prompt = f"""You are a Terraform expert. The file below has an HCL syntax error. Rewrite it as complete, valid HCL2 that preserves the original intent.
+
+File: {rel_path}
+Parse error: {detail}
+
+Original content (may be truncated):
+{broken_content[:6000]}
+
+Requirements:
+{_PARSE_FIX_RULES}
+- Infer any missing closing blocks from context and complete the file properly
+- Keep ALL resources/variables that are already present — do not remove anything"""
+
+            try:
+                fixed_content = invoke_claude(parse_fix_prompt, max_tokens=6000, temperature=0)
+                files[rel_path] = strip_fences(fixed_content)
+            except Exception as e:
+                logger.error(f"Parse fix failed for {rel_path}: {e}")
+
+        if failed:
+            failures_text = format_failures_for_prompt(failed)
+            files_snapshot = "\n\n".join(
+                f"=== {path} ===\n{content}" for path, content in files.items()
+                if path.endswith((".tf", ".tfvars"))
+            )
+
+            fix_prompt = f"""You are a senior AWS infrastructure engineer. Fix ONLY the Checkov failures listed below. Do not change anything else. Return ALL files in the same delimiter format.
+
+{failures_text}
+
+Current Terraform files:
+{files_snapshot[:12000]}
+
+Return every file (changed and unchanged) using this exact format:
+===FILE: path/to/file.tf===
+<content>
+===FILE: path/to/other.tf===
+<content>
+===END==="""
+
+            try:
+                raw = invoke_claude(fix_prompt, max_tokens=8000, temperature=0)
+                fixed = parse_delimited_files(raw)
+                for path, content in fixed.items():
+                    if path in files:
+                        files[path] = content
+            except Exception as e:
+                logger.error(f"Claude fix failed on iteration {iteration}: {e}")
+                break
+
+    final_results, _ = run_checkov(files)
+    final_failed = final_results.get("failed_checks", [])
+    final_parse_errors = final_results.get("parse_errors", [])
+    history.append({
+        "iteration": max_iter + 1,
+        "passed": final_results["summary"].get("passed", 0),
+        "failed": final_results["summary"].get("failed", 0),
+        "failed_checks": final_failed,
+        "parse_errors": final_parse_errors,
+    })
+
+    all_clean = not final_failed and not final_parse_errors
+    return {
+        "files": files,
+        "history": history,
+        "final_status": "passed" if all_clean else "manual_review_required",
+        "message": (
+            "All checks passed."
+            if all_clean
+            else f"{len(final_failed)} check(s) could not be auto-fixed. Manual review required."
+        ),
+    }
