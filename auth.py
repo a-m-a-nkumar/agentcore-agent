@@ -223,6 +223,16 @@ from fastapi import Header, HTTPException
 
 def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     """Verify Azure AD JWT token and return decoded claims"""
+    if os.getenv("DEV_BYPASS_AUTH", "false").lower() == "true":
+        dev_email = os.getenv("DEV_USER_EMAIL", "dev@local")
+        return {
+            "oid": dev_email,
+            "sub": dev_email,
+            "preferred_username": dev_email,
+            "name": os.getenv("DEV_USER_NAME", "Dev User"),
+            "groups": [BUSINESS_GROUP_OID, TECH_GROUP_OID],
+        }
+
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header missing")
 

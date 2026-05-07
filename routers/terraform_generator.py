@@ -99,6 +99,8 @@ class HarnessPushRequest(BaseModel):
 
 class BitbucketPushRequest(BaseModel):
     files: dict[str, str]           # filename -> content
+    email: str                      # Atlassian login email
+    api_token: str                  # Bitbucket-scoped API token
     workspace: str                  # Bitbucket workspace slug
     repo_slug: str                  # Repository slug (e.g. "my-infra-terraform")
     branch: Optional[str] = "main"
@@ -911,20 +913,12 @@ async def push_to_bitbucket(req: BitbucketPushRequest, token_data: dict = Depend
     Push all generated Terraform files to a Bitbucket repository using the user's
     saved Atlassian credentials (email + API token). Handles both new and existing files.
     """
-    user_id = token_data.get("oid") or token_data.get("sub")
     user = token_data.get("preferred_username") or token_data.get("upn") or token_data.get("sub", "unknown")
 
-    credentials = get_user_atlassian_credentials(user_id)
-    if not credentials or not credentials.get("atlassian_api_token"):
-        raise HTTPException(
-            status_code=400,
-            detail="Atlassian account not linked. Please link your Atlassian account in Settings first."
-        )
-
-    # Bitbucket Cloud accepts the same Atlassian API token used for Jira/Confluence
-    # via HTTP Basic Auth: username=email, password=api_token.
-    email = credentials["atlassian_email"]
-    api_token = credentials["atlassian_api_token"]
+    email = req.email.strip()
+    api_token = req.api_token.strip()
+    if not email or not api_token:
+        raise HTTPException(status_code=400, detail="Bitbucket email and API token are required.")
 
     repo_slug = req.repo_slug.strip().lower().replace(" ", "-")
     workspace = req.workspace.strip().lower()
