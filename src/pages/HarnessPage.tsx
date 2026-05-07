@@ -66,9 +66,9 @@ export default function HarnessPage() {
 
   return (
     <MainLayout currentView="harness">
-      <div className="flex" style={{ minHeight: "calc(100vh - 64px)" }}>
+      <div className="flex overflow-hidden" style={{ height: "calc(100vh - 64px)" }}>
         {/* Internal left nav */}
-        <div className="w-44 border-r border-border bg-muted/10 flex flex-col flex-shrink-0">
+        <div className="w-44 border-r border-border bg-muted/10 flex flex-col flex-shrink-0 overflow-y-auto">
           <div className="px-4 py-3 border-b border-border">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               Harness

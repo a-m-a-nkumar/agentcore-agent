@@ -11,6 +11,7 @@ import {
   Download, Copy, RefreshCw, FileCode2, FolderTree,
   Database, Cloud, Shield, Layers, Server, Package,
   GitBranch, ExternalLink, Lock, Unlock, FileUp, AlertCircle,
+  ArrowLeft, Wand2, Wrench,
 } from "lucide-react";
 
 const BACKEND = API_CONFIG.BASE_URL;
@@ -96,6 +97,7 @@ export function TerraformGeneratorCore() {
 
   // Step 4
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isEditingCode, setIsEditingCode] = useState(false);
 
   // Checkov scan
   const [showScanPanel, setShowScanPanel]           = useState(false);
@@ -118,7 +120,6 @@ export function TerraformGeneratorCore() {
   const [fetchRepo, setFetchRepo]                   = useState("");
   const [fetchBranch, setFetchBranch]               = useState("main");
   const [fetchPath, setFetchPath]                   = useState("");
-  const [fetchWorkspaces, setFetchWorkspaces]       = useState<{slug: string; name: string}[]>([]);
   const [fetchRepos, setFetchRepos]                 = useState<{slug: string; name: string}[]>([]);
   const [fetchBranches, setFetchBranches]           = useState<string[]>([]);
   const [fetchConnected, setFetchConnected]         = useState<string | null>(null); // display_name if connected
@@ -126,6 +127,9 @@ export function TerraformGeneratorCore() {
   const [isFetchLoadingRepos, setIsFetchLoadingRepos] = useState(false);
   const [isFetchLoadingBranches, setIsFetchLoadingBranches] = useState(false);
   const [isFetching, setIsFetching]                 = useState(false);
+  // Direct Bitbucket credentials
+  const [fetchBbEmail, setFetchBbEmail]             = useState("");
+  const [fetchBbToken, setFetchBbToken]             = useState("");
 
   // Push panel
   const [showPushPanel, setShowPushPanel] = useState(false);
@@ -149,16 +153,28 @@ export function TerraformGeneratorCore() {
   const [harnessCommitMsg, setHarnessCommitMsg] = useState("feat: add Terraform infrastructure code");
 
   // Bitbucket push fields
+  const [bbEmail, setBbEmail]               = useState("");
+  const [bbToken, setBbToken]               = useState("");
   const [bbWorkspace, setBbWorkspace]       = useState("");
   const [bbRepo, setBbRepo]                 = useState("");
   const [bbBranch, setBbBranch]             = useState("main");
   const [bbFolder, setBbFolder]             = useState("");
   const [bbCommitMsg, setBbCommitMsg]       = useState("feat: add Terraform infrastructure code");
-  const [bbWorkspaces, setBbWorkspaces]     = useState<{slug: string; name: string}[]>([]);
-  const [bbLoadingWs, setBbLoadingWs]       = useState(false);
-  const [bbStatus, setBbStatus]             = useState<{linked: boolean; display_name?: string; error?: string} | null>(null);
 
   const [step, setStep] = useState(1);
+  const [mode, setMode] = useState<"choose" | "brownfield" | "greenfield">("choose");
+
+  // Brownfield push state (prepopulated from fetch credentials)
+  const [showBfPushPanel, setShowBfPushPanel] = useState(false);
+  const [bfPushEmail, setBfPushEmail] = useState("");
+  const [bfPushToken, setBfPushToken] = useState("");
+  const [bfPushWorkspace, setBfPushWorkspace] = useState("");
+  const [bfPushRepo, setBfPushRepo] = useState("");
+  const [bfPushBranch, setBfPushBranch] = useState("main");
+  const [bfPushFolder, setBfPushFolder] = useState("");
+  const [bfPushMsg, setBfPushMsg] = useState("fix: update Terraform infrastructure code");
+  const [isBfPushing, setIsBfPushing] = useState(false);
+  const [bfPushResult, setBfPushResult] = useState<{repo_url: string; commit_sha: string; files_pushed: number} | null>(null);
 
   // ── Step 1 → 2: Extract components ────────────────────────────────────────
 
@@ -408,7 +424,9 @@ export function TerraformGeneratorCore() {
       } else {
         res = await apiPost(`${BACKEND}/api/terraform/push-bitbucket`, {
           files,
-          workspace: bbWorkspace,
+          email: bbEmail.trim(),
+          api_token: bbToken.trim(),
+          workspace: parseBitbucketWorkspace(bbWorkspace),
           repo_slug: bbRepo,
           branch: bbBranch || "main",
           commit_message: bbCommitMsg,
@@ -557,47 +575,40 @@ export function TerraformGeneratorCore() {
 
   // ── Fetch from Bitbucket handlers ─────────────────────────────────────────
 
+  const parseBitbucketWorkspace = (input: string): string => {
+    const s = input.trim();
+    try {
+      const url = new URL(s.startsWith("http") ? s : `https://${s}`);
+      if (url.hostname === "bitbucket.org") {
+        // e.g. https://bitbucket.org/deluxe-development  →  deluxe-development
+        return url.pathname.replace(/^\//, "").split("/")[0];
+      }
+    } catch {}
+    return s; // already a plain slug
+  };
+
   const connectFetchBitbucket = async () => {
+    if (!fetchBbEmail.trim() || !fetchBbToken.trim() || !fetchWs.trim()) {
+      toast({ title: "Credentials required", description: "Enter email, API token, and workspace.", variant: "destructive" });
+      return;
+    }
+    const workspace = parseBitbucketWorkspace(fetchWs);
+    setFetchWs(workspace); // normalise the field to just the slug
     setIsFetchConnecting(true);
     setFetchConnected(null);
-    setFetchWorkspaces([]);
     setFetchRepos([]);
     setFetchBranches([]);
     try {
-      const statusRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/status`);
-      const status = await statusRes.json();
-      if (!status.linked) {
-        toast({ title: "Bitbucket not connected", description: status.error || "Link your Atlassian account first.", variant: "destructive" });
-        return;
-      }
-      setFetchConnected(status.display_name || status.username);
-      const wsRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/workspaces`);
-      const wsData = await wsRes.json();
-      setFetchWorkspaces(wsData.workspaces || []);
-      if (wsData.workspaces?.length === 1) {
-        setFetchWs(wsData.workspaces[0].slug);
-        await loadFetchRepos(wsData.workspaces[0].slug);
-      }
+      const params = new URLSearchParams({ email: fetchBbEmail.trim(), api_token: fetchBbToken.trim() });
+      const res = await apiGet(`${BACKEND}/api/integrations/bitbucket/repositories-direct/${workspace}?${params}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Connection failed");
+      setFetchConnected(fetchWs.trim());
+      setFetchRepos(data.repositories || []);
     } catch (err: any) {
       toast({ title: "Connection failed", description: err.message, variant: "destructive" });
     } finally {
       setIsFetchConnecting(false);
-    }
-  };
-
-  const loadFetchRepos = async (workspace: string) => {
-    setIsFetchLoadingRepos(true);
-    setFetchRepos([]);
-    setFetchRepo("");
-    setFetchBranches([]);
-    try {
-      const res = await apiGet(`${BACKEND}/api/integrations/bitbucket/repositories/${workspace}`);
-      const data = await res.json();
-      setFetchRepos(data.repositories || []);
-    } catch (err: any) {
-      toast({ title: "Failed to load repos", description: err.message, variant: "destructive" });
-    } finally {
-      setIsFetchLoadingRepos(false);
     }
   };
 
@@ -606,7 +617,8 @@ export function TerraformGeneratorCore() {
     setFetchBranches([]);
     setFetchBranch("main");
     try {
-      const res = await apiGet(`${BACKEND}/api/integrations/bitbucket/branches/${workspace}/${repo}`);
+      const params = new URLSearchParams({ email: fetchBbEmail.trim(), api_token: fetchBbToken.trim() });
+      const res = await apiGet(`${BACKEND}/api/integrations/bitbucket/branches-direct/${workspace}/${repo}?${params}`);
       const data = await res.json();
       setFetchBranches(data.branches || []);
       if (data.branches?.length > 0) setFetchBranch(data.branches[0]);
@@ -624,9 +636,9 @@ export function TerraformGeneratorCore() {
     }
     setIsFetching(true);
     try {
-      const params = new URLSearchParams({ ref: fetchBranch || "main", path: fetchPath });
+      const params = new URLSearchParams({ email: fetchBbEmail.trim(), api_token: fetchBbToken.trim(), ref: fetchBranch || "main", path: fetchPath });
       const res = await apiGet(
-        `${BACKEND}/api/integrations/bitbucket/fetch-files/${fetchWs}/${fetchRepo}?${params}`
+        `${BACKEND}/api/integrations/bitbucket/fetch-files-direct/${fetchWs}/${fetchRepo}?${params}`
       );
       const data = await res.json();
       if (!res.ok) throw new Error((data as any).detail || "Fetch failed");
@@ -639,8 +651,16 @@ export function TerraformGeneratorCore() {
       setFiles(data.files);
       const firstFile = Object.keys(data.files)[0];
       setActiveFile(firstFile || "");
-      setShowFetchPanel(false);
-      setStep(3);
+      if (mode === "brownfield") {
+        setBfPushEmail(fetchBbEmail);
+        setBfPushToken(fetchBbToken);
+        setBfPushWorkspace(fetchWs);
+        setBfPushRepo(fetchRepo);
+        setBfPushBranch(fetchBranch);
+      } else {
+        setShowFetchPanel(false);
+        setStep(3);
+      }
       toast({ title: `Loaded ${data.count} files from Bitbucket`, description: `${fetchWs}/${fetchRepo} @ ${fetchBranch}` });
     } catch (err: any) {
       toast({ title: "Fetch failed", description: err.message, variant: "destructive" });
@@ -649,25 +669,34 @@ export function TerraformGeneratorCore() {
     }
   };
 
-  // ── Push-to-Bitbucket workspace loader ────────────────────────────────────
-  const loadBitbucketWorkspaces = async () => {
-    setBbLoadingWs(true);
-    setBbStatus(null);
-    setBbWorkspaces([]);
+  // ── Brownfield push to Bitbucket ─────────────────────────────────────────
+  const handleBrownfieldPush = async () => {
+    if (Object.keys(files).length === 0) return;
+    if (!bfPushEmail || !bfPushToken || !bfPushWorkspace || !bfPushRepo) {
+      toast({ title: "Fields required", description: "Fill in all Bitbucket credentials to push.", variant: "destructive" });
+      return;
+    }
+    setIsBfPushing(true);
+    setBfPushResult(null);
     try {
-      const statusRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/status`);
-      const status = await statusRes.json();
-      setBbStatus(status);
-      if (!status.linked) return;
-
-      const wsRes = await apiGet(`${BACKEND}/api/integrations/bitbucket/workspaces`);
-      const wsData = await wsRes.json();
-      setBbWorkspaces(wsData.workspaces || []);
-      if (wsData.workspaces?.length === 1) setBbWorkspace(wsData.workspaces[0].slug);
+      const res = await apiPost(`${BACKEND}/api/terraform/push-bitbucket`, {
+        files,
+        email: bfPushEmail.trim(),
+        api_token: bfPushToken.trim(),
+        workspace: parseBitbucketWorkspace(bfPushWorkspace),
+        repo_slug: bfPushRepo.trim(),
+        branch: bfPushBranch || "main",
+        commit_message: bfPushMsg,
+        folder_prefix: bfPushFolder,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Push failed");
+      setBfPushResult({ repo_url: data.repo_url, commit_sha: data.commit_sha, files_pushed: data.files_pushed });
+      toast({ title: "Pushed to Bitbucket!", description: `${data.files_pushed} files pushed${data.commit_sha ? ` — commit ${data.commit_sha}` : ""}` });
     } catch (err: any) {
-      setBbStatus({ linked: false, error: err.message });
+      toast({ title: "Push failed", description: err.message, variant: "destructive" });
     } finally {
-      setBbLoadingWs(false);
+      setIsBfPushing(false);
     }
   };
 
@@ -692,11 +721,330 @@ export function TerraformGeneratorCore() {
             Terraform Generator
           </h1>
           <p className="text-muted-foreground text-sm mt-1">
-            Upload your SAD → extract components → generate modular Terraform code
+            {mode === "choose" && "Choose how you want to work with Terraform infrastructure"}
+            {mode === "greenfield" && "Upload your SAD → extract components → generate modular Terraform code"}
+            {mode === "brownfield" && "Fetch and manage your existing Terraform codebase from Bitbucket"}
           </p>
         </div>
 
-        <StepIndicator step={step} />
+        {/* ── Mode Chooser ─────────────────────────────────────────────── */}
+        {mode === "choose" && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mt-2">
+            <Card className="cursor-pointer hover:border-primary/50 hover:shadow-md transition-all" onClick={() => setMode("brownfield")}>
+              <CardContent className="p-6 flex flex-col gap-4 h-full">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-blue-50 dark:bg-blue-950/30 flex items-center justify-center flex-shrink-0">
+                    <Wrench className="w-5 h-5 text-blue-600 dark:text-blue-400" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-base">Existing Project</div>
+                    <div className="text-xs text-muted-foreground">Manage Existing IaC</div>
+                  </div>
+                </div>
+                <p className="text-sm text-muted-foreground leading-relaxed flex-1">
+                  Connect to Bitbucket and fetch your existing Infrastructure as Code repository.
+                  Claude will analyze the codebase so you can edit and push changes back.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <span className="inline-flex items-center gap-1 text-xs bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full border border-blue-200 dark:border-blue-800">
+                    <GitBranch className="w-3 h-3" /> Bitbucket Connect
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-xs bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full border border-blue-200 dark:border-blue-800">
+                    <Wand2 className="w-3 h-3" /> AI Analysis
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-xs bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 px-2 py-0.5 rounded-full border border-blue-200 dark:border-blue-800">
+                    <Lock className="w-3 h-3" /> Push with Write Token
+                  </span>
+                </div>
+                <Button className="w-full" variant="outline">
+                  Get Started <ChevronRight className="w-4 h-4 ml-1" />
+                </Button>
+              </CardContent>
+            </Card>
+
+            <Card className="cursor-pointer hover:border-primary/50 hover:shadow-md transition-all" onClick={() => setMode("greenfield")}>
+              <CardContent className="p-6 flex flex-col gap-4 h-full">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-green-50 dark:bg-green-950/30 flex items-center justify-center flex-shrink-0">
+                    <Wand2 className="w-5 h-5 text-green-600 dark:text-green-400" />
+                  </div>
+                  <div>
+                    <div className="font-semibold text-base">New Project</div>
+                    <div className="text-xs text-muted-foreground">Generate New Terraform</div>
+                  </div>
+                </div>
+                <p className="text-sm text-muted-foreground leading-relaxed flex-1">
+                  Upload a Solution Architecture Document and let Claude extract infrastructure
+                  components and generate modular, production-grade Terraform code from scratch.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <span className="inline-flex items-center gap-1 text-xs bg-green-50 dark:bg-green-950/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded-full border border-green-200 dark:border-green-800">
+                    <FileUp className="w-3 h-3" /> SAD Upload
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-xs bg-green-50 dark:bg-green-950/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded-full border border-green-200 dark:border-green-800">
+                    <Layers className="w-3 h-3" /> Component Extraction
+                  </span>
+                  <span className="inline-flex items-center gap-1 text-xs bg-green-50 dark:bg-green-950/30 text-green-700 dark:text-green-300 px-2 py-0.5 rounded-full border border-green-200 dark:border-green-800">
+                    <Shield className="w-3 h-3" /> Checkov Scan
+                  </span>
+                </div>
+                <Button className="w-full">
+                  Get Started <ChevronRight className="w-4 h-4 ml-1" />
+                </Button>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* ── Brownfield ───────────────────────────────────────────────── */}
+        {mode === "brownfield" && (
+          <div className="space-y-4 mt-2">
+            <button
+              onClick={() => { setMode("choose"); setFetchConnected(null); setFetchRepos([]); setFetchBranches([]); setFetchWs(""); setFetchRepo(""); setFiles({}); setBfPushResult(null); setShowBfPushPanel(false); setIsEditingCode(false); }}
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" /> Back to start
+            </button>
+
+            {!fetchConnected && (
+              <Card>
+                <CardContent className="p-6 space-y-4">
+                  <div className="flex items-center gap-2">
+                    <GitBranch className="w-4 h-4 text-blue-600" />
+                    <h2 className="font-semibold text-lg">Connect to Bitbucket</h2>
+                  </div>
+                  <p className="text-sm text-muted-foreground">Enter your Atlassian credentials to fetch an existing Terraform repository.</p>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Atlassian Login Email <span className="text-red-500">*</span></label>
+                      <input type="email" placeholder="t479892@deluxe.com" value={fetchBbEmail} onChange={(e) => setFetchBbEmail(e.target.value)} className="w-full border rounded px-3 py-2 text-sm bg-background" />
+                      <p className="text-xs text-muted-foreground mt-1">Email from id.atlassian.com</p>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Bitbucket API Token <span className="text-red-500">*</span></label>
+                      <input type="password" placeholder="ATATT3xF..." value={fetchBbToken} onChange={(e) => setFetchBbToken(e.target.value)} className="w-full border rounded px-3 py-2 text-sm bg-background" />
+                      <p className="text-xs text-muted-foreground mt-1">Scope: <code className="bg-muted px-1 rounded">read:repository:bitbucket</code></p>
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Workspace <span className="text-red-500">*</span></label>
+                      <input type="text" placeholder="deluxe-development or full URL" value={fetchWs} onChange={(e) => setFetchWs(e.target.value)} className="w-full border rounded px-3 py-2 text-sm bg-background" />
+                      <p className="text-xs text-muted-foreground mt-1">Slug or full bitbucket.org URL</p>
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button onClick={connectFetchBitbucket} disabled={isFetchConnecting || !fetchBbEmail || !fetchBbToken || !fetchWs}>
+                      {isFetchConnecting
+                        ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Connecting...</>
+                        : <><GitBranch className="w-4 h-4 mr-2" /> Connect to Bitbucket</>}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {fetchConnected && Object.keys(files).length === 0 && (
+              <Card>
+                <CardContent className="p-6 space-y-4">
+                  <div className="flex items-center justify-between text-sm text-green-700 bg-green-50 dark:bg-green-950/30 border border-green-200 rounded px-3 py-2">
+                    <span className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                      Connected to workspace <strong>{fetchConnected}</strong>
+                    </span>
+                    <button className="text-xs text-muted-foreground underline ml-4"
+                      onClick={() => { setFetchConnected(null); setFetchRepos([]); setFetchBranches([]); setFetchWs(""); setFetchRepo(""); }}>
+                      Disconnect
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Repository *</label>
+                      {isFetchLoadingRepos ? (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground pt-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...</div>
+                      ) : (
+                        <select className="w-full border rounded px-3 py-2 text-sm bg-background" value={fetchRepo}
+                          onChange={(e) => { setFetchRepo(e.target.value); setFetchBranches([]); if (e.target.value) loadFetchBranches(fetchWs, e.target.value); }}>
+                          <option value="">Select repository...</option>
+                          {fetchRepos.map(r => <option key={r.slug} value={r.slug}>{r.name}</option>)}
+                        </select>
+                      )}
+                    </div>
+                    <div>
+                      <label className="text-xs text-muted-foreground mb-1 block">Branch</label>
+                      {isFetchLoadingBranches ? (
+                        <div className="flex items-center gap-2 text-sm text-muted-foreground pt-2"><Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading...</div>
+                      ) : (
+                        <select className="w-full border rounded px-3 py-2 text-sm bg-background" value={fetchBranch}
+                          onChange={(e) => setFetchBranch(e.target.value)} disabled={!fetchRepo}>
+                          {fetchBranches.length === 0 && <option value="main">main</option>}
+                          {fetchBranches.map(b => <option key={b} value={b}>{b}</option>)}
+                        </select>
+                      )}
+                    </div>
+                    <div className="sm:col-span-3">
+                      <label className="text-xs text-muted-foreground mb-1 block">Subfolder (optional)</label>
+                      <input className="w-full border rounded px-3 py-2 text-sm bg-background" value={fetchPath}
+                        onChange={(e) => setFetchPath(e.target.value)} placeholder="e.g. terraform/  — leave empty to fetch entire repo" />
+                      <p className="text-xs text-muted-foreground mt-1">Only .tf, .tfvars, and .hcl files are loaded</p>
+                    </div>
+                  </div>
+                  <div className="flex justify-end">
+                    <Button onClick={handleFetchFromBitbucket} disabled={isFetching || !fetchWs || !fetchRepo}>
+                      {isFetching
+                        ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Fetching & Analyzing...</>
+                        : <><Wand2 className="w-4 h-4 mr-2" /> Fetch & Analyze</>}
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {Object.keys(files).length > 0 && (
+              <div className="space-y-4">
+                <Card>
+                  <CardContent className="p-0">
+                    <div className="flex">
+                      <div className="w-56 flex-shrink-0 border-r bg-muted/30 p-3 space-y-3">
+                        <div className="flex items-center gap-1 text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                          <FolderTree className="w-3 h-3" /> Files ({Object.keys(files).length})
+                        </div>
+                        {Object.entries(fileTree).map(([group, groupFiles]) => (
+                          <div key={group}>
+                            <div className="text-xs text-muted-foreground font-medium mb-1">{group === "root" ? "/" : group + "/"}</div>
+                            {groupFiles.map((f) => (
+                              <button key={f} onClick={() => setActiveFile(f)}
+                                className={`block w-full text-left text-xs px-2 py-1 rounded truncate ${activeFile === f ? "bg-primary text-white" : "hover:bg-accent"}`}
+                                title={f}>
+                                {f.split("/").pop()}
+                              </button>
+                            ))}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center justify-between px-4 py-2 border-b bg-muted/20">
+                          <span className="text-xs font-mono text-muted-foreground">{activeFile}</span>
+                          <div className="flex gap-2">
+                            <Button size="sm" variant="ghost" onClick={handleCopyFile}><Copy className="w-3 h-3 mr-1" /> Copy</Button>
+                            <Button size="sm" variant={isEditingCode ? "default" : "ghost"} onClick={() => setIsEditingCode((v) => !v)}>
+                              {isEditingCode ? "Done" : "Edit"}
+                            </Button>
+                          </div>
+                        </div>
+                        {isEditingCode ? (
+                          <textarea className="w-full p-4 text-xs font-mono bg-background resize-none outline-none border-0"
+                            style={{ minHeight: "400px" }} value={files[activeFile] || ""}
+                            onChange={(e) => setFiles((prev) => ({ ...prev, [activeFile]: e.target.value }))} spellCheck={false} />
+                        ) : (
+                          <pre className="p-4 text-xs font-mono overflow-auto" style={{ maxHeight: "400px", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                            {files[activeFile] || ""}
+                          </pre>
+                        )}
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <div className="flex items-center justify-between">
+                  <button
+                    onClick={() => { setFetchConnected(null); setFetchRepos([]); setFetchBranches([]); setFetchWs(""); setFetchRepo(""); setFiles({}); setBfPushResult(null); setShowBfPushPanel(false); setIsEditingCode(false); }}
+                    className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                  >
+                    <ArrowLeft className="w-4 h-4" /> Load different repo
+                  </button>
+                  <Button variant="outline" onClick={() => setShowBfPushPanel((v) => !v)}>
+                    <GitBranch className="w-4 h-4 mr-2" /> {showBfPushPanel ? "Hide Push Panel" : "Push changes to Bitbucket"}
+                  </Button>
+                </div>
+
+                {showBfPushPanel && (
+                  <Card className="border-2 border-dashed border-muted-foreground/30">
+                    <CardContent className="p-5 space-y-4">
+                      <div className="flex items-center gap-2">
+                        <GitBranch className="w-4 h-4" />
+                        <span className="font-semibold text-sm">Push to Bitbucket</span>
+                      </div>
+                      <div className="flex items-start gap-2 text-xs text-amber-700 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded px-3 py-2">
+                        <Lock className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                        <span>Requires a token with <strong className="mx-0.5">write:repository:bitbucket</strong> scope. Read-only tokens will be rejected.</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Atlassian Login Email <span className="text-red-500">*</span></label>
+                          <input type="email" className="w-full border rounded px-3 py-2 text-sm bg-background" placeholder="t479892@deluxe.com"
+                            value={bfPushEmail} onChange={(e) => setBfPushEmail(e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">API Token (Write) <span className="text-red-500">*</span></label>
+                          <input type="password" className="w-full border rounded px-3 py-2 text-sm bg-background" placeholder="ATATT3xF..."
+                            value={bfPushToken} onChange={(e) => setBfPushToken(e.target.value)} />
+                          <p className="text-xs text-muted-foreground mt-1">Scope: <code className="bg-muted px-1 rounded">write:repository:bitbucket</code></p>
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Workspace <span className="text-red-500">*</span></label>
+                          <input className="w-full border rounded px-3 py-2 text-sm bg-background" placeholder="deluxe-development"
+                            value={bfPushWorkspace} onChange={(e) => setBfPushWorkspace(e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Repository Slug <span className="text-red-500">*</span></label>
+                          <input className="w-full border rounded px-3 py-2 text-sm bg-background" placeholder="my-infra-terraform"
+                            value={bfPushRepo} onChange={(e) => setBfPushRepo(e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Branch</label>
+                          <input className="w-full border rounded px-3 py-2 text-sm bg-background" placeholder="main"
+                            value={bfPushBranch} onChange={(e) => setBfPushBranch(e.target.value)} />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Subfolder (optional)</label>
+                          <input className="w-full border rounded px-3 py-2 text-sm bg-background" placeholder="e.g. terraform/"
+                            value={bfPushFolder} onChange={(e) => setBfPushFolder(e.target.value)} />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="text-xs text-muted-foreground mb-1 block">Commit Message</label>
+                          <input className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={bfPushMsg} onChange={(e) => setBfPushMsg(e.target.value)} />
+                        </div>
+                      </div>
+                      <div className="flex justify-end">
+                        <Button onClick={handleBrownfieldPush} disabled={isBfPushing || !bfPushEmail || !bfPushToken || !bfPushWorkspace || !bfPushRepo}>
+                          {isBfPushing
+                            ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Pushing...</>
+                            : <><GitBranch className="w-4 h-4 mr-2" /> Push {Object.keys(files).length} files</>}
+                        </Button>
+                      </div>
+                      {bfPushResult && (
+                        <div className="bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded p-3 flex items-start gap-3">
+                          <CheckCircle2 className="w-5 h-5 text-green-600 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <div className="text-sm font-medium text-green-800 dark:text-green-300">
+                              Pushed {bfPushResult.files_pushed} files{bfPushResult.commit_sha ? ` — commit ${bfPushResult.commit_sha}` : ""}
+                            </div>
+                            <a href={bfPushResult.repo_url} target="_blank" rel="noopener noreferrer"
+                              className="text-sm text-primary flex items-center gap-1 mt-1 hover:underline">
+                              <ExternalLink className="w-3 h-3" /> {bfPushResult.repo_url}
+                            </a>
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── Greenfield ───────────────────────────────────────────────── */}
+        {mode === "greenfield" && (<>
+          <div className="mb-4">
+            <button
+              onClick={() => { setMode("choose"); setStep(1); }}
+              className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              <ArrowLeft className="w-4 h-4" /> Back to start
+            </button>
+          </div>
+          <StepIndicator step={step} />
 
         {/* ── Step 1: Upload SAD ─────────────────────────────────────────── */}
         {step === 1 && (
@@ -1036,11 +1384,28 @@ export function TerraformGeneratorCore() {
                           <Button size="sm" variant="ghost" onClick={handleCopyFile}>
                             <Copy className="w-3 h-3 mr-1" /> Copy
                           </Button>
+                          <Button
+                            size="sm"
+                            variant={isEditingCode ? "default" : "ghost"}
+                            onClick={() => setIsEditingCode((v) => !v)}
+                          >
+                            {isEditingCode ? "Done" : "Edit"}
+                          </Button>
                         </div>
                       </div>
-                      <pre className="p-4 text-xs font-mono overflow-auto" style={{ maxHeight: "500px", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
-                        {files[activeFile] || ""}
-                      </pre>
+                      {isEditingCode ? (
+                        <textarea
+                          className="w-full p-4 text-xs font-mono bg-background resize-none outline-none border-0"
+                          style={{ minHeight: "500px" }}
+                          value={files[activeFile] || ""}
+                          onChange={(e) => setFiles((prev) => ({ ...prev, [activeFile]: e.target.value }))}
+                          spellCheck={false}
+                        />
+                      ) : (
+                        <pre className="p-4 text-xs font-mono overflow-auto" style={{ maxHeight: "500px", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                          {files[activeFile] || ""}
+                        </pre>
+                      )}
                     </div>
                   </div>
                 </CardContent>
@@ -1052,10 +1417,7 @@ export function TerraformGeneratorCore() {
                 <ChevronLeft className="w-4 h-4 mr-1" /> Back
               </Button>
               <div className="flex gap-2">
-                <Button variant="outline" onClick={handleGenerate} disabled={isGenerating}>
-                  <RefreshCw className="w-4 h-4 mr-1" /> Regenerate
-                </Button>
-                <Button variant="outline"
+<Button variant="outline"
                   onClick={() => { setShowFetchPanel((v) => !v); setShowPushPanel(false); setShowScanPanel(false); }}
                 >
                   <GitBranch className="w-4 h-4 mr-1" /> Load from Bitbucket
@@ -1094,46 +1456,75 @@ export function TerraformGeneratorCore() {
 
                   {/* Step 1 — Connect */}
                   {!fetchConnected ? (
-                    <div className="flex items-center gap-3">
-                      <p className="text-sm text-muted-foreground flex-1">
-                        Uses your linked Atlassian account (same as Jira & Confluence).
-                      </p>
-                      <Button variant="outline" size="sm" onClick={connectFetchBitbucket} disabled={isFetchConnecting}>
-                        {isFetchConnecting
-                          ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Connecting...</>
-                          : "Connect to Bitbucket"
-                        }
-                      </Button>
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">
+                            Atlassian Login Email <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="email"
+                            placeholder="t479892@deluxe.com"
+                            value={fetchBbEmail}
+                            onChange={(e) => setFetchBbEmail(e.target.value)}
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Email from id.atlassian.com</p>
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">
+                            Bitbucket API Token <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="password"
+                            placeholder="ATATT3xF..."
+                            value={fetchBbToken}
+                            onChange={(e) => setFetchBbToken(e.target.value)}
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Scope: <code className="bg-muted px-1 rounded">read:repository:bitbucket</code></p>
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">
+                            Workspace <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="text"
+                            placeholder="deluxe-development or full URL"
+                            value={fetchWs}
+                            onChange={(e) => setFetchWs(e.target.value)}
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Slug or full bitbucket.org URL</p>
+                        </div>
+                      </div>
+                      <div className="flex justify-end">
+                        <Button variant="outline" size="sm" onClick={connectFetchBitbucket} disabled={isFetchConnecting || !fetchBbEmail || !fetchBbToken || !fetchWs}>
+                          {isFetchConnecting
+                            ? <><Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" /> Connecting...</>
+                            : "Connect to Bitbucket"
+                          }
+                        </Button>
+                      </div>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 dark:bg-green-950/30 border border-green-200 rounded px-3 py-2">
-                      <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-                      Connected as <strong>{fetchConnected}</strong>
+                    <div className="flex items-center justify-between text-sm text-green-700 bg-green-50 dark:bg-green-950/30 border border-green-200 rounded px-3 py-2">
+                      <span className="flex items-center gap-2">
+                        <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                        Connected to workspace <strong>{fetchConnected}</strong>
+                      </span>
+                      <button
+                        className="text-xs text-muted-foreground underline ml-4"
+                        onClick={() => { setFetchConnected(null); setFetchRepos([]); setFetchBranches([]); setFetchWs(""); setFetchRepo(""); }}
+                      >
+                        Disconnect
+                      </button>
                     </div>
                   )}
 
-                  {/* Step 2 — Pick workspace / repo / branch */}
+                  {/* Step 2 — Pick repo / branch */}
                   {fetchConnected && (
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                      <div>
-                        <label className="text-xs text-muted-foreground mb-1 block">Workspace *</label>
-                        <select
-                          className="w-full border rounded px-3 py-2 text-sm bg-background"
-                          value={fetchWs}
-                          onChange={(e) => {
-                            setFetchWs(e.target.value);
-                            setFetchRepo("");
-                            setFetchBranches([]);
-                            if (e.target.value) loadFetchRepos(e.target.value);
-                          }}
-                        >
-                          <option value="">Select workspace...</option>
-                          {fetchWorkspaces.map(ws => (
-                            <option key={ws.slug} value={ws.slug}>{ws.name} ({ws.slug})</option>
-                          ))}
-                        </select>
-                      </div>
-
                       <div>
                         <label className="text-xs text-muted-foreground mb-1 block">Repository *</label>
                         {isFetchLoadingRepos ? (
@@ -1149,7 +1540,6 @@ export function TerraformGeneratorCore() {
                               setFetchBranches([]);
                               if (e.target.value) loadFetchBranches(fetchWs, e.target.value);
                             }}
-                            disabled={!fetchWs}
                           >
                             <option value="">Select repository...</option>
                             {fetchRepos.map(r => (
@@ -1538,102 +1928,76 @@ export function TerraformGeneratorCore() {
                   {/* ── Bitbucket fields ── */}
                   {pushTarget === "bitbucket" && (
                     <div className="space-y-3">
-                      {/* Connection check */}
-                      {!bbStatus ? (
-                        <div className="flex items-center gap-3">
-                          <p className="text-sm text-muted-foreground flex-1">
-                            Uses your linked Atlassian account — same credentials as Jira & Confluence.
-                          </p>
-                          <button
-                            onClick={loadBitbucketWorkspaces}
-                            disabled={bbLoadingWs}
-                            className="flex items-center gap-1.5 text-sm text-primary hover:underline disabled:opacity-50"
-                          >
-                            {bbLoadingWs
-                              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Connecting...</>
-                              : <><RefreshCw className="w-3.5 h-3.5" /> Connect to Bitbucket</>
-                            }
-                          </button>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Atlassian Login Email <span className="text-red-500">*</span></label>
+                          <input
+                            type="email"
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            placeholder="t479892@deluxe.com"
+                            value={bbEmail}
+                            onChange={(e) => setBbEmail(e.target.value)}
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Email from id.atlassian.com</p>
                         </div>
-                      ) : bbStatus.linked ? (
-                        <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 dark:bg-green-950/30 border border-green-200 rounded px-3 py-2">
-                          <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
-                          Connected as <strong>{bbStatus.display_name}</strong>
-                          <button onClick={loadBitbucketWorkspaces} className="ml-auto text-xs text-muted-foreground hover:text-foreground">
-                            <RefreshCw className="w-3 h-3" />
-                          </button>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Bitbucket API Token <span className="text-red-500">*</span></label>
+                          <input
+                            type="password"
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            placeholder="ATATT3xF..."
+                            value={bbToken}
+                            onChange={(e) => setBbToken(e.target.value)}
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Scope: <code className="bg-muted px-1 rounded">read:repository:bitbucket</code></p>
                         </div>
-                      ) : (
-                        <div className="flex items-start gap-2 text-sm text-red-700 bg-red-50 dark:bg-red-950/30 border border-red-200 rounded px-3 py-2">
-                          <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-                          <span>{bbStatus.error || "Could not connect to Bitbucket."}</span>
-                          <button onClick={loadBitbucketWorkspaces} className="ml-auto text-xs underline">Retry</button>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Workspace <span className="text-red-500">*</span></label>
+                          <input
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            placeholder="deluxe-development or full URL"
+                            value={bbWorkspace}
+                            onChange={(e) => setBbWorkspace(e.target.value)}
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Slug or full bitbucket.org URL</p>
                         </div>
-                      )}
-
-                      {/* Fields — shown only after successful connection */}
-                      {bbStatus?.linked && (
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                          <div>
-                            <label className="text-xs text-muted-foreground mb-1 block">Workspace *</label>
-                            {bbWorkspaces.length > 0 ? (
-                              <select
-                                className="w-full border rounded px-3 py-2 text-sm bg-background"
-                                value={bbWorkspace}
-                                onChange={(e) => setBbWorkspace(e.target.value)}
-                              >
-                                <option value="">Select workspace...</option>
-                                {bbWorkspaces.map(ws => (
-                                  <option key={ws.slug} value={ws.slug}>{ws.name} ({ws.slug})</option>
-                                ))}
-                              </select>
-                            ) : (
-                              <input
-                                className="w-full border rounded px-3 py-2 text-sm bg-background"
-                                value={bbWorkspace}
-                                onChange={(e) => setBbWorkspace(e.target.value)}
-                                placeholder="your-workspace-slug"
-                              />
-                            )}
-                          </div>
-                          <div>
-                            <label className="text-xs text-muted-foreground mb-1 block">Repository Slug *</label>
-                            <input
-                              className="w-full border rounded px-3 py-2 text-sm bg-background"
-                              value={bbRepo}
-                              onChange={(e) => setBbRepo(e.target.value)}
-                              placeholder="e.g. my-infra-terraform"
-                            />
-                            <p className="text-xs text-muted-foreground mt-1">Created automatically if it doesn't exist</p>
-                          </div>
-                          <div>
-                            <label className="text-xs text-muted-foreground mb-1 block">Branch</label>
-                            <input
-                              className="w-full border rounded px-3 py-2 text-sm bg-background"
-                              value={bbBranch}
-                              onChange={(e) => setBbBranch(e.target.value)}
-                              placeholder="main"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-muted-foreground mb-1 block">Subfolder (optional)</label>
-                            <input
-                              className="w-full border rounded px-3 py-2 text-sm bg-background"
-                              value={bbFolder}
-                              onChange={(e) => setBbFolder(e.target.value)}
-                              placeholder="e.g. terraform/"
-                            />
-                          </div>
-                          <div className="sm:col-span-2">
-                            <label className="text-xs text-muted-foreground mb-1 block">Commit Message</label>
-                            <input
-                              className="w-full border rounded px-3 py-2 text-sm bg-background"
-                              value={bbCommitMsg}
-                              onChange={(e) => setBbCommitMsg(e.target.value)}
-                            />
-                          </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Repository Slug <span className="text-red-500">*</span></label>
+                          <input
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={bbRepo}
+                            onChange={(e) => setBbRepo(e.target.value)}
+                            placeholder="e.g. my-infra-terraform"
+                          />
+                          <p className="text-xs text-muted-foreground mt-1">Created automatically if it doesn't exist</p>
                         </div>
-                      )}
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Branch</label>
+                          <input
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={bbBranch}
+                            onChange={(e) => setBbBranch(e.target.value)}
+                            placeholder="main"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground mb-1 block">Subfolder (optional)</label>
+                          <input
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={bbFolder}
+                            onChange={(e) => setBbFolder(e.target.value)}
+                            placeholder="e.g. terraform/"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <label className="text-xs text-muted-foreground mb-1 block">Commit Message</label>
+                          <input
+                            className="w-full border rounded px-3 py-2 text-sm bg-background"
+                            value={bbCommitMsg}
+                            onChange={(e) => setBbCommitMsg(e.target.value)}
+                          />
+                        </div>
+                      </div>
                     </div>
                   )}
 
@@ -1644,7 +2008,7 @@ export function TerraformGeneratorCore() {
                         isPushing ||
                         (pushTarget === "github" ? (!ghToken || !ghRepo) :
                          pushTarget === "harness" ? (!harnessApiKey || !harnessRepoUrl) :
-                         (!bbStatus?.linked || !bbWorkspace || !bbRepo))
+                         (!bbEmail || !bbToken || !bbWorkspace || !bbRepo))
                       }
                     >
                       {isPushing
@@ -1729,6 +2093,7 @@ export function TerraformGeneratorCore() {
             </CardContent>
           </Card>
         )}
+        </>)}
       </div>
     </>
   );

@@ -1,5 +1,9 @@
 import { PublicClientApplication, AccountInfo, AuthenticationResult, RedirectRequest } from "@azure/msal-browser";
 
+// Dev bypass — skip all Azure AD token logic locally
+const DEV_BYPASS_AUTH = import.meta.env.VITE_DEV_BYPASS_AUTH === "true";
+const DEV_TOKEN = "dev-bypass-token";
+
 // Azure AD Configuration
 const AZURE_CLIENT_ID = import.meta.env.VITE_AZURE_CLIENT_ID || "";
 const AZURE_TENANT_ID = import.meta.env.VITE_AZURE_TENANT_ID || "";
@@ -70,10 +74,12 @@ export async function loginWithAzureAD(): Promise<AuthenticationResult | null> {
  * Get access token (ID token) for API calls
  */
 export async function getEffectiveToken(): Promise<string | null> {
+  if (DEV_BYPASS_AUTH) return DEV_TOKEN;
   return getAccessToken();
 }
 
 export async function getAccessToken(forceRefresh = false): Promise<string | null> {
+  if (DEV_BYPASS_AUTH) return DEV_TOKEN;
   try {
     await ensureMsalInitialized();
     const accounts = msalInstance.getAllAccounts();

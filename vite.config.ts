@@ -25,6 +25,9 @@ export default defineConfig(({ mode }) => ({
     }
   },
   plugins: [react(), mode === "development" && componentTagger()].filter(Boolean),
+  optimizeDeps: {
+    include: ["@azure/msal-browser", "@azure/msal-react"],
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

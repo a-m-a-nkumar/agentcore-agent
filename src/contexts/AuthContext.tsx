@@ -15,6 +15,16 @@ const TECH_GROUP_OID = "670e52fc-59cc-4a13-b89c-c91367c7060c";
 
 const ALL_MODULES = ["brd", "confluence", "jira", "design", "pair-programming", "testing", "harness"];
 
+// Dev bypass: set VITE_DEV_BYPASS_AUTH=true in .env to skip Azure AD login locally
+const DEV_BYPASS_AUTH = import.meta.env.VITE_DEV_BYPASS_AUTH === "true";
+const DEV_USER = {
+  id: "dev-user",
+  email: import.meta.env.VITE_DEV_USER_EMAIL || "dev@local",
+  name: import.meta.env.VITE_DEV_USER_NAME || "Dev User",
+  groups: [] as string[],
+  allowedModules: ALL_MODULES,
+};
+
 const GROUP_MODULE_MAP: Record<string, string[]> = {
   [BUSINESS_GROUP_OID]: ["brd", "confluence", "jira"],
   [TECH_GROUP_OID]: ["design", "pair-programming", "testing", "confluence", "jira", "harness"],
@@ -60,6 +70,11 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   // Initialize auth — handle redirect response when Azure sends user back
   useEffect(() => {
+    if (DEV_BYPASS_AUTH) {
+      setUser(DEV_USER);
+      setIsLoading(false);
+      return;
+    }
     const initializeAuth = async () => {
       try {
         await ensureMsalInitialized();
@@ -96,6 +111,10 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   }, []);
 
   const login = async () => {
+    if (DEV_BYPASS_AUTH) {
+      setUser(DEV_USER);
+      return;
+    }
     try {
       setIsLoading(true);
       const response = await loginWithAzureAD();
