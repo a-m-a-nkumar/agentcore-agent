@@ -18,6 +18,7 @@ from db_helper import (
 )
 from services.jira_service import JiraService
 from services.confluence_service import ConfluenceService
+from services.bitbucket_service import BitbucketService
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 logger = logging.getLogger(__name__)
@@ -585,5 +586,90 @@ def upload_brd_to_confluence(
             status_code=500,
             detail=f"Failed to create Confluence page: {str(e)}"
         )
+
+
+# ============================================
+# BITBUCKET DIRECT CREDENTIAL ENDPOINTS
+# ============================================
+
+class BitbucketDirectRequest(BaseModel):
+    email: str = Field(..., description="Atlassian login email (from id.atlassian.com)")
+    api_token: str = Field(..., description="Bitbucket-scoped API token")
+
+@router.post("/bitbucket/connect-direct")
+def bitbucket_connect_direct(
+    request: BitbucketDirectRequest,
+    _: dict = Depends(verify_azure_token),
+):
+    """Test Bitbucket credentials directly without requiring a linked Atlassian account."""
+    try:
+        svc = BitbucketService(request.email, request.api_token)
+        ok, error_msg = svc.test_connection()
+        if not ok:
+            return {"linked": False, "error": error_msg}
+        user_profile = svc.get_user()
+        workspaces = svc.get_workspaces()
+        return {
+            "linked": True,
+            "username": user_profile.get("username") or user_profile.get("account_id"),
+            "display_name": user_profile.get("display_name"),
+            "account_id": user_profile.get("account_id"),
+            "workspaces": workspaces,
+        }
+    except Exception as e:
+        logger.error(f"Bitbucket direct connect failed: {e}")
+        return {"linked": False, "error": str(e)}
+
+
+@router.get("/bitbucket/repositories-direct/{workspace}")
+def list_bitbucket_repositories_direct(
+    workspace: str,
+    email: str,
+    api_token: str,
+    _: dict = Depends(verify_azure_token),
+):
+    """List repositories using credentials passed as query params."""
+    try:
+        svc = BitbucketService(email, api_token)
+        repos = svc.get_repositories(workspace)
+        return {"repositories": repos}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/branches-direct/{workspace}/{repo_slug}")
+def list_bitbucket_branches_direct(
+    workspace: str,
+    repo_slug: str,
+    email: str,
+    api_token: str,
+    _: dict = Depends(verify_azure_token),
+):
+    """List branches using credentials passed as query params."""
+    try:
+        svc = BitbucketService(email, api_token)
+        branches = svc.get_branches(workspace, repo_slug)
+        return {"branches": branches}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/fetch-files-direct/{workspace}/{repo_slug}")
+def fetch_bitbucket_files_direct(
+    workspace: str,
+    repo_slug: str,
+    email: str,
+    api_token: str,
+    ref: str = "main",
+    path: str = "",
+    _: dict = Depends(verify_azure_token),
+):
+    """Fetch Terraform files using credentials passed as query params."""
+    try:
+        svc = BitbucketService(email, api_token)
+        files = svc.get_files_bulk(workspace, repo_slug, ref=ref, path=path, extensions=[".tf", ".tfvars", ".hcl"])
+        return {"files": files, "count": len(files)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
