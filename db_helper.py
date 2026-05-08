@@ -1222,32 +1222,37 @@ def _get_kms_client():
     return _kms_client
 
 def _encrypt_token(plain_token: str) -> str:
-    """Encrypt a PAT token using AWS KMS before storing in DB."""
+    """Encrypt a PAT token using AWS KMS before storing in DB.
+    Falls back to plain text if KMS is unavailable (e.g. missing IAM permissions) so
+    the PAT save never fails silently — the WARNING log makes the gap visible.
+    """
     if not _KMS_KEY_ARN:
-        logger.warning("[KMS] KMS_KEY_ARN not set — storing token without encryption (dev only)")
+        logger.warning("[KMS] KMS_KEY_ARN not set — storing token without encryption")
         return plain_token
     try:
         response = _get_kms_client().encrypt(
             KeyId=_KMS_KEY_ARN,
             Plaintext=plain_token.encode("utf-8"),
         )
-        # Store as base64 string with a prefix so we can detect encrypted values
         encrypted_b64 = base64.b64encode(response["CiphertextBlob"]).decode("utf-8")
         return f"kms:{encrypted_b64}"
     except Exception as e:
-        logger.error(f"[KMS] Encryption failed: {e}")
-        raise RuntimeError("Failed to encrypt Atlassian token. Check KMS configuration.") from e
+        # KMS unreachable or IAM permission missing — store plain text so the PAT
+        # update succeeds. Fix: grant kms:Encrypt + kms:Decrypt to the ECS task role.
+        logger.warning(f"[KMS] Encryption unavailable ({e}) — storing token without encryption. "
+                       "Grant kms:Encrypt + kms:Decrypt to the ECS task role to enable encryption.")
+        return plain_token
 
 def _decrypt_token(stored_token: str) -> str:
     """Decrypt a KMS-encrypted PAT token retrieved from DB."""
     if not stored_token:
         return stored_token
-    # If token was stored without encryption (dev/legacy), return as-is
+    # Plain-text token (stored before KMS was enabled, or KMS was unavailable at save time)
     if not stored_token.startswith("kms:"):
         return stored_token
     if not _KMS_KEY_ARN:
-        logger.warning("[KMS] KMS_KEY_ARN not set — cannot decrypt token")
-        return stored_token
+        logger.warning("[KMS] KMS_KEY_ARN not set — cannot decrypt token, returning empty")
+        return ""
     try:
         ciphertext = base64.b64decode(stored_token[4:])  # strip "kms:" prefix
         response = _get_kms_client().decrypt(
@@ -1256,8 +1261,11 @@ def _decrypt_token(stored_token: str) -> str:
         )
         return response["Plaintext"].decode("utf-8")
     except Exception as e:
-        logger.error(f"[KMS] Decryption failed: {e}")
-        raise RuntimeError("Failed to decrypt Atlassian token. Check KMS configuration.") from e
+        # KMS unreachable or IAM permission missing — return empty so callers treat
+        # the account as not-linked and prompt the user to re-enter credentials.
+        logger.error(f"[KMS] Decryption failed ({e}) — credentials inaccessible. "
+                     "Grant kms:Decrypt to the ECS task role.")
+        return ""
 
 
 def update_user_atlassian_credentials(
