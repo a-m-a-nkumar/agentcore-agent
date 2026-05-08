@@ -53,27 +53,43 @@ class JiraService:
     
     def get_projects(self) -> List[Dict]:
         """
-        Fetch all accessible Jira projects
-        
-        Returns:
-            List of projects with key, name, id, and type
+        Fetch ALL accessible Jira projects via the paginated search endpoint.
+
+        The legacy /rest/api/3/project endpoint caps responses at ~50 items
+        with no pagination, which means tenants with more projects silently
+        miss entries — search-by-name in the UI then "can't find" them
+        even though they exist. /rest/api/3/project/search is paginated;
+        we walk all pages to return the complete set.
         """
         try:
-            url = f"{self.base_url}/rest/api/3/project"
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=30)
-            response.raise_for_status()
+            url = f"{self.base_url}/rest/api/3/project/search"
+            all_projects: List[Dict] = []
+            start_at = 0
+            page_size = 50
+            while True:
+                response = requests.get(
+                    url,
+                    headers=self.headers,
+                    auth=self.auth,
+                    params={"startAt": start_at, "maxResults": page_size},
+                    timeout=30,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                values = payload.get("values", [])
+                all_projects.extend(values)
+                if payload.get("isLast", True) or len(values) < page_size:
+                    break
+                start_at += page_size
 
-            projects = response.json()
-            
-            # Return simplified project list
             return [
                 {
                     "key": project["key"],
                     "name": project["name"],
                     "id": project["id"],
-                    "type": project.get("projectTypeKey", "software")
+                    "type": project.get("projectTypeKey", "software"),
                 }
-                for project in projects
+                for project in all_projects
             ]
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Jira projects: {e}")
