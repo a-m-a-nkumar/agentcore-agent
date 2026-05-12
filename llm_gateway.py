@@ -153,6 +153,104 @@ def chat_completion(
     return content
 
 
+def chat_completion_stream(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    temperature: float = 0.9,
+    max_tokens: Optional[int] = None,
+    system_prompt: Optional[str] = None,
+    user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
+):
+    """
+    Real SSE streaming via the OpenAI SDK against the DLX AI gateway.
+
+    Yields strings already formatted as Server-Sent Events ready to relay
+    straight to the HTTP client:
+
+        data: {"type": "chunk", "text": "..."}\\n\\n
+        ...
+        data: {"type": "done"}\\n\\n
+
+    Token usage is recorded once at the end of the stream via the standard
+    _record_tokens_async path (same DB row, same source label, same auth).
+    Requires the gateway to honour `stream_options={"include_usage": true}`,
+    which the DLX AI proxy passes through to the upstream OpenAI-compatible
+    backend so a final chunk with usage data arrives.
+    """
+    client = _get_client()
+    resolved = model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
+    if any(tok in resolved for tok in ("anthropic", "bedrock", "amazon")):
+        resolved = os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
+
+    if system_prompt:
+        messages = [{"role": "system", "content": system_prompt}] + list(messages)
+
+    params: Dict = {
+        "model": resolved,
+        "messages": messages,
+        "temperature": temperature,
+        "stream": True,
+        # Ask the proxy to forward a final chunk containing usage stats
+        # so we can record token totals once the stream completes.
+        "stream_options": {"include_usage": True},
+    }
+    if max_tokens is not None:
+        params["max_tokens"] = max_tokens
+
+    logger.info(
+        f"[LLM Gateway] STREAM Calling model='{resolved}' max_tokens={max_tokens} "
+        f"user={user_id or 'unknown'} source={token_source or '?'}"
+    )
+    import json as _json  # local — keeps top-level imports minimal
+    start = time.time()
+    total_chars = 0
+    final_usage = None
+
+    try:
+        response = client.chat.completions.create(**params)
+        for chunk in response:
+            # OpenAI-compatible streams end with a chunk that has `usage`
+            # populated and an empty `choices` list.
+            usage_obj = getattr(chunk, "usage", None)
+            if usage_obj:
+                final_usage = usage_obj
+                # Don't continue — some gateways still send choices on the
+                # usage chunk, so fall through to delta extraction below.
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            delta = getattr(choices[0], "delta", None)
+            text = getattr(delta, "content", None) if delta else None
+            if text:
+                total_chars += len(text)
+                yield f"data: {_json.dumps({'type': 'chunk', 'text': text})}\n\n"
+    except Exception as e:
+        logger.error(f"[LLM Gateway] STREAM error: {e}")
+        yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        return
+
+    elapsed = time.time() - start
+
+    if final_usage:
+        total = getattr(final_usage, "total_tokens", 0) or 0
+        logger.info(
+            f"[LLM Gateway] STREAM {elapsed:.1f}s model={resolved} "
+            f"user={user_id or 'unknown'} source={token_source or '?'} "
+            f"tokens prompt={getattr(final_usage, 'prompt_tokens', '?')} "
+            f"completion={getattr(final_usage, 'completion_tokens', '?')} total={total} "
+            f"chars_streamed={total_chars}"
+        )
+        _record_tokens_async(user_id, total, source=token_source)
+    else:
+        logger.info(
+            f"[LLM Gateway] STREAM {elapsed:.1f}s model={resolved} "
+            f"user={user_id or 'unknown'} chars={total_chars} (no usage in final chunk)"
+        )
+
+    yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+
+
 def chat_completion_with_tools(
     messages: List[Dict],
     tools: List[Dict],

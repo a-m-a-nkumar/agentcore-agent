@@ -43,22 +43,34 @@ import logging as _logging
 _logger = _logging.getLogger(__name__)
 
 
-def chat_completion_stream(messages, model=None, temperature=0.5, max_tokens=None, system_prompt=None):
+from llm_gateway import chat_completion_stream as _llm_chat_completion_stream  # noqa: F401
+
+
+def chat_completion_stream(messages, model=None, temperature=0.5, max_tokens=None,
+                           system_prompt=None, user_id=None, token_source=None):
     """
-    VDI streaming shim — llm_gateway does not support SSE streaming yet.
-    Falls back to a single blocking call and yields the response as one chunk + done.
+    VDI streaming — delegates to the real SSE-streaming implementation in
+    llm_gateway.chat_completion_stream. Yields SSE-formatted strings ready
+    for StreamingResponse to relay to the browser, plus records token usage
+    once the stream completes (via the standard _record_tokens_async path).
+
+    Callers pass Bedrock model IDs (e.g. "global.anthropic.claude-…") which
+    the DLX AI gateway doesn't recognise — remap to the gateway model first.
     """
-    if system_prompt:
-        messages = [{"role": "system", "content": system_prompt}] + list(messages)
-    # Callers pass Bedrock model IDs (e.g. "global.anthropic.claude-…") which the
-    # DLX AI gateway doesn't recognise.  Remap to the gateway model name.
     if model and ("anthropic" in model or "bedrock" in model or "amazon" in model):
-        _logger.info(f"[VDI LLM STREAM] Remapping Bedrock model '{model}' → '{DEFAULT_GATEWAY_MODEL}'")
+        _logger.info(
+            f"[VDI LLM STREAM] Remapping Bedrock model '{model}' → '{DEFAULT_GATEWAY_MODEL}'"
+        )
         model = DEFAULT_GATEWAY_MODEL
-    _logger.info("[VDI LLM STREAM] Falling back to non-streaming chat_completion")
-    result = chat_completion(messages=messages, model=model, temperature=temperature, max_tokens=max_tokens)
-    yield f"data: {json.dumps({'type': 'chunk', 'text': result})}\n\n"
-    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+    yield from _llm_chat_completion_stream(
+        messages=messages,
+        model=model,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        system_prompt=system_prompt,
+        user_id=user_id,
+        token_source=token_source,
+    )
 
 # ---------------------------------------------------------------------------
 # 4. AWS Bedrock ARNs  (VDI AWS account: 590184044598)

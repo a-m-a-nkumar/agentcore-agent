@@ -81,7 +81,7 @@ class PushToGitHubRequest(BaseModel):
     repo_url: str = Field(..., description="GitHub repository URL or owner/repo")
     feature_files: List[FeatureFile]
     branch: str = "test/auto-generated"
-    base_path: str = "tests/features"
+    base_path: str = "Include/features"
     create_pr: bool = True
 
 
@@ -526,6 +526,8 @@ async def generate_test_scenarios_stream(
                 model=BEDROCK_MODEL_ID,
                 temperature=0,
                 max_tokens=16000,
+                user_id=current_user["id"],
+                token_source="test_scenarios_stream",
             )
             stream_succeeded = True
         except Exception as e:

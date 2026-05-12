@@ -721,7 +721,10 @@ def read_docx(file_content):
     return "\n".join([p.text for p in doc.paragraphs])
 
 def read_pdf(file_content):
-    from PyPDF2 import PdfReader
+    # Use `pypdf` (the modern fork) — it's what requirements.txt installs.
+    # Importing `PyPDF2` instead would ImportError at runtime since that
+    # package is not in the deployed image.
+    from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(file_content))
     return "\n".join([page.extract_text() or "" for page in reader.pages])
 

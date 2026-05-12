@@ -53,12 +53,67 @@ class GitHubService:
             )
         return match.group(1), match.group(2)
 
-    def _get_or_create_branch(self, owner: str, repo: str, branch: str, base_branch: str = "main") -> str:
+    def _get_repo_info(self, owner: str, repo: str) -> Optional[Dict]:
+        """Return the repo info dict, or None if the repo doesn't exist."""
+        resp = requests.get(
+            f"{self.base_url}/repos/{owner}/{repo}",
+            headers=self.headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json()
+        return None
+
+    def _bootstrap_empty_repo(self, owner: str, repo: str, default_branch: str) -> str:
         """
-        Ensure target branch exists. If not, create it from base_branch.
-        Returns the latest commit SHA of the branch.
+        Create the FIRST commit in an empty repo by PUTting a README on the
+        repo's default branch. GitHub creates the initial commit + branch
+        automatically when you PUT a file to an empty repo (only if the
+        target branch equals the repo's configured default branch).
+
+        Returns the SHA of the resulting first commit.
         """
-        # Try to get the branch
+        readme_path = "README.md"
+        readme_body = (
+            f"# {repo}\n\n"
+            "Initial commit created automatically by the SDLC test-generation "
+            "service so that auto-generated feature files have a base branch "
+            "to commit to.\n"
+        )
+        resp = requests.put(
+            f"{self.base_url}/repos/{owner}/{repo}/contents/{readme_path}",
+            headers=self.headers,
+            json={
+                "message": "chore: initial commit (auto)",
+                "content": base64.b64encode(readme_body.encode("utf-8")).decode("ascii"),
+                "branch": default_branch,
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        first_sha = resp.json()["commit"]["sha"]
+        logger.info(
+            f"Bootstrapped empty repo {owner}/{repo}: initial commit "
+            f"{first_sha[:8]} on '{default_branch}'."
+        )
+        return first_sha
+
+    def _get_or_create_branch(self, owner: str, repo: str, branch: str, base_branch: str = "main") -> Optional[str]:
+        """
+        Ensure target branch exists. Returns the latest commit SHA on the
+        branch, or None if the repo was empty and the target branch IS the
+        repo's default branch (in that case the caller's next PUT will
+        create the initial commit automatically).
+
+        Handles three cases:
+          1. Target branch exists                            → return its SHA
+          2. Target missing, some base branch exists         → create target from base
+          3. Repo is completely empty (no branches at all)   → auto-bootstrap
+             a. If target == default_branch: return None (PUT will init the repo)
+             b. If target != default_branch: PUT a README on default branch to
+                create the initial commit, then create target from there
+        """
+        # 1. Try target branch
         resp = requests.get(
             f"{self.base_url}/repos/{owner}/{repo}/branches/{branch}",
             headers=self.headers,
@@ -67,24 +122,54 @@ class GitHubService:
         if resp.status_code == 200:
             return resp.json()["commit"]["sha"]
 
-        # Branch doesn't exist — create from base
-        base_resp = requests.get(
-            f"{self.base_url}/repos/{owner}/{repo}/branches/{base_branch}",
-            headers=self.headers,
-            timeout=10,
-        )
-        if base_resp.status_code != 200:
-            # Try 'master' as fallback
+        # 2. Target missing — try every plausible base
+        for candidate in (base_branch, "main", "master"):
             base_resp = requests.get(
-                f"{self.base_url}/repos/{owner}/{repo}/branches/master",
+                f"{self.base_url}/repos/{owner}/{repo}/branches/{candidate}",
                 headers=self.headers,
                 timeout=10,
             )
-            base_resp.raise_for_status()
+            if base_resp.status_code == 200:
+                base_sha = base_resp.json()["commit"]["sha"]
+                create_resp = requests.post(
+                    f"{self.base_url}/repos/{owner}/{repo}/git/refs",
+                    headers=self.headers,
+                    json={"ref": f"refs/heads/{branch}", "sha": base_sha},
+                    timeout=10,
+                )
+                create_resp.raise_for_status()
+                logger.info(
+                    f"Created branch '{branch}' from {candidate} @ {base_sha[:8]}"
+                )
+                return base_sha
 
-        base_sha = base_resp.json()["commit"]["sha"]
+        # 3. No branches exist at all. Repo is empty — bootstrap it.
+        info = self._get_repo_info(owner, repo)
+        if info is None:
+            # Repo doesn't exist or token has no access. Surface a clearer error.
+            raise RuntimeError(
+                f"Repository {owner}/{repo} not found or inaccessible. "
+                "Check the URL and that the PAT has 'repo' scope."
+            )
 
-        # Create the ref
+        default_branch = info.get("default_branch") or "main"
+
+        if branch == default_branch:
+            # Target IS the default branch. The caller's PUT will create the
+            # initial commit on it. Nothing to do here.
+            logger.info(
+                f"Repo {owner}/{repo} is empty. Target branch '{branch}' is the "
+                f"default — caller's PUT will create the initial commit."
+            )
+            return None
+
+        # Target is something other than the default (e.g. test/auto-generated).
+        # We need a commit on the default branch to branch from. Create one.
+        logger.info(
+            f"Repo {owner}/{repo} is empty. Bootstrapping default branch "
+            f"'{default_branch}', then creating target branch '{branch}'."
+        )
+        base_sha = self._bootstrap_empty_repo(owner, repo, default_branch)
         create_resp = requests.post(
             f"{self.base_url}/repos/{owner}/{repo}/git/refs",
             headers=self.headers,
@@ -92,7 +177,9 @@ class GitHubService:
             timeout=10,
         )
         create_resp.raise_for_status()
-        logger.info(f"Created branch '{branch}' from SHA {base_sha[:8]}")
+        logger.info(
+            f"Created target branch '{branch}' from '{default_branch}' @ {base_sha[:8]}"
+        )
         return base_sha
 
     def _create_or_update_file(
@@ -126,7 +213,7 @@ class GitHubService:
         repo_url: str,
         feature_files: List[Dict],
         branch: str = "test/auto-generated",
-        base_path: str = "tests/features",
+        base_path: str = "Include/features",
         create_pr: bool = True,
     ) -> Dict:
         """
@@ -136,7 +223,12 @@ class GitHubService:
             repo_url: GitHub repo URL or owner/repo string
             feature_files: List of dicts with 'filename' and 'content' keys
             branch: Target branch name
-            base_path: Directory path in repo for feature files
+            base_path: Directory path in repo for feature files.
+                       Defaults to `Include/features` so files land in a
+                       Katalon-recognised location — Katalon Studio's BDD
+                       Cucumber plugin and the Katalon AI Assistant's
+                       "Select files to attach" dialog both look there.
+                       Override only if pushing to a non-Katalon project.
             create_pr: Whether to create a PR after pushing
 
         Returns:
