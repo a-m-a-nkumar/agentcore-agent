@@ -18,4 +18,10 @@ mcp>=1.0.0
 httpx>=0.27.0
 langchain-text-splitters>=0.3.0
 tiktoken>=0.7.0
-checkov==3.2.526
+
+# Terraform security scanning. NOT included here because checkov 3.2.526
+# pins boto3==1.35.49, which conflicts with bedrock-agentcore>=1.1.1 (needs
+# boto3>=1.40.52). Install separately in environments that need it:
+#   pip install -r requirements-terraform.txt
+# The terraform_generator router gracefully reports "checkov_unavailable"
+# when the import fails (see services/checkov_service.py:120-128).

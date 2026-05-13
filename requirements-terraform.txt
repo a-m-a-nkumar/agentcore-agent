@@ -1,0 +1,22 @@
+# Optional dependency for Terraform security scanning via the
+# /api/terraform/* endpoints in routers/terraform_generator.py.
+#
+# Kept out of the main requirements.txt because checkov 3.2.526 pins
+# boto3==1.35.49 which conflicts with bedrock-agentcore>=1.1.1's
+# requirement of boto3>=1.40.52. Installing both via the same resolver
+# pass fails with ResolutionImpossible.
+#
+# How to install ON TOP of requirements.txt:
+#
+#   pip install -r requirements.txt
+#   pip install --no-deps -r requirements-terraform.txt
+#
+# The --no-deps flag prevents pip from re-resolving checkov's pinned
+# boto3 against the already-installed newer version. checkov works fine
+# at runtime with the newer boto3 in practice — the pin is overly
+# conservative.
+#
+# In environments that DON'T install this file, the terraform scanning
+# endpoints return {"checkov_available": false} and the rest of the app
+# keeps working (the import in services/checkov_service.py is guarded).
+checkov==3.2.526
