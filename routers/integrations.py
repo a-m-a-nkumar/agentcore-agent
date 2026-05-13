@@ -351,6 +351,63 @@ def list_confluence_pages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/confluence/pages-by-label")
+def list_confluence_pages_by_label(
+    space_key: str,
+    label: str = "code-summary",
+    limit: int = 50,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List Confluence pages in a space tagged with a label (newest first).
+    Used by the BRD Sync page to enumerate published code summaries.
+    """
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first.",
+        )
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        # Prefer the content tree under the "Code Summary" parent page (instant after publish);
+        # fall back to CQL search only when no anchor parent exists.
+        parent = confluence_service.find_page_by_title(space_key, "Code Summary")
+        if parent and parent.get("id"):
+            raw = confluence_service.list_children_with_label(
+                parent_id=parent["id"], label=label, limit=limit
+            )
+        else:
+            raw = confluence_service.search_pages_by_label(
+                space_key=space_key, label=label, limit=limit
+            )
+        results = []
+        for p in raw:
+            history = p.get("history", {}) or {}
+            version = p.get("version", {}) or {}
+            labels = [
+                lbl.get("name") for lbl in (p.get("metadata", {}).get("labels", {}) or {}).get("results", [])
+                if lbl.get("name")
+            ]
+            results.append({
+                "page_id": p.get("id"),
+                "title": p.get("title"),
+                "web_url": f"{confluence_service.base_url}{p.get('_links', {}).get('webui', '')}",
+                "created": history.get("createdDate"),
+                "last_modified": version.get("when"),
+                "version": version.get("number", 1),
+                "labels": labels,
+            })
+        return {"results": results, "label": label, "space_key": space_key}
+    except Exception as e:
+        logger.error(f"Error listing pages by label '{label}' in space '{space_key}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/confluence/pages/{page_id}")
 def get_confluence_page(
     page_id: str,

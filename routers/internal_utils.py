@@ -18,8 +18,12 @@ logger = logging.getLogger(__name__)
 # API KEY VALIDATION
 # ============================================
 
-def validate_api_key(x_api_key: str) -> str:
-    """Validate API key and return associated project_id."""
+def validate_api_key(x_api_key: str):
+    """
+    Validate API key. Supports two INTERNAL_API_KEYS shapes:
+      - JSON array: ["dev-key", "other-key"]  → returns None (project_id comes from request body)
+      - JSON dict:  {"dev-key": "project-uuid"} → returns the mapped project_id (legacy)
+    """
     internal_keys_str = os.environ.get("INTERNAL_API_KEYS", "{}")
     try:
         valid_keys = json.loads(internal_keys_str)
@@ -27,9 +31,14 @@ def validate_api_key(x_api_key: str) -> str:
         logger.error("Failed to parse INTERNAL_API_KEYS from env")
         valid_keys = {}
 
+    if isinstance(valid_keys, list):
+        if x_api_key not in valid_keys:
+            raise HTTPException(status_code=401, detail="Invalid API Key")
+        return None
+
     if x_api_key not in valid_keys:
         raise HTTPException(status_code=401, detail="Invalid API Key")
-    return valid_keys[x_api_key]  # returns project_id
+    return valid_keys[x_api_key]
 
 
 # ============================================

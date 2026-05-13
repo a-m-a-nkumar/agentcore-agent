@@ -23,11 +23,11 @@ BUSINESS_GROUP_OID = "be88c38e-8a45-4026-ac85-f0f850b8cc03"
 TECH_GROUP_OID = "670e52fc-59cc-4a13-b89c-c91367c7060c"
 
 GROUP_MODULE_MAP = {
-    BUSINESS_GROUP_OID: ["brd", "confluence", "jira", "figma"],
-    TECH_GROUP_OID: ["design", "figma", "pair-programming", "testing", "confluence", "jira", "harness"],
+    BUSINESS_GROUP_OID: ["brd", "confluence", "jira", "figma", "brd-sync", "pr-sync"],
+    TECH_GROUP_OID: ["design", "figma", "pair-programming", "testing", "confluence", "jira", "harness", "brd-sync", "pr-sync"],
 }
 
-ALL_MODULES = {"brd", "confluence", "jira", "design", "figma", "pair-programming", "testing", "harness"}
+ALL_MODULES = {"brd", "confluence", "jira", "design", "figma", "pair-programming", "testing", "harness", "brd-sync", "pr-sync"}
 
 
 def extract_user_groups(decoded_token: dict) -> List[str]:

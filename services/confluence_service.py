@@ -429,9 +429,238 @@ class ConfluenceService:
             
             logger.info(f"Fetched Confluence page: {result['title']} (ID: {result['id']})")
             return result
-            
+
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Confluence page content: {e}")
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Response: {e.response.text}")
             raise Exception(f"Failed to fetch Confluence page: {str(e)}")
+
+    # ------------------------------------------------------------------
+    # Code Summary helpers
+    # ------------------------------------------------------------------
+
+    def apply_label(self, page_id: str, label: str) -> bool:
+        """
+        Attach a label to a Confluence page. Returns True on success.
+        Cloud REST uses POST /rest/api/content/{id}/label with a list payload.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/content/{page_id}/label"
+            payload = [{"prefix": "global", "name": label}]
+            response = requests.post(url, json=payload, headers=self.headers, auth=self.auth, timeout=30)
+            response.raise_for_status()
+            logger.info(f"Applied label '{label}' to page {page_id}")
+            return True
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error applying label '{label}' to page {page_id}: {e}")
+            return False
+
+    def search_pages_by_label(self, space_key: str, label: str, limit: int = 50) -> List[Dict]:
+        """
+        Return pages in a space tagged with a label, newest first.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/content/search"
+            cql = f'space = "{space_key}" AND label = "{label}" AND type = page ORDER BY created DESC'
+            all_results: List[Dict] = []
+            start = 0
+            page_size = min(limit, 50)
+            while len(all_results) < limit:
+                params = {
+                    "cql": cql,
+                    "limit": page_size,
+                    "start": start,
+                    "expand": "version,metadata.labels,history"
+                }
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                batch = data.get("results", [])
+                all_results.extend(batch)
+                if len(batch) < page_size:
+                    break
+                start += page_size
+            return all_results[:limit]
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error searching pages by label '{label}' in space {space_key}: {e}")
+            raise Exception(f"Failed to search Confluence pages by label: {str(e)}")
+
+    def list_children_with_label(self, parent_id: str, label: str, limit: int = 50) -> List[Dict]:
+        """
+        List child pages of `parent_id` that carry `label`, newest first.
+        Uses the content tree (instant), not CQL search (eventually consistent),
+        so freshly-published pages appear without indexing delay.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/content/{parent_id}/child/page"
+            all_children: List[Dict] = []
+            start = 0
+            page_size = 50
+            while True:
+                params = {
+                    "limit": page_size,
+                    "start": start,
+                    "expand": "version,metadata.labels,history",
+                }
+                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                batch = data.get("results", [])
+                all_children.extend(batch)
+                if len(batch) < page_size:
+                    break
+                start += page_size
+
+            filtered = [
+                p for p in all_children
+                if any(
+                    (lbl.get("name") == label)
+                    for lbl in (p.get("metadata", {}).get("labels", {}) or {}).get("results", [])
+                )
+            ]
+            filtered.sort(
+                key=lambda p: (p.get("history", {}) or {}).get("createdDate")
+                or (p.get("version", {}) or {}).get("when")
+                or "",
+                reverse=True,
+            )
+            return filtered[:limit]
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error listing children of {parent_id} with label '{label}': {e}")
+            raise Exception(f"Failed to list child pages by label: {str(e)}")
+
+    def find_or_create_page(self, space_key: str, title: str, default_content: str = "") -> Dict:
+        """
+        Find a page by exact title in a space; if missing, create at space root.
+        Used to ensure a 'Code Summary' parent page exists.
+        """
+        existing = self.find_page_by_title(space_key, title)
+        if existing:
+            return {
+                "id": existing.get("id"),
+                "title": existing.get("title"),
+                "web_url": f"{self.base_url}{existing.get('_links', {}).get('webui', '')}",
+                "created": False,
+            }
+        body = default_content or (
+            "<p>This page collects Code Summaries published from the IDE via the "
+            "<strong>code-summary</strong> MCP. Each child page is one summary of the "
+            "current state of the codebase at a given commit.</p>"
+        )
+        created = self.create_page(space_key, title, body)
+        created["created"] = True
+        return created
+
+    def markdown_to_storage(self, markdown: str) -> str:
+        """
+        Convert a markdown subset to Confluence storage format.
+
+        Supported: ATX headings (# / ## / ###), unordered lists (- / *),
+        **bold**, inline `code`, ```fenced code blocks```, blank-line paragraphs.
+        Anything else is escaped and emitted as paragraph text — good enough for
+        the locked-shape Code Summary template.
+        """
+        import re as _re
+
+        lines = markdown.split("\n")
+        out: List[str] = []
+        i = 0
+        in_list = False
+
+        def close_list():
+            nonlocal in_list
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+
+        def inline(text: str) -> str:
+            escaped = html.escape(text)
+            escaped = _re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+            escaped = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+            return escaped
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            if stripped.startswith("```"):
+                lang = stripped[3:].strip()
+                close_list()
+                code_lines: List[str] = []
+                i += 1
+                while i < len(lines) and not lines[i].strip().startswith("```"):
+                    code_lines.append(lines[i])
+                    i += 1
+                code_text = "\n".join(code_lines)
+                lang_param = (
+                    f'<ac:parameter ac:name="language">{html.escape(lang)}</ac:parameter>'
+                    if lang else ""
+                )
+                out.append(
+                    '<ac:structured-macro ac:name="code">'
+                    f'{lang_param}'
+                    f'<ac:plain-text-body><![CDATA[{code_text}]]></ac:plain-text-body>'
+                    '</ac:structured-macro>'
+                )
+                i += 1
+                continue
+
+            m = _re.match(r"^(#{1,3})\s+(.*)$", stripped)
+            if m:
+                close_list()
+                level = len(m.group(1))
+                out.append(f"<h{level}>{inline(m.group(2))}</h{level}>")
+                i += 1
+                continue
+
+            if _re.match(r"^[-*]\s+", stripped):
+                if not in_list:
+                    out.append("<ul>")
+                    in_list = True
+                content = _re.sub(r"^[-*]\s+", "", stripped)
+                out.append(f"<li>{inline(content)}</li>")
+                i += 1
+                continue
+
+            if not stripped:
+                close_list()
+                i += 1
+                continue
+
+            close_list()
+            para_lines = [line]
+            i += 1
+            while i < len(lines):
+                nxt = lines[i].strip()
+                if not nxt:
+                    break
+                if (_re.match(r"^(#{1,3})\s+", nxt) or _re.match(r"^[-*]\s+", nxt)
+                        or nxt.startswith("```")):
+                    break
+                para_lines.append(lines[i])
+                i += 1
+            paragraph = inline("\n".join(para_lines).strip()).replace("\n", "<br/>")
+            out.append(f"<p>{paragraph}</p>")
+
+        close_list()
+        return "".join(out)
+
+    def build_code_summary_info_panel(self, project_id: str, commit_sha: str, scope: str) -> str:
+        """
+        Return a Confluence 'info' panel macro to prepend to a code summary page,
+        so anyone landing on the page out of context understands what it is.
+        """
+        body = (
+            f"<p><strong>Auto-generated code summary.</strong> "
+            f"Project: <code>{html.escape(project_id)}</code> &middot; "
+            f"Scope: <code>{html.escape(scope)}</code> &middot; "
+            f"Commit: <code>{html.escape(commit_sha)}</code></p>"
+            "<p>Published from the IDE via the <strong>code-summary</strong> MCP. "
+            "Source of truth for what the code currently does; do not edit by hand.</p>"
+        )
+        return (
+            '<ac:structured-macro ac:name="info">'
+            f'<ac:rich-text-body>{body}</ac:rich-text-body>'
+            '</ac:structured-macro>'
+        )
