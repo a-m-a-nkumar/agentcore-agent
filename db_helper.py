@@ -1312,6 +1312,79 @@ def get_user_atlassian_credentials(user_id: str) -> Optional[Dict[str, Any]]:
         release_db_connection(conn)
 
 
+def update_user_lucid_credentials(user_id: str, api_key: str) -> bool:
+    """Encrypt the user's Lucid REST API key with KMS then persist to DB.
+
+    Mirrors update_user_atlassian_credentials. The api_key is stored
+    KMS-encrypted (kms:<base64> prefix) by _encrypt_token; if KMS_KEY_ARN
+    isn't set the helper falls back to plaintext storage for dev with a
+    warning logged.
+    """
+    encrypted_key = _encrypt_token(api_key)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET lucid_api_key   = %s,
+                    lucid_linked_at = NOW()
+                WHERE id = %s
+            """, (encrypted_key, user_id))
+            conn.commit()
+            logger.info(f"[LUCID] Credentials updated (KMS-encrypted) for user: {user_id}")
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"[LUCID] Error updating credentials for user {user_id}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_lucid_credentials(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve Lucid credentials from DB and decrypt the API key.
+
+    Returns None if the user has no api_key on file (never linked, or
+    unlinked). Otherwise returns {"lucid_api_key": "...", "lucid_linked_at": ...}.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT lucid_api_key, lucid_linked_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            if not result:
+                return None
+            creds = dict(result)
+            if not creds.get("lucid_api_key"):
+                return None
+            creds["lucid_api_key"] = _decrypt_token(creds["lucid_api_key"])
+            return creds
+    finally:
+        release_db_connection(conn)
+
+
+def clear_user_lucid_credentials(user_id: str) -> bool:
+    """Unlink: clear the user's Lucid api_key and linked_at."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET lucid_api_key   = NULL,
+                    lucid_linked_at = NULL
+                WHERE id = %s
+            """, (user_id,))
+            conn.commit()
+            logger.info(f"[LUCID] Credentials cleared for user: {user_id}")
+            return cursor.rowcount > 0
+    finally:
+        release_db_connection(conn)
+
+
 def update_user_figma_credentials(user_id: str, pat: str, team_id: str) -> bool:
     """Save Figma PAT and Team ID for a user."""
     conn = get_db_connection()
@@ -1349,39 +1422,56 @@ def get_user_figma_credentials(user_id: str):
 _VALID_ACCESS_ROLES = frozenset({"BOTH", "TECH", "BUSINESS", "NONE"})
 
 
-def update_user_access_role(user_id: str, access_role: str) -> None:
-    """Update users.access_role for the given user_id.
+def update_user_access_role(user_id: str, access_role: str) -> bool:
+    """Upsert users.access_role for the given user_id.
 
-    Acceptable roles: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. The UPDATE is a no-op
-    when the stored value already matches (cheap on repeat calls). Silently
-    skips on missing user_id or invalid role. Never raises — auth flow must
-    not break on a tracking write.
+    Returns True iff the DB now contains the requested access_role for this
+    user — caller uses the return value to decide whether to update the
+    per-worker `_LAST_ACCESS_ROLE_CACHE`. Returning False on failure prevents
+    the cache from claiming a value the DB doesn't actually hold (which would
+    short-circuit retries on subsequent requests and leave the row stuck).
+
+    Acceptable roles: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. Uses INSERT ... ON
+    CONFLICT so the role is recorded even when the row doesn't yet exist —
+    `get_current_user` runs this BEFORE the route handler's
+    `create_or_update_user` call, so on a brand-new user's very first
+    request the target row hasn't been INSERTed yet. The INSERT branch fails
+    in that case because `email` is NOT NULL; this function returns False,
+    cache stays empty, and the next request (after `create_or_update_user`
+    has populated the row) retries the UPSERT successfully.
+
+    The ON CONFLICT clause uses `IS DISTINCT FROM` so unchanged values are a
+    no-op write. Silently skips on missing user_id or invalid role; never
+    raises — auth flow must not break on a tracking write.
     """
     if not user_id:
-        return
+        return False
     if access_role not in _VALID_ACCESS_ROLES:
         logger.warning(
             f"[access_role] Invalid role '{access_role}' for user {user_id}; skipping"
         )
-        return
+        return False
     try:
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
                     """
-                    UPDATE users
-                       SET access_role = %s
-                     WHERE id = %s
-                       AND (access_role IS NULL OR access_role <> %s)
+                    INSERT INTO users (id, access_role)
+                    VALUES (%s, %s)
+                    ON CONFLICT (id) DO UPDATE
+                       SET access_role = EXCLUDED.access_role
+                     WHERE users.access_role IS DISTINCT FROM EXCLUDED.access_role
                     """,
-                    (access_role, user_id, access_role),
+                    (user_id, access_role),
                 )
                 conn.commit()
+                return True
         finally:
             release_db_connection(conn)
     except Exception as e:
         logger.warning(f"[access_role] Failed to update for user {user_id}: {e}")
+        return False
 
 
 def increment_user_token_usage(user_id: str, tokens: int) -> None:

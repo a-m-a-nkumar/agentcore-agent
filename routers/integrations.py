@@ -13,12 +13,22 @@ from auth import verify_azure_token
 from db_helper import (
     update_user_atlassian_credentials,
     get_user_atlassian_credentials,
+    update_user_lucid_credentials,
+    get_user_lucid_credentials,
+    clear_user_lucid_credentials,
     create_or_update_user,
     get_project
 )
 from services.jira_service import JiraService
 from services.confluence_service import ConfluenceService
 from services.bitbucket_service import BitbucketService
+from services.lucid_api_service import (
+    LucidAPIService,
+    InvalidLucidKeyError,
+    LucidNotAccessibleError,
+    LucidUpstreamError,
+    LucidError,
+)
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 logger = logging.getLogger(__name__)
@@ -251,6 +261,114 @@ def get_atlassian_status(current_user: dict = Depends(get_current_user)):
         }
 
     return {"linked": False, "token_expired": False}
+
+
+# ============================================================================
+# Lucid REST API key — personal API token, KMS-encrypted at rest
+# ============================================================================
+# Mirrors the Atlassian PAT pattern (POST /link, GET /status, DELETE /unlink).
+# Used by routers/design.py endpoints that fetch / import Lucid diagrams into
+# a session's diagram slot.
+
+class LinkLucidRequest(BaseModel):
+    api_key: str = Field(..., description="Lucid REST API key (starts with 'key-...')")
+
+
+@router.post("/lucid/link")
+def link_lucid_account(
+    request: LinkLucidRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Validate the user's Lucid REST API key against /users/me, then save
+    it KMS-encrypted. Returns 200 on success.
+
+    The validation step protects against typos / wrong-region keys (a US
+    key against the EU base URL or vice versa would 401 here).
+    """
+    api_key = (request.api_key or "").strip()
+    if not api_key:
+        raise HTTPException(status_code=400, detail="api_key is required")
+
+    try:
+        lucid = LucidAPIService(api_key)
+        # Validates the key by exercising the auth path against /documents.
+        # Doesn't return identity info (Lucid REST has no /users/me); the
+        # purpose here is binary accept/reject of the key.
+        lucid.test_connection()
+    except InvalidLucidKeyError:
+        raise HTTPException(
+            status_code=400,
+            detail="Lucid rejected this API key. Double-check you copied it correctly.",
+        )
+    except LucidUpstreamError as e:
+        raise HTTPException(status_code=502, detail=f"Lucid unreachable: {e}")
+    except LucidError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        update_user_lucid_credentials(
+            user_id=current_user["id"],
+            api_key=api_key,
+        )
+        # Clear any cached status row for this user.
+        _token_validation_cache.pop(f"lucid:{current_user['id']}", None)
+        return {
+            "status": "success",
+            "message": "Lucid account linked successfully",
+        }
+    except Exception as e:
+        logger.error(f"Error saving Lucid credentials: {e}")
+        raise HTTPException(status_code=500, detail="Failed to save Lucid API key")
+
+
+@router.get("/lucid/status")
+def get_lucid_status(current_user: dict = Depends(get_current_user)):
+    """Return whether the user has a stored Lucid API key and (cached) whether
+    it's still valid. Does not call Lucid on every hit — uses the same 5-min
+    cache pattern as /atlassian/status.
+
+    Response shape:
+        { linked: bool, key_valid: bool, linked_at: ISO-8601 | null }
+    """
+    creds = get_user_lucid_credentials(current_user["id"])
+    if not creds or not creds.get("lucid_api_key"):
+        return {"linked": False, "key_valid": False, "linked_at": None}
+
+    cache_key = f"lucid:{current_user['id']}"
+    cached = _token_validation_cache.get(cache_key)
+    if cached and datetime.utcnow() < cached[1]:
+        key_valid = cached[0]
+    else:
+        try:
+            LucidAPIService(creds["lucid_api_key"]).test_connection()
+            key_valid = True
+        except InvalidLucidKeyError:
+            key_valid = False
+        except Exception:
+            # Network errors / 5xx — assume key is still good, don't make user re-link
+            key_valid = True
+        _token_validation_cache[cache_key] = (
+            key_valid,
+            datetime.utcnow() + timedelta(minutes=TOKEN_CACHE_TTL_MINUTES),
+        )
+
+    return {
+        "linked": True,
+        "key_valid": key_valid,
+        "linked_at": (
+            creds["lucid_linked_at"].isoformat()
+            if creds.get("lucid_linked_at") else None
+        ),
+    }
+
+
+@router.delete("/lucid/unlink")
+def unlink_lucid_account(current_user: dict = Depends(get_current_user)):
+    """Drop the user's stored Lucid API key. Idempotent — succeeds even if
+    no key was on file."""
+    clear_user_lucid_credentials(current_user["id"])
+    _token_validation_cache.pop(f"lucid:{current_user['id']}", None)
+    return {"status": "success", "message": "Lucid account unlinked"}
 
 
 @router.get("/jira/projects")

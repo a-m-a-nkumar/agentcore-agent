@@ -611,20 +611,30 @@ def get_diagram(
     if kind not in ("logical", "security", "infrastructure"):
         raise HTTPException(status_code=400, detail="kind must be logical | security | infrastructure")
 
-    primary_key = f"sessions/{session_id}/diagram/{kind}.svg"
-    try:
-        obj = _s3().get_object(Bucket=S3_BUCKET_NAME, Key=primary_key)
-        return Response(content=obj["Body"].read(), media_type="image/svg+xml")
-    except Exception as e:
-        logger.info(f"[SAD] diagram {kind}.svg not found ({e!r}) for session {session_id}")
-        # 404 — don't substitute another type's SVG. The SAD generator's
-        # placeholder paragraph already covers skipped slots in the section
-        # JSON; the viewer should render that placeholder instead of a
-        # misleading image.
-        raise HTTPException(
-            status_code=404,
-            detail=f"No {kind} diagram saved for this session",
-        )
+    # PNG first (Lucid import + drawio rasterized export), SVG fallback
+    # (drawio embedded export). Sniff in order; serve with the right MIME so
+    # the browser doesn't guess.
+    candidates = [
+        (f"sessions/{session_id}/diagram/{kind}.png", "image/png"),
+        (f"sessions/{session_id}/diagram/{kind}.svg", "image/svg+xml"),
+    ]
+    for primary_key, content_type in candidates:
+        try:
+            obj = _s3().get_object(Bucket=S3_BUCKET_NAME, Key=primary_key)
+            return Response(content=obj["Body"].read(), media_type=content_type)
+        except Exception as e:
+            logger.debug(f"[SAD] diagram miss for {primary_key}: {e!r}")
+            continue
+
+    logger.info(f"[SAD] no diagram artifact for kind={kind} session={session_id}")
+    # 404 — don't substitute another type's image. The SAD generator's
+    # placeholder paragraph already covers skipped slots in the section
+    # JSON; the viewer should render that placeholder instead of a
+    # misleading image.
+    raise HTTPException(
+        status_code=404,
+        detail=f"No {kind} diagram saved for this session",
+    )
 
 
 @router.get("/{session_id}/facts")

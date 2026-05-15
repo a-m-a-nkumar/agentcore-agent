@@ -5,12 +5,35 @@ import logging
 import jwt
 import boto3
 import binascii
+from datetime import datetime, timedelta
 from fastapi import HTTPException, Depends, Header
 from jwt import PyJWKClient
 from functools import wraps
-from typing import Optional, List
+from typing import Dict, Optional, List, Tuple
 
 logger = logging.getLogger(__name__)
+
+
+class GraphResolutionError(Exception):
+    """Raised when the Microsoft Graph fallback (used for users with >200 group
+    memberships, where Azure AD truncates the `groups` claim) fails for any
+    reason — network blip, missing AZURE_CLIENT_SECRET, missing Graph permission,
+    Graph API outage, etc.
+
+    Critical: this is NOT a 'user has no access' signal. The caller MUST
+    distinguish it from an empty-groups return so a transient Graph hiccup
+    surfaces as 503 (retryable) instead of 403 (permanent AccessDenied).
+    Otherwise legitimate overage users would be told they have no access when
+    really we just couldn't check.
+    """
+
+
+# Per-worker cache for Graph-resolved groups. Keyed by Azure AD oid → (groups, expiry).
+# 5-minute TTL means a brief Graph outage doesn't lock anyone out — users whose
+# membership was resolved in the last 5 min keep working. Cap is the worker's
+# active user count, which is small (low memory cost).
+_GRAPH_GROUPS_CACHE: Dict[str, Tuple[List[str], datetime]] = {}
+_GRAPH_CACHE_TTL = timedelta(minutes=5)
 
 # Azure AD Configuration
 AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
@@ -43,11 +66,38 @@ def extract_user_groups(decoded_token: dict) -> List[str]:
 
 
 def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
+    """Resolve SDLC group membership via Microsoft Graph for users whose JWT
+    contains the `_claim_names.groups` overage marker (>200 group memberships).
+
+    Returns the list of SDLC group OIDs the user belongs to (may be empty if
+    they're not in any). Raises GraphResolutionError on transient failures
+    (network blip, missing creds, Graph outage) so the caller can distinguish
+    'user has no SDLC groups' from 'we couldn't check'.
+
+    Caches successful responses per-worker for 5 minutes so a brief Graph
+    outage doesn't lock anyone out. Empty results are cached too — a user
+    genuinely not in any SDLC group shouldn't trigger a Graph call on every
+    request.
+    """
     import requests as http_requests
+    user_oid = decoded_token.get("oid", "")
+    if not user_oid:
+        # No oid in the token is a fundamental token issue, not a Graph issue.
+        # Treat as "no groups" — the caller will 403.
+        return []
+
+    # Cache hit — bypass Graph entirely
+    cached = _GRAPH_GROUPS_CACHE.get(user_oid)
+    if cached and datetime.utcnow() < cached[1]:
+        return cached[0]
+
     client_secret = os.getenv("AZURE_CLIENT_SECRET", "")
     if not client_secret:
+        # Deployment config bug, not a user problem. Raise so the caller 503s
+        # the request — refuses to silently fail-open or wrongly fail-closed.
         logger.error("[RBAC] AZURE_CLIENT_SECRET not set — cannot resolve groups via Graph API.")
-        return []
+        raise GraphResolutionError("AZURE_CLIENT_SECRET not configured")
+
     try:
         token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
         token_resp = http_requests.post(token_url, data={
@@ -56,19 +106,21 @@ def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
         }, timeout=10)
         token_resp.raise_for_status()
         graph_token = token_resp.json()["access_token"]
-        user_oid = decoded_token.get("oid", "")
-        if not user_oid:
-            return []
         check_resp = http_requests.post(
             f"https://graph.microsoft.com/v1.0/users/{user_oid}/checkMemberGroups",
             headers={"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"},
             json={"groupIds": [BUSINESS_GROUP_OID, TECH_GROUP_OID]}, timeout=10,
         )
         check_resp.raise_for_status()
-        return check_resp.json().get("value", [])
+        groups = check_resp.json().get("value", [])
+        # Cache the result (including empty list — user genuinely not in SDLC groups)
+        _GRAPH_GROUPS_CACHE[user_oid] = (groups, datetime.utcnow() + _GRAPH_CACHE_TTL)
+        return groups
+    except GraphResolutionError:
+        raise
     except Exception as e:
-        logger.error(f"[RBAC] Graph API group resolution failed: {e}")
-        return []
+        logger.error(f"[RBAC] Graph API group resolution failed for {user_oid}: {e}")
+        raise GraphResolutionError(str(e)) from e
 
 
 def compute_access_role(groups: List[str]) -> str:
@@ -96,15 +148,44 @@ def compute_allowed_modules(groups: List[str]) -> List[str]:
 
 
 def require_module(module_name: str):
+    """FastAPI dependency for per-module RBAC.
+
+    Rule (uniform for every user): the caller must be in at least one SDLC
+    Azure AD group (BUSINESS or TECH) AND the requested module must be in the
+    set their groups grant. No exceptions, no admin override, no fail-open.
+
+    Three possible outcomes:
+      • 200 — user has the module → proceed
+      • 403 — user has no SDLC groups, or has groups but not for this module
+        → frontend renders AccessDenied
+      • 503 — Microsoft Graph fallback failed for this user (they have >200
+        groups and Graph couldn't be reached) → frontend retries
+
+    The 503 distinction prevents legitimate overage users from seeing the
+    permanent AccessDenied page when really we just couldn't check their
+    membership at that moment.
+    """
     async def _check(authorization: Optional[str] = Header(None)) -> dict:
         user_info = verify_azure_token(authorization)
-        groups = extract_user_groups(user_info)
+        try:
+            groups = extract_user_groups(user_info)
+        except GraphResolutionError:
+            raise HTTPException(
+                status_code=503,
+                detail="Permission check temporarily unavailable — please retry in a moment.",
+            )
         allowed = compute_allowed_modules(groups)
-        # If no RBAC groups found (groupMembershipClaims not enabled, token cached
-        # without groups, or user not in any SDLC group), allow access gracefully.
-        # Only block if user HAS groups but lacks the required module.
-        if allowed and module_name not in allowed:
-            raise HTTPException(status_code=403, detail=f"Access denied: '{module_name}' module")
+        if not allowed:
+            # User has no recognized SDLC group membership. Fail closed.
+            raise HTTPException(
+                status_code=403,
+                detail="No access to Velox modules — contact your administrator.",
+            )
+        if module_name not in allowed:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Access denied: '{module_name}' module.",
+            )
         user_id = user_info.get("oid") or user_info.get("sub", "")
         email = user_info.get("preferred_username") or user_info.get("email") or user_info.get("upn", "")
         name = user_info.get("name", email)

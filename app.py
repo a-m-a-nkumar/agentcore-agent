@@ -184,6 +184,7 @@ from auth import (
     compute_allowed_modules,
     compute_access_role,
     require_module,
+    GraphResolutionError,
 )
 
 # In-process cache: avoid hitting the DB on every authenticated request when
@@ -293,17 +294,32 @@ async def get_current_user(request: Request) -> dict:
 
     print(f"[AUTH] User ID: {user_id}, Email: {email}")
 
-    groups = extract_user_groups(user_info)
+    try:
+        groups = extract_user_groups(user_info)
+    except GraphResolutionError as e:
+        # Overage user (>200 groups) whose Graph fallback failed. Do NOT
+        # silently return empty modules — that would render AccessDenied
+        # (a lie). 503 lets the frontend retry; transient Graph hiccups
+        # then self-heal without anyone seeing the permanent denied page.
+        print(f"[AUTH] Graph resolution failed for {email}: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="Permission check temporarily unavailable — please retry in a moment.",
+        )
     allowed_modules = compute_allowed_modules(groups)
     access_role = compute_access_role(groups)
     print(f"[AUTH] Groups: {groups}, Allowed modules: {allowed_modules}, access_role: {access_role}")
 
     # Persist access_role to users.access_role (cached per worker so we only
     # write when the role actually changes for this user).
+    # The function returns False if the write didn't actually land (e.g.
+    # brand-new user whose row hasn't been INSERTed yet by
+    # create_or_update_user); in that case we deliberately DON'T cache, so the
+    # next request retries the UPSERT once the row exists.
     if user_id and _LAST_ACCESS_ROLE_CACHE.get(user_id) != access_role:
         try:
-            update_user_access_role(user_id, access_role)
-            _LAST_ACCESS_ROLE_CACHE[user_id] = access_role
+            if update_user_access_role(user_id, access_role):
+                _LAST_ACCESS_ROLE_CACHE[user_id] = access_role
         except Exception as e:
             print(f"[AUTH] Warning: Failed to persist access_role for {user_id}: {e}")
 

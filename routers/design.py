@@ -20,12 +20,21 @@ from auth import verify_azure_token, require_module
 from db_helper import (
     create_or_update_user,
     get_user_atlassian_credentials,
+    get_user_lucid_credentials,
     get_project,
     get_design_session,
     update_design_session,
+    update_diagram_slot,
 )
 from services.confluence_service import ConfluenceService
 from services.s3_service import s3_put_object, get_s3_client
+from services.lucid_api_service import (
+    LucidAPIService,
+    InvalidLucidKeyError,
+    LucidNotAccessibleError,
+    LucidUpstreamError,
+    LucidError,
+)
 from environment import chat_completion, chat_completion_stream, S3_BUCKET_NAME
 
 logger = logging.getLogger(__name__)
@@ -2040,4 +2049,261 @@ async def create_lucid_diagram_via_mcp(
         edit_url=result["edit_url"],
         document_id=result["document_id"],
         raw=result.get("raw", ""),
+    )
+
+
+# =============================================================================
+# Lucid REST API import flow (personal API key, NOT OAuth)
+# =============================================================================
+# The user pastes their personal Lucid REST API key on the Profile page; we
+# store it KMS-encrypted via db_helper.update_user_lucid_credentials. The
+# Architecture / Lucid section then lets them:
+#   1) generate the architecture prompt (existing /generate-lucid-prompt-stream)
+#   2) paste it into Lucid AI to create the diagram (manual step in lucid.app)
+#   3) GET /lucid/documents — list the user's recent Lucid docs, pre-filtered
+#      by the suggested title so the new doc is at the top
+#   4) POST /lucid/import — fetch the chosen doc as SVG, write to S3 at the
+#      existing diagram-slot path, update diagram_slots so SAD generation
+#      picks it up identically to a drawio diagram (no SAD-side changes).
+# The legacy OAuth /create-lucid-mcp flow above is kept as a one-click
+# "generate the diagram for me" shortcut and runs in parallel.
+
+
+def _get_lucid_service_for_user(user_id: str) -> LucidAPIService:
+    """Load the user's KMS-decrypted Lucid API key and instantiate a service.
+
+    Raises HTTPException(400) if the user hasn't linked an API key yet — the
+    UI is expected to surface this as "Link your Lucid API key in Profile."
+    """
+    creds = get_user_lucid_credentials(user_id)
+    if not creds or not creds.get("lucid_api_key"):
+        raise HTTPException(
+            status_code=400,
+            detail="No Lucid API key on file. Link your Lucid account in Profile first.",
+        )
+    return LucidAPIService(creds["lucid_api_key"])
+
+
+def _lucid_error_to_http(e: Exception, context: str) -> HTTPException:
+    """Translate typed Lucid errors into FastAPI HTTPExceptions with sensible
+    status codes. Anything unknown bubbles as 502."""
+    if isinstance(e, InvalidLucidKeyError):
+        return HTTPException(
+            status_code=401,
+            detail=("Lucid rejected the saved API key. "
+                    "Re-link your Lucid account in Profile."),
+        )
+    if isinstance(e, LucidNotAccessibleError):
+        return HTTPException(
+            status_code=404,
+            detail=f"Lucid document not found or not accessible ({context}).",
+        )
+    if isinstance(e, LucidUpstreamError):
+        return HTTPException(
+            status_code=502,
+            detail=f"Lucid is temporarily unavailable ({context}).",
+        )
+    if isinstance(e, LucidError):
+        return HTTPException(status_code=502, detail=str(e))
+    return HTTPException(status_code=502, detail=f"Unexpected Lucid error: {e}")
+
+
+class LucidDocumentItem(BaseModel):
+    document_id: str
+    title: str
+    last_modified: Optional[str] = None
+
+
+class ListLucidDocumentsResponse(BaseModel):
+    documents: List[LucidDocumentItem]
+    suggested_search: Optional[str] = None
+
+
+@router.get("/lucid/documents", response_model=ListLucidDocumentsResponse)
+async def list_lucid_documents(
+    search: Optional[str] = None,
+    suggest: Optional[str] = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """List the authenticated user's recent Lucid documents.
+
+    Query params:
+      - `search`: explicit user-typed search string. Takes precedence.
+      - `suggest`: server-suggested title (e.g. "Logical Architecture — <session>"),
+        used only when `search` is empty. The UI typically pre-fills this in
+        the search box so the user can override before fetching.
+
+    Returns up to 50 most-recently-modified docs across the user's
+    Lucidchart account.
+    """
+    effective_search = (search or "").strip() or (suggest or "").strip() or None
+    service = _get_lucid_service_for_user(current_user["id"])
+    try:
+        docs = service.list_documents(search=effective_search)
+    except Exception as e:
+        raise _lucid_error_to_http(e, "list_documents")
+
+    items = [
+        LucidDocumentItem(
+            document_id=d.get("documentId") or d.get("id") or "",
+            title=d.get("title") or "(untitled)",
+            last_modified=d.get("lastModified") or d.get("modified"),
+        )
+        for d in docs
+        if (d.get("documentId") or d.get("id"))
+    ]
+    return ListLucidDocumentsResponse(
+        documents=items,
+        suggested_search=effective_search,
+    )
+
+
+class ImportLucidRequest(BaseModel):
+    session_id: str
+    document_id: str
+    diagram_type: str  # "logical" | "infrastructure" | "security"
+    document_title: Optional[str] = None  # echoed back for client convenience
+
+
+class ImportLucidResponse(BaseModel):
+    artifact_key: str
+    diagram_type: str
+    preview_url: str  # frontend-accessible GET to stream the SVG back
+    saved_at: int
+    document_id: str
+    document_title: Optional[str] = None
+
+
+_LUCID_DIAGRAM_TYPES = {"logical", "infrastructure", "security"}
+
+
+@router.post("/lucid/import", response_model=ImportLucidResponse)
+async def import_lucid_document(
+    request: ImportLucidRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fetch a Lucid document as SVG, persist to S3 against the session's
+    diagram slot, and patch design_sessions.diagram_slots so the SAD
+    generator's existing per-section diagram block emits this artifact.
+
+    This endpoint does NOT modify lambda_sad_orchestrator or the SAD
+    schema — it produces an artifact at the exact same S3 path the drawio
+    save path uses, so SAD picks it up identically.
+    """
+    if request.diagram_type not in _LUCID_DIAGRAM_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"diagram_type must be one of {sorted(_LUCID_DIAGRAM_TYPES)}",
+        )
+
+    # Sanity-check the session exists and belongs to a project the user has
+    # access to. The existing get_design_session helper does the lookup;
+    # downstream require_module("design") covers RBAC at the route level.
+    session = get_design_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="design_session not found")
+
+    service = _get_lucid_service_for_user(current_user["id"])
+    try:
+        # PNG, not SVG — Lucid's sync image-export endpoint returns PNG and
+        # the older `?format=svg` query path returned JSON document structure
+        # (silently broken). The SAD generator's diagram block prefers PNG
+        # anyway, and `<img>` renders both formats identically in the browser.
+        png_bytes = service.export_document(request.document_id, fmt="png")
+    except Exception as e:
+        raise _lucid_error_to_http(e, f"export_document({request.document_id})")
+
+    # Same S3 key convention as the drawio save path so SAD's
+    # _diagram_block_for_section finds it without changes.
+    artifact_key = f"sessions/{request.session_id}/diagram/{request.diagram_type}.png"
+    try:
+        s3_put_object(
+            key=artifact_key,
+            body=png_bytes,
+            content_type="image/png",
+        )
+    except Exception as e:
+        logger.error(f"[LUCID IMPORT] S3 put failed for {artifact_key}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save diagram to S3: {e}")
+
+    saved_at = int(datetime.utcnow().timestamp())
+    try:
+        update_diagram_slot(
+            session_id=request.session_id,
+            diagram_type=request.diagram_type,
+            patch={
+                "status": "done",
+                "tool": "lucid",
+                "artifact_key": artifact_key,
+                "saved_at": saved_at,
+            },
+        )
+    except Exception as e:
+        logger.error(f"[LUCID IMPORT] slot update failed for {request.session_id}: {e}")
+        # The artifact is in S3 but the slot didn't update — caller can retry.
+        raise HTTPException(
+            status_code=500,
+            detail=("Diagram saved to S3 but failed to mark slot done. "
+                    "Retry the import."),
+        )
+
+    logger.info(
+        f"[LUCID IMPORT] user={current_user['id']} session={request.session_id} "
+        f"type={request.diagram_type} doc={request.document_id} → {artifact_key}"
+    )
+    return ImportLucidResponse(
+        artifact_key=artifact_key,
+        diagram_type=request.diagram_type,
+        preview_url=(
+            f"/api/design/lucid/preview/{request.session_id}/{request.diagram_type}"
+        ),
+        saved_at=saved_at,
+        document_id=request.document_id,
+        document_title=request.document_title,
+    )
+
+
+@router.get("/lucid/preview/{session_id}/{diagram_type}")
+async def preview_lucid_import(
+    session_id: str,
+    diagram_type: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Stream the saved diagram bytes back to the browser for the inline
+    preview pane.
+
+    Tries .png first (current Lucid import format — see export_document),
+    then falls back to .svg for legacy artifacts saved by older versions of
+    this endpoint before we switched off the broken `/contents?format=svg`
+    path. Content-Type is set from whichever file actually exists so the
+    browser renders correctly without sniffing.
+    """
+    if diagram_type not in _LUCID_DIAGRAM_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid diagram_type")
+
+    session = get_design_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="design_session not found")
+
+    s3 = get_s3_client()
+    candidates = [
+        (f"sessions/{session_id}/diagram/{diagram_type}.png", "image/png"),
+        (f"sessions/{session_id}/diagram/{diagram_type}.svg", "image/svg+xml"),
+    ]
+    for artifact_key, content_type in candidates:
+        try:
+            obj = s3.get_object(Bucket=S3_BUCKET_NAME, Key=artifact_key)
+            body_bytes = obj["Body"].read()
+            return StreamingResponse(
+                iter([body_bytes]),
+                media_type=content_type,
+                headers={"Cache-Control": "no-cache"},
+            )
+        except Exception as e:
+            logger.debug(f"[LUCID PREVIEW] miss for {artifact_key}: {e}")
+            continue
+
+    raise HTTPException(
+        status_code=404,
+        detail="No saved diagram at this slot. Import from Lucid first.",
     )
