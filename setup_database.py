@@ -2,17 +2,29 @@
 ╔══════════════════════════════════════════════════════════════╗
 ║          AgentCore — Full Database Setup Script              ║
 ║          Run this ONCE on a brand-new environment            ║
+║          (also safe to re-run — every step is idempotent)    ║
 ╚══════════════════════════════════════════════════════════════╝
 
-Runs all migrations in the correct order:
+Runs all migrations in the correct order. Every step is idempotent
+(IF NOT EXISTS clauses), so re-running on an env that already has some
+of these objects will only apply the gaps.
 
-  Step 1 → enable_pgvector.py           : Enable pgvector extension
-  Step 2 → setup_core_tables.py         : Create users, projects, analyst_sessions
-  Step 3 → add_vector_tables.py         : Create confluence_pages, jira_issues, document_embeddings + HNSW index
-  Step 4 → add_dedup_hash_index.py      : Upgrade dedup index to 4-column (content_hash included)
-  Step 5 → add_atlassian_credentials.py : Add Atlassian integration columns to users
-  Step 6 → add_brd_session_columns.py   : Add BRD session columns to projects
-  Step 7 → add_brd_feedback.py          : Create brd_feedback table
+  Step  1 → enable_pgvector.py                Enable pgvector extension
+  Step  2 → setup_core_tables.py              Create users, projects, analyst_sessions
+  Step  3 → add_token_usage_column.py         Add users.token_usage (per-user LLM token counter)
+  Step  4 → add_access_role_column.py         Add users.access_role (BOTH/TECH/BUSINESS/NONE)
+  Step  5 → add_user_module_activity_table.py Create user_module_activity (org-usage event log)
+  Step  6 → add_vector_tables.py              Create confluence_pages, jira_issues, document_embeddings + HNSW
+  Step  7 → add_dedup_hash_index.py           Upgrade dedup index to 4-column (content_hash)
+  Step  8 → add_fulltext_search.py            Add content_tsvector to document_embeddings
+  Step  9 → add_atlassian_credentials.py      Add Atlassian integration columns to users
+  Step 10 → add_figma_credentials.py          Add Figma credentials column to users
+  Step 11 → add_lucid_credentials.py          Add Lucid credentials columns to users
+  Step 12 → add_brd_session_columns.py        Add BRD session columns to projects
+  Step 13 → add_brd_feedback.py               Create brd_feedback table
+  Step 14 → add_artifact_lineage.py           Create artifact_lineage table
+  Step 15 → add_design_sessions.py            Create design_sessions table
+  Step 16 → add_design_diagram_slots.py       Add diagram_slots + authoring_tool to design_sessions
 
 Prerequisites:
   - PostgreSQL 13+ running and accessible
@@ -54,23 +66,41 @@ print("=" * 62)
 print()
 
 # ── Import all migration modules ──────────────────────────────────────────────
-from migrations.enable_pgvector import enable_pgvector as step_enable_pgvector
-from migrations.setup_core_tables import run as step_core_tables
-from migrations.add_vector_tables import run_migration as step_vector_tables
-from migrations.add_dedup_hash_index import run as step_dedup_index
-from migrations.add_atlassian_credentials import add_atlassian_columns as step_atlassian_credentials
-from migrations.add_brd_session_columns import run as step_brd_session_columns
-from migrations.add_brd_feedback import run as step_brd_feedback
+from migrations.enable_pgvector            import enable_pgvector       as step_enable_pgvector
+from migrations.setup_core_tables          import run                   as step_core_tables
+from migrations.add_token_usage_column     import run                   as step_token_usage
+from migrations.add_access_role_column     import run                   as step_access_role
+from migrations.add_user_module_activity_table import run               as step_user_module_activity
+from migrations.add_vector_tables          import run_migration         as step_vector_tables
+from migrations.add_dedup_hash_index       import run                   as step_dedup_index
+from migrations.add_fulltext_search        import run                   as step_fulltext_search
+from migrations.add_atlassian_credentials  import add_atlassian_columns as step_atlassian_credentials
+from migrations.add_figma_credentials      import run                   as step_figma_credentials
+from migrations.add_lucid_credentials      import add_lucid_columns     as step_lucid_credentials
+from migrations.add_brd_session_columns    import run                   as step_brd_session_columns
+from migrations.add_brd_feedback           import run                   as step_brd_feedback
+from migrations.add_artifact_lineage       import run                   as step_artifact_lineage
+from migrations.add_design_sessions        import run                   as step_design_sessions
+from migrations.add_design_diagram_slots   import run                   as step_design_diagram_slots
 
 
 STEPS = [
-    ("Step 1/7", "Enable pgvector extension",                    step_enable_pgvector),
-    ("Step 2/7", "Create core tables (users/projects/sessions)",  step_core_tables),
-    ("Step 3/7", "Create vector tables + HNSW index",            step_vector_tables),
-    ("Step 4/7", "Upgrade dedup index to 4-column composite",    step_dedup_index),
-    ("Step 5/7", "Add Atlassian integration columns",            step_atlassian_credentials),
-    ("Step 6/7", "Add BRD session columns to projects",          step_brd_session_columns),
-    ("Step 7/7", "Create brd_feedback table",                    step_brd_feedback),
+    ("Step  1/16", "Enable pgvector extension",                            step_enable_pgvector),
+    ("Step  2/16", "Create core tables (users / projects / analyst_sessions)", step_core_tables),
+    ("Step  3/16", "Add users.token_usage (LLM token counter)",            step_token_usage),
+    ("Step  4/16", "Add users.access_role (BOTH/TECH/BUSINESS/NONE)",      step_access_role),
+    ("Step  5/16", "Create user_module_activity (event log)",              step_user_module_activity),
+    ("Step  6/16", "Create vector tables + HNSW index",                    step_vector_tables),
+    ("Step  7/16", "Upgrade dedup index to 4-column composite",            step_dedup_index),
+    ("Step  8/16", "Add document_embeddings.content_tsvector (fulltext)",  step_fulltext_search),
+    ("Step  9/16", "Add Atlassian integration columns",                    step_atlassian_credentials),
+    ("Step 10/16", "Add Figma credentials column",                         step_figma_credentials),
+    ("Step 11/16", "Add Lucid credentials columns",                        step_lucid_credentials),
+    ("Step 12/16", "Add BRD session columns to projects",                  step_brd_session_columns),
+    ("Step 13/16", "Create brd_feedback table",                            step_brd_feedback),
+    ("Step 14/16", "Create artifact_lineage table",                        step_artifact_lineage),
+    ("Step 15/16", "Create design_sessions table",                         step_design_sessions),
+    ("Step 16/16", "Add diagram_slots + authoring_tool columns",           step_design_diagram_slots),
 ]
 
 passed = []
