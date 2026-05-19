@@ -135,9 +135,14 @@ async def sync_confluence_space(
         api_token=credentials['atlassian_api_token']
     )
    
-    # Fetch all pages (offload blocking HTTP call)
-    logger.info(f"Fetching pages from Confluence space {space_key}...")
-    pages = await asyncio.to_thread(confluence.get_space_pages, space_key, 1000)
+    # Fetch every page in the space — paginated, newest-first, descendants
+    # included. The legacy get_space_pages(space_key, 1000) made a single
+    # REST call (effective ceiling ~100, oldest-first) and never walked the
+    # child page tree, which is why users reported missing recent and
+    # nested pages. See ConfluenceService.get_all_pages_in_space for the
+    # exhaustive two-phase implementation.
+    logger.info(f"Fetching pages from Confluence space {space_key} (exhaustive, newest-first)...")
+    pages = await asyncio.to_thread(confluence.get_all_pages_in_space, space_key)
     logger.info(f"Found {len(pages)} pages in space {space_key}")
  
     synced_count = 0

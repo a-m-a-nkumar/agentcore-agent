@@ -54,9 +54,12 @@ def fetch_space(space_key: str, user_id: str, output_dir: str):
         api_token=creds['atlassian_api_token']
     )
 
-    # 3. Fetch all pages in space
-    print(f"\nFetching pages from space '{space_key}'...")
-    pages = confluence.get_space_pages(space_key, limit=1000)
+    # 3. Fetch every page in space — exhaustive (CQL enumeration + recursive
+    # child traversal, newest-first). The old get_space_pages(space_key, 1000)
+    # path was a single non-paginated call (~100-page ceiling, oldest-first,
+    # no descendant walk) and is why this dump previously missed many pages.
+    print(f"\nFetching pages from space '{space_key}' (exhaustive)...")
+    pages = confluence.get_all_pages_in_space(space_key)
 
     if not pages:
         print(f"No pages found in space '{space_key}'.")

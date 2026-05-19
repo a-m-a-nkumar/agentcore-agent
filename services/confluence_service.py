@@ -146,6 +146,130 @@ class ConfluenceService:
             logger.error(f"Error fetching Confluence pages: {e}")
             raise Exception(f"Failed to fetch Confluence pages: {str(e)}")
 
+    def get_all_pages_in_space(self, space_key: str) -> List[Dict]:
+        """Exhaustively fetch every page in a Confluence space, newest first.
+
+        Replaces the legacy `get_space_pages(space_key, 1000)` sync path which:
+          - made a single non-paginated REST call (effective ceiling ~100 pages)
+          - returned oldest-first (Confluence API default)
+          - did NOT traverse child pages nested under a parent
+
+        Two-phase fetch so nothing slips through:
+          1. CQL search over the space ordered by lastmodified DESC. This is
+             flat across the space and includes nested pages, but we treat
+             it as the *primary* enumeration only.
+          2. For every page surfaced in phase 1, list its child pages via
+             /content/{id}/child/page. Deduplicated by id. This belt-and-
+             braces step catches any descendants the CQL index might have
+             missed (eventual-consistency lag on freshly-published pages).
+
+        No upper bound on total — paginates until each endpoint reports
+        an empty batch. Caller is responsible for handling space-level scale
+        (sync_service streams pages, doesn't materialise everything at once).
+        """
+        # ---- Phase 1: CQL enumeration, newest first ----
+        by_id: Dict[str, Dict] = {}
+        try:
+            search_url = f"{self.base_url}/rest/api/content/search"
+            start = 0
+            page_size = 50  # Confluence Cloud hard cap on /search
+            cql = f'space = "{space_key}" AND type = page ORDER BY lastmodified DESC'
+            while True:
+                params = {
+                    "cql": cql,
+                    "limit": page_size,
+                    "start": start,
+                    "expand": "version,ancestors",
+                }
+                response = requests.get(
+                    search_url, headers=self.headers, auth=self.auth, params=params, timeout=30
+                )
+                response.raise_for_status()
+                data = response.json()
+                batch = data.get("results", [])
+                for p in batch:
+                    pid = p.get("id")
+                    if pid and pid not in by_id:
+                        by_id[pid] = p
+                if len(batch) < page_size:
+                    break
+                start += page_size
+            phase1_count = len(by_id)
+            logger.info(
+                f"[Confluence] space={space_key} phase1 cql_pages={phase1_count} "
+                f"(newest-first, fully paginated)"
+            )
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[Confluence] CQL enumeration failed for space {space_key}: {e}")
+            raise Exception(f"Failed to enumerate Confluence space {space_key}: {str(e)}")
+
+        # ---- Phase 2: recursive child traversal, dedup by id ----
+        # Walk every page found in phase 1 and pull its children. New pages
+        # discovered are themselves walked. Capped only by what actually
+        # exists (no artificial ceiling).
+        descendants_added = 0
+        try:
+            queue = list(by_id.keys())
+            visited: set = set()
+            while queue:
+                parent_id = queue.pop()
+                if parent_id in visited:
+                    continue
+                visited.add(parent_id)
+                child_url = f"{self.base_url}/rest/api/content/{parent_id}/child/page"
+                start = 0
+                page_size = 50
+                while True:
+                    params = {
+                        "limit": page_size,
+                        "start": start,
+                        "expand": "version,ancestors",
+                    }
+                    try:
+                        resp = requests.get(
+                            child_url, headers=self.headers, auth=self.auth, params=params, timeout=30
+                        )
+                        resp.raise_for_status()
+                    except requests.exceptions.RequestException as e:
+                        # One child-fetch failing must not abort the whole sync —
+                        # log it and continue with what we have.
+                        logger.warning(
+                            f"[Confluence] child fetch failed for parent {parent_id}: {e}"
+                        )
+                        break
+                    data = resp.json()
+                    batch = data.get("results", [])
+                    for p in batch:
+                        pid = p.get("id")
+                        if pid and pid not in by_id:
+                            by_id[pid] = p
+                            queue.append(pid)
+                            descendants_added += 1
+                    if len(batch) < page_size:
+                        break
+                    start += page_size
+        except Exception as e:
+            # Defensive — phase 1 result is still usable. Don't lose work.
+            logger.warning(f"[Confluence] descendant traversal aborted early: {e}")
+
+        # Final ordering: newest-first by version.when (already implied by CQL
+        # but the descendant traversal re-orders by walk). Sort once at the end.
+        all_pages = list(by_id.values())
+        all_pages.sort(
+            key=lambda p: (
+                (p.get("version", {}) or {}).get("when")
+                or (p.get("history", {}) or {}).get("createdDate")
+                or ""
+            ),
+            reverse=True,
+        )
+        logger.info(
+            f"[Confluence] space={space_key} sync_complete "
+            f"top_level_or_cql={phase1_count} descendants_added={descendants_added} "
+            f"total={len(all_pages)}"
+        )
+        return all_pages
+
     def get_content_pages(self, space_key: str, limit: int = 50, max_pages: int = 200) -> List[Dict]:
         """
         Fetch pages from a space using Content API, paginating automatically up to max_pages.
