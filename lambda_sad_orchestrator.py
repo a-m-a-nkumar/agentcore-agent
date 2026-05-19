@@ -994,8 +994,13 @@ def _do_ingest_doc(
         guess is too coarse: a doc usually has content for several sections.
         We still surface that guess in the response card as a UX hint
         ("Looks relevant to Section X").
-      • If a SAD already exists, set auto_regen=true so the frontend fires
-        regen automatically — the user doesn't have to ask.
+      • Always set auto_regen=true so the frontend fires generation
+        automatically. This is the same trigger for both first-time
+        generation (no SAD exists yet) and regeneration (SAD already
+        drafted) — the section workers handle both paths the same way.
+        The multi-doc batch path uses an `is_last` gate to ensure only
+        one generation fires per turn, even if the user pastes several
+        Confluence URLs or uploads multiple files at once.
     """
     filename = file_info.get("filename", "uploaded-doc")
     doc_id = file_info.get("doc_id")
@@ -1037,7 +1042,8 @@ def _do_ingest_doc(
 
     logger.info(
         f"[SAD] doc ingested: {filename} ({len(extracted_text)} chars, "
-        f"{'truncated' if truncated else 'whole'}); auto_regen={sad_exists}; "
+        f"{'truncated' if truncated else 'whole'}); "
+        f"auto_regen=True ({'regen' if sad_exists else 'first-gen'}); "
         f"suggested_sections={suggested_sections}"
     )
 
@@ -1050,7 +1056,10 @@ def _do_ingest_doc(
         # New: classifier-derived list of sections this doc most likely
         # contributes to. Frontend renders as "Looks relevant to Sections X, Y, Z".
         suggested_sections=suggested_sections,
-        auto_regen=sad_exists,
+        # Fire generation on every doc upload — whether this is the first
+        # SAD or a regeneration of an existing one. Multi-doc batches still
+        # only fire once thanks to the is_last gate in the caller above.
+        auto_regen=True,
     )
 
 
