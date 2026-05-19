@@ -5,6 +5,7 @@ and draw.io XML diagrams directly from Confluence page content.
 Calls Bedrock Claude directly — no guardrails, no BRD session required.
 """
 
+import asyncio
 import base64
 import json
 import os
@@ -2212,52 +2213,68 @@ async def import_lucid_document(
         raise HTTPException(status_code=404, detail="design_session not found")
 
     service = _get_lucid_service_for_user(current_user["id"])
-    try:
-        # PNG, not SVG — Lucid's sync image-export endpoint returns PNG and
-        # the older `?format=svg` query path returned JSON document structure
-        # (silently broken). The SAD generator's diagram block prefers PNG
-        # anyway, and `<img>` renders both formats identically in the browser.
-        png_bytes = service.export_document(request.document_id, fmt="png")
-    except Exception as e:
-        raise _lucid_error_to_http(e, f"export_document({request.document_id})")
 
-    # Same S3 key convention as the drawio save path so SAD's
-    # _diagram_block_for_section finds it without changes.
+    # Two independent Lucid round-trips for one import:
+    #   A. GET /documents/{id} with Accept: image/png    -> PNG bytes -> S3
+    #   B. GET /documents/{id}/contents                  -> JSON       -> S3
+    # Run them in parallel since neither depends on the other. Halves
+    # wall-clock latency on the user's "Fetch & Save" click (typically
+    # 2-3s -> 1-1.5s for a medium-size diagram).
+    #
+    # PNG fetch is REQUIRED (failure aborts the import); JSON fetch is
+    # best-effort (only used for SAD-generation LLM context — if it
+    # fails we log and continue, and the section worker just gets less
+    # context for this slot until the user re-imports).
     artifact_key = f"sessions/{request.session_id}/diagram/{request.diagram_type}.png"
-    try:
-        s3_put_object(
-            key=artifact_key,
-            body=png_bytes,
-            content_type="image/png",
-        )
-    except Exception as e:
-        logger.error(f"[LUCID IMPORT] S3 put failed for {artifact_key}: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to save diagram to S3: {e}")
-
-    # Also fetch + persist the structured document JSON so the SAD generator
-    # has text context for this diagram (same purpose drawio's mxGraph XML
-    # serves). Best-effort — if /contents fails the PNG import still
-    # succeeds; SAD generation just won't have Lucid-shape context for this
-    # section until the user re-imports.
     contents_key = f"sessions/{request.session_id}/diagram/{request.diagram_type}.lucid.json"
-    try:
-        lucid_doc = service.get_document_contents(request.document_id)
+
+    def _fetch_and_save_png() -> str:
+        png_bytes = service.export_document(request.document_id, fmt="png")
         s3_put_object(
-            key=contents_key,
-            body=json.dumps(lucid_doc).encode("utf-8"),
-            content_type="application/json",
+            key=artifact_key, body=png_bytes, content_type="image/png",
         )
-        logger.info(
-            f"[LUCID IMPORT] saved structured JSON to {contents_key} "
-            f"({len(lucid_doc.get('pages', []))} pages)"
+        return artifact_key
+
+    def _fetch_and_save_json() -> Optional[Dict[str, Any]]:
+        try:
+            doc = service.get_document_contents(request.document_id)
+            s3_put_object(
+                key=contents_key,
+                body=json.dumps(doc).encode("utf-8"),
+                content_type="application/json",
+            )
+            logger.info(
+                f"[LUCID IMPORT] saved structured JSON to {contents_key} "
+                f"({len(doc.get('pages', []))} pages)"
+            )
+            return doc
+        except Exception as e:
+            # Don't fail the import — the diagram is saved and renderable.
+            # Just log so we know LLM context will be missing for this slot.
+            logger.warning(
+                f"[LUCID IMPORT] couldn't save /contents JSON for "
+                f"{request.document_id}: {e}. PNG saved; SAD generator won't "
+                "have Lucid-shape context for this section."
+            )
+            return None
+
+    # asyncio.to_thread (3.9+) runs the sync function in the default
+    # threadpool. gather waits for BOTH to settle. PNG errors propagate
+    # via return_exceptions=False; JSON errors are swallowed inside
+    # _fetch_and_save_json so it never raises.
+    try:
+        _png_key, _lucid_doc = await asyncio.gather(
+            asyncio.to_thread(_fetch_and_save_png),
+            asyncio.to_thread(_fetch_and_save_json),
         )
     except Exception as e:
-        # Don't fail the import — the diagram is saved and renderable.
-        # Just log so we know LLM context will be missing for this slot.
-        logger.warning(
-            f"[LUCID IMPORT] couldn't save /contents JSON for {request.document_id}: {e}. "
-            "PNG saved; SAD generator won't have Lucid-shape context for this section."
-        )
+        # PNG fetch or S3 put failed. Translate Lucid-side errors to
+        # HTTP; everything else gets a 500 with the underlying message.
+        if isinstance(e, (InvalidLucidKeyError, LucidNotAccessibleError,
+                          LucidUpstreamError, LucidError)):
+            raise _lucid_error_to_http(e, f"export_document({request.document_id})")
+        logger.error(f"[LUCID IMPORT] PNG fetch/save failed for {artifact_key}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save diagram to S3: {e}")
 
     saved_at = int(datetime.utcnow().timestamp())
     try:
