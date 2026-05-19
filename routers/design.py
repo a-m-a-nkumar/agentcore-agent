@@ -2128,15 +2128,23 @@ async def list_lucid_documents(
     """List the authenticated user's recent Lucid documents.
 
     Query params:
-      - `search`: explicit user-typed search string. Takes precedence.
-      - `suggest`: server-suggested title (e.g. "Logical Architecture — <session>"),
-        used only when `search` is empty. The UI typically pre-fills this in
-        the search box so the user can override before fetching.
+      - `search`: explicit user-typed search string. Filters server-side
+        via Lucid's `keywords` field. When empty, returns all of the
+        user's docs (paginated, capped at 500).
+      - `suggest`: ignored as a filter — kept for backward-compat with the
+        frontend which uses this value purely as the search-box placeholder
+        text. Previously this was OR'd into `search` which silently hid any
+        document whose title didn't match the suggestion (e.g. a "Logical
+        Architecture" suggestion would hide a freshly-created "infra idp"
+        diagram even on an empty user search).
 
-    Returns up to 50 most-recently-modified docs across the user's
-    Lucidchart account.
+    Returns up to 500 docs across the user's Lucidchart + Lucidspark
+    documents, sorted by lastModified DESC. Pagination is handled
+    transparently in `LucidAPIService.list_documents`.
     """
-    effective_search = (search or "").strip() or (suggest or "").strip() or None
+    # IMPORTANT: do NOT fold `suggest` into the search filter — see docstring.
+    effective_search = (search or "").strip() or None
+    _ = suggest  # accepted but unused; param kept for API stability
     service = _get_lucid_service_for_user(current_user["id"])
     try:
         docs = service.list_documents(search=effective_search)
@@ -2225,6 +2233,31 @@ async def import_lucid_document(
     except Exception as e:
         logger.error(f"[LUCID IMPORT] S3 put failed for {artifact_key}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to save diagram to S3: {e}")
+
+    # Also fetch + persist the structured document JSON so the SAD generator
+    # has text context for this diagram (same purpose drawio's mxGraph XML
+    # serves). Best-effort — if /contents fails the PNG import still
+    # succeeds; SAD generation just won't have Lucid-shape context for this
+    # section until the user re-imports.
+    contents_key = f"sessions/{request.session_id}/diagram/{request.diagram_type}.lucid.json"
+    try:
+        lucid_doc = service.get_document_contents(request.document_id)
+        s3_put_object(
+            key=contents_key,
+            body=json.dumps(lucid_doc).encode("utf-8"),
+            content_type="application/json",
+        )
+        logger.info(
+            f"[LUCID IMPORT] saved structured JSON to {contents_key} "
+            f"({len(lucid_doc.get('pages', []))} pages)"
+        )
+    except Exception as e:
+        # Don't fail the import — the diagram is saved and renderable.
+        # Just log so we know LLM context will be missing for this slot.
+        logger.warning(
+            f"[LUCID IMPORT] couldn't save /contents JSON for {request.document_id}: {e}. "
+            "PNG saved; SAD generator won't have Lucid-shape context for this section."
+        )
 
     saved_at = int(datetime.utcnow().timestamp())
     try:

@@ -32,6 +32,14 @@ COPY prompts/ ./prompts/
 COPY migrations/ ./migrations/
 COPY database/ ./database/
 COPY utils/ ./utils/
+# One-shot DB setup scripts. Not invoked by CMD — kept in the image so
+# `docker exec` (or an ECS task with a different command) can run
+# `python setup_database.py` against a fresh environment's RDS (e.g.
+# the siriusai migration), instead of needing a separate jump box.
+# All steps are idempotent (CREATE/ALTER ... IF NOT EXISTS), so running
+# against an already-migrated DB is a no-op.
+COPY setup_database.py .
+COPY run_migrations.py .
 ENV PYTHONUNBUFFERED=1
 EXPOSE 8000
 CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8000"]

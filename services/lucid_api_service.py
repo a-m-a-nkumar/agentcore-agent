@@ -29,6 +29,7 @@ HTTPException with appropriate status codes in the FastAPI layer.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Dict, List, Optional
 
 import requests
@@ -37,7 +38,9 @@ logger = logging.getLogger(__name__)
 
 LUCID_BASE_URL = "https://api.lucid.co"
 LUCID_API_VERSION = "1"  # Lucid REST API version header value
-LUCID_DEFAULT_TIMEOUT = 15  # seconds
+LUCID_DEFAULT_TIMEOUT = 15      # seconds — metadata/search calls are fast
+LUCID_EXPORT_TIMEOUT = 60       # seconds — image render can take 5-20s on Lucid's side
+LUCID_EXPORT_MAX_RETRIES = 2    # one initial + 2 retries for transient failures
 
 
 class LucidError(Exception):
@@ -126,33 +129,48 @@ class LucidAPIService:
         return {"ok": True}
 
     def list_documents(self, search: Optional[str] = None,
-                       page_size: int = 50,
-                       product: str = "lucidchart") -> List[Dict]:
+                       page_size: int = 200,
+                       products: Optional[List[str]] = None,
+                       max_total: int = 500) -> List[Dict]:
         """POST /documents/search — list the authenticated user's docs.
 
         Lucid's REST API doesn't expose a paginated GET /documents
-        endpoint; document listing is done through the search resource.
+        endpoint; document listing is done through this search resource.
         Empty `keywords` returns the user's most recently-edited docs.
 
+        Pagination: Lucid returns a `cursor` field when more results are
+        available. We loop calling search with that cursor in subsequent
+        request bodies until exhausted (or until we hit `max_total`).
+
         Args:
-          search: optional keyword. Server-side filters titles and
-                  content. If empty, returns the most recent docs.
-          page_size: cap on returned items (single page).
-          product: defaults to lucidchart. Lucidspark whiteboards live
-                   under the same API key but are filtered out for v1 to
-                   keep the picker focused on architecture diagrams.
+          search: optional keyword. Server-side filters titles and content.
+                  If empty, returns recently-edited docs (subject to
+                  Lucid's search-index indexing delay of ~30s-several
+                  minutes for newly-created documents).
+          page_size: per-page cap. Lucid's documented max for this
+                     endpoint is 200; values higher are silently clamped.
+          products: list of product types to include. Default includes BOTH
+                    Lucidchart and Lucidspark because architecture
+                    diagrams created via Lucid AI sometimes land as Spark
+                    whiteboards. Pass ["lucidchart"] to restrict.
+          max_total: hard cap on returned documents to avoid huge payloads
+                     for accounts with thousands of docs.
 
         Returns a list of dicts shaped roughly like:
             { "documentId": "...", "title": "...",
               "lastModified": "ISO-8601", "product": "lucidchart", ... }
-        Pre-sorted by lastModified DESC, capped at page_size.
+        Pre-sorted by lastModified DESC, capped at max_total.
         """
         url = f"{self.base_url}/documents/search"
+        if not products:
+            products = ["lucidchart", "lucidspark"]
+
         # The search resource takes a JSON body, not query params. `product`
-        # must be an array of strings; `keywords` is a single string.
+        # must be an array of strings; `keywords` is a single string;
+        # `cursor` (when present in a response) carries us to the next page.
         body: Dict = {
-            "product": [product],
-            "pageSize": int(page_size),
+            "product": list(products),
+            "pageSize": int(min(page_size, 200)),
             "excludeTrashed": True,
         }
         if search:
@@ -161,141 +179,255 @@ class LucidAPIService:
         headers = dict(self.headers)
         headers["Content-Type"] = "application/json"
 
-        try:
-            resp = requests.post(
-                url, headers=headers, json=body, timeout=self.timeout,
-            )
-        except requests.RequestException as e:
-            raise LucidUpstreamError(f"network error reaching {url}: {e}") from e
-        self._raise_for_status(resp, "list_documents")
-
-        try:
-            payload = resp.json() or {}
-        except ValueError:
-            return []
-
-        # Lucid returns the results either as a top-level list or wrapped
-        # under `data` depending on API version. Accept both.
-        if isinstance(payload, list):
-            docs = payload
-        elif isinstance(payload, dict):
-            docs = payload.get("data") or payload.get("documents") or []
-        else:
-            docs = []
-
-        if not isinstance(docs, list):
-            return []
-
-        # Newest-first; Lucid usually returns this order already but we
-        # don't rely on it.
-        def _key(d: Dict) -> str:
-            return d.get("lastModified") or d.get("modified") or ""
-        return sorted(docs, key=_key, reverse=True)[:page_size]
-
-    def export_document(self, document_id: str, fmt: str = "png",
-                        page_id: Optional[str] = None) -> bytes:
-        """Fetch a rendered image of a Lucid document page.
-
-        Earlier this method called `GET /documents/{id}/contents?format=svg`
-        and trusted the format query param. In practice Lucid's `/contents`
-        endpoint always returns the *structured JSON* representation of the
-        document (pages, shapes, text areas) and silently ignores `?format`.
-        We were saving that JSON to S3 with `Content-Type: image/svg+xml`
-        and browsers refused to render it — broken-image icon in the preview
-        pane, broken SAD §4/6/7 embeds.
-
-        The correct sync endpoint is:
-            GET /documents/{id}/contents/image/{pageId}
-        which returns PNG bytes for that page. SVG export is only available
-        via Lucid's async exports API (`POST /documents/{id}/exports` + poll)
-        which we deliberately skip for v1 — PNG renders identically in the
-        browser, embeds cleanly in DOCX, and avoids the polling complexity.
-
-        Two-step flow:
-          1. GET /contents → JSON → pick first page's id (unless caller
-             passed `page_id`).
-          2. GET /contents/image/{page_id} → raw PNG bytes.
-
-        Args:
-          document_id: Lucid documentId.
-          fmt: only "png" is supported; the param is kept for back-compat with
-               the original signature. Pass "svg" and you'll get a clear error
-               rather than corrupted output.
-          page_id: optional Lucid page id; defaults to pages[0].id from the
-                   document's /contents response.
-
-        Returns raw PNG bytes for one page. Caller writes them to S3 at
-        sessions/{session_id}/diagram/{type}.png.
-        """
-        if fmt == "svg":
-            raise ValueError(
-                "SVG export is not supported via the sync API; use fmt='png'. "
-                "If SVG fidelity is required, switch to Lucid's async /exports "
-                "endpoint with polling (deferred to a later release)."
-            )
-        if fmt != "png":
-            raise ValueError(f"unsupported fmt {fmt!r}; want 'png'")
-
-        # Step 1 — discover the page id from /contents if the caller didn't
-        # provide one. Lucid's /contents returns JSON regardless of headers
-        # so we lean into that.
-        if not page_id:
-            contents_url = f"{self.base_url}/documents/{document_id}/contents"
+        all_docs: List[Dict] = []
+        cursor: Optional[str] = None
+        pages_fetched = 0
+        # Absolute sanity cap on page hops — 20 * 200 = 4000 docs upper bound.
+        # max_total breaks out earlier in normal use.
+        for _ in range(20):
+            req_body = dict(body)
+            if cursor:
+                req_body["cursor"] = cursor
             try:
-                resp = requests.get(
-                    contents_url, headers=self.headers, timeout=self.timeout,
+                resp = requests.post(
+                    url, headers=headers, json=req_body, timeout=self.timeout,
                 )
             except requests.RequestException as e:
                 raise LucidUpstreamError(
-                    f"network error reaching {contents_url}: {e}"
+                    f"network error reaching {url}: {e}"
                 ) from e
-            self._raise_for_status(resp, f"export_document({document_id}) - /contents")
+            self._raise_for_status(resp, f"list_documents (page {pages_fetched + 1})")
+
             try:
-                doc = resp.json()
-            except ValueError as e:
-                raise LucidUpstreamError(
-                    f"Lucid /contents returned non-JSON for {document_id}: {e}"
-                ) from e
-            pages = doc.get("pages") if isinstance(doc, dict) else None
-            if not isinstance(pages, list) or not pages:
-                raise LucidUpstreamError(
-                    f"Lucid document {document_id} has no pages — nothing to export"
-                )
-            page_id = pages[0].get("id") if isinstance(pages[0], dict) else None
-            if not page_id:
-                raise LucidUpstreamError(
-                    f"Lucid document {document_id} first page is missing an id"
-                )
+                payload = resp.json() or {}
+            except ValueError:
+                break
 
-        # Step 2 — fetch the PNG bytes for that page.
-        image_url = (
-            f"{self.base_url}/documents/{document_id}/contents/image/{page_id}"
+            # Lucid returns results either as a top-level list or wrapped under
+            # `data` (or sometimes `documents`) depending on API version.
+            if isinstance(payload, list):
+                page_docs = payload
+                cursor = None
+            elif isinstance(payload, dict):
+                page_docs = (
+                    payload.get("data")
+                    or payload.get("documents")
+                    or payload.get("results")
+                    or []
+                )
+                cursor = (
+                    payload.get("cursor")
+                    or payload.get("nextCursor")
+                    or payload.get("nextPageToken")
+                )
+            else:
+                page_docs = []
+                cursor = None
+
+            if not isinstance(page_docs, list):
+                break
+
+            all_docs.extend(page_docs)
+            pages_fetched += 1
+
+            if not cursor or len(all_docs) >= max_total:
+                break
+
+        logger.info(
+            "[LucidAPI] list_documents: fetched %d docs across %d page(s) "
+            "(products=%s search=%r)",
+            len(all_docs), pages_fetched, products, search,
         )
-        headers = dict(self.headers)
-        headers["Accept"] = "image/png"
 
+        def _sort_key(d: Dict) -> str:
+            return d.get("lastModified") or d.get("modified") or ""
+        return sorted(all_docs, key=_sort_key, reverse=True)[:max_total]
+
+    def get_document_contents(self, document_id: str) -> Dict:
+        """Fetch the document's structured content (shapes, text, connectors).
+
+        Returns the JSON returned by `GET /documents/{id}/contents` — the same
+        endpoint that powers our page-id discovery, but consumed here as
+        structured data for downstream LLM-context formatting.
+
+        Schema (abbreviated): {
+          id, title, product,
+          pages: [
+            { id, title, index, items: { shapes: [...], lines: [...] } }
+          ]
+        }
+
+        Used by the SAD orchestrator (via _format_lucid_for_llm) so Claude
+        can reason about the Lucid diagram's contents during section
+        generation — same way it reads drawio's mxGraph XML.
+        """
+        url = f"{self.base_url}/documents/{document_id}/contents"
         try:
-            resp = requests.get(
-                image_url, headers=headers, timeout=self.timeout,
-            )
+            resp = requests.get(url, headers=self.headers, timeout=self.timeout)
         except requests.RequestException as e:
+            raise LucidUpstreamError(f"network error reaching {url}: {e}") from e
+        self._raise_for_status(resp, f"get_document_contents({document_id})")
+        try:
+            return resp.json() or {}
+        except ValueError as e:
             raise LucidUpstreamError(
-                f"network error reaching {image_url}: {e}"
+                f"Lucid /contents returned non-JSON for {document_id}: {e}"
             ) from e
+
+    def export_document(self, document_id: str, fmt: str = "png",
+                        page_id: Optional[str] = None,
+                        dpi: int = 200,
+                        crop_to_content: bool = True) -> bytes:
+        """Fetch a rendered image of a Lucid document.
+
+        Uses Lucid's overloaded `GET /documents/{id}` endpoint — the same URL
+        as metadata retrieval, but the `Accept` header decides the response:
+
+            Accept: application/json     -> document metadata JSON
+            Accept: image/png            -> raw PNG bytes (96 dpi default)
+            Accept: image/png;dpi=200    -> high-DPI PNG (recommended for DOCX)
+            Accept: image/jpeg           -> raw JPEG bytes
+
+        Verified end-to-end via .scratch/probe_lucid_png_export.py:
+        with `Document Read` grant + valid API key + Lucid-Api-Version: 1
+        header, the endpoint returns real PNG/JPEG bytes that render in any
+        browser, `python-docx` add_picture, etc.
+
+        Args:
+          document_id: Lucid documentId (UUID).
+          fmt: 'png' (default, lossless) or 'jpeg' (smaller files). SVG and
+               PDF are NOT exposed via the public REST API — UI export only.
+          page_id: optional Lucid page id. If omitted, Lucid returns the
+               document's first page. Multi-page architecture diagrams should
+               iterate pages explicitly (use list_documents -> /contents to
+               get the page id list).
+          dpi: PNG resolution. 96 is screen-default; 200 is recommended for
+               DOCX print clarity at A4/letter. Ignored for JPEG. Very large
+               diagrams are auto-downscaled server-side.
+          crop_to_content: when True (default), Lucid trims empty canvas
+               margins around the actual diagram content. Usually wanted
+               for SAD embeds so the diagram fills the available width.
+
+        Returns: raw image bytes (PNG by default).
+        Raises:
+          InvalidLucidKeyError on 401.
+          LucidNotAccessibleError on 403/404 — most often means the API
+            key lacks `Document Read` grant, OR the caller is not a direct
+            collaborator on this specific document (admin-by-org-membership
+            is NOT sufficient for this endpoint).
+          LucidUpstreamError on 5xx / network / bad-bytes response.
+        """
+        if fmt == "svg":
+            raise ValueError(
+                "SVG export is not exposed via Lucid's public REST API "
+                "(UI-only). Use fmt='png' instead."
+            )
+        if fmt not in ("png", "jpeg"):
+            raise ValueError(f"unsupported fmt {fmt!r}; valid: 'png', 'jpeg'")
+
+        accept = f"image/{fmt}"
+        if fmt == "png" and dpi and dpi != 96:
+            accept = f"image/png;dpi={dpi}"
+
+        url = f"{self.base_url}/documents/{document_id}"
+        headers = dict(self.headers)
+        headers["Accept"] = accept
+
+        params: Dict[str, str] = {}
+        if page_id:
+            params["pageId"] = page_id
+        if crop_to_content:
+            params["crop"] = "content"
+
+        # Image exports go through Lucid's server-side renderer which can
+        # take 5-20s for non-trivial diagrams; the metadata-call default
+        # timeout (15s) is risky here. Use the export-specific timeout +
+        # retry once or twice on transient failures (network timeout,
+        # 5xx, empty body). This catches the "user clicks Fetch & Save
+        # right after Lucid AI finishes generating, Lucid's first render
+        # request is slow, we time out, user sees 502" pattern.
+        last_error: Optional[Exception] = None
+        for attempt in range(1, LUCID_EXPORT_MAX_RETRIES + 2):  # 1 + max_retries
+            try:
+                resp = requests.get(
+                    url, headers=headers, params=params,
+                    timeout=LUCID_EXPORT_TIMEOUT,
+                )
+            except requests.Timeout as e:
+                last_error = e
+                logger.warning(
+                    f"[LucidAPI] export_document timeout on attempt {attempt} for "
+                    f"{document_id} (fmt={fmt}); will retry up to "
+                    f"{LUCID_EXPORT_MAX_RETRIES} time(s)"
+                )
+                if attempt <= LUCID_EXPORT_MAX_RETRIES:
+                    time.sleep(2 ** (attempt - 1))  # 1s, 2s
+                    continue
+                raise LucidUpstreamError(
+                    f"Lucid export timed out after {LUCID_EXPORT_TIMEOUT}s "
+                    f"on {LUCID_EXPORT_MAX_RETRIES + 1} attempts for {document_id}. "
+                    "Try again in a moment — Lucid's renderer may be under load."
+                ) from e
+            except requests.RequestException as e:
+                last_error = e
+                logger.warning(
+                    f"[LucidAPI] export_document network error on attempt {attempt} "
+                    f"for {document_id}: {e}"
+                )
+                if attempt <= LUCID_EXPORT_MAX_RETRIES:
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                raise LucidUpstreamError(
+                    f"network error reaching {url} after retries: {e}"
+                ) from e
+
+            # 5xx → retryable transient failure (Lucid having a bad moment)
+            if resp.status_code >= 500:
+                last_error = LucidUpstreamError(
+                    f"Lucid returned {resp.status_code} (attempt {attempt}/{LUCID_EXPORT_MAX_RETRIES + 1})"
+                )
+                logger.warning(
+                    f"[LucidAPI] export_document got {resp.status_code} from Lucid on "
+                    f"attempt {attempt} for {document_id}; retrying"
+                )
+                if attempt <= LUCID_EXPORT_MAX_RETRIES:
+                    time.sleep(2 ** (attempt - 1))
+                    continue
+                # exhausted retries — fall through to _raise_for_status
+                break
+
+            # 4xx (auth, permission, not-found) → don't retry, raise immediately
+            # 200 with non-empty body → done, exit retry loop
+            break
+
+        # Final status check (catches 4xx, any non-200 we didn't already handle)
         self._raise_for_status(
-            resp, f"export_document({document_id}, page={page_id}, png)"
+            resp, f"export_document({document_id}, fmt={fmt}, page={page_id})"
         )
 
         if not resp.content:
             raise LucidUpstreamError(
-                f"Lucid returned empty body for PNG export of {document_id} "
-                f"page {page_id}"
+                f"Lucid returned empty body when exporting {document_id} as {fmt}. "
+                "The diagram may still be rendering — try Fetch & Save again in a few seconds."
             )
-        # Sanity check: PNGs start with the 8-byte magic header.
-        if not resp.content.startswith(b"\x89PNG\r\n\x1a\n"):
-            head = resp.content[:16]
+
+        # Sanity check magic bytes so a misconfigured response (JSON body
+        # returned despite our Accept header, content-type drift, etc.)
+        # fails loud rather than writing garbage to S3.
+        if fmt == "png" and not resp.content.startswith(b"\x89PNG\r\n\x1a\n"):
+            head = resp.content[:32]
             raise LucidUpstreamError(
-                f"Lucid returned non-PNG bytes for {document_id} page {page_id}; "
-                f"first 16 bytes: {head!r}. Check Lucid endpoint changes."
+                f"Lucid returned non-PNG bytes for {document_id} (got {head!r}). "
+                "Check that the API key has 'Document Read' grant and that "
+                "the caller is a direct collaborator on this document."
             )
+        if fmt == "jpeg" and not resp.content.startswith(b"\xff\xd8\xff"):
+            head = resp.content[:32]
+            raise LucidUpstreamError(
+                f"Lucid returned non-JPEG bytes for {document_id} (got {head!r})."
+            )
+        logger.info(
+            f"[LucidAPI] export_document OK for {document_id} ({len(resp.content)} bytes, "
+            f"fmt={fmt}, attempts={attempt})"
+        )
         return resp.content

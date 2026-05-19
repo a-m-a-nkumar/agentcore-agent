@@ -141,22 +141,284 @@ def save_facts(session_id: str, facts: Dict[str, Any]) -> None:
     _s3_put_json(_key(session_id, "sad", "facts.json"), facts)
 
 
-def load_diagram_xml(session_id: str, diagram_type: str = "logical") -> str:
-    """Read a session's saved mxGraph XML for one diagram type.
+def _format_lucid_for_llm(doc: Dict[str, Any]) -> str:
+    """Convert Lucid's /contents JSON into a text representation Claude can
+    reason about during SAD section generation.
 
-    Empty string if missing. Always falls back to `logical.xml` if the
-    requested type doesn't exist — prompt builders that ask for any diagram
-    XML still get the best-available source on un-migrated sessions.
+    Mirrors the role drawio's mxGraph XML serves — gives the LLM the
+    diagram's *meaning* (named components and how they connect), not its
+    pixels. Output is structured + dense so a 22-shape architecture diagram
+    fits in ~1KB of prompt tokens.
+
+    Output shape (compact, LLM-readable):
+
+        # Lucid diagram: "Logical-IDP"
+        Product: lucidchart  |  Pages: 1  |  Shapes: 22  |  Connections: 29
+
+        ## Page "Page 1"
+
+        Components by type:
+          - ProcessBlock (10): Auth Gateway, Saviynt Integration Adapter, ...
+          - DecisionBlock (8):  Workflow Orchestrator, Portal UI, ...
+          - SparkFrameBlock (1): Internal Developer Portal (IDP) ...
+          - AdvancedSwimLaneBlock (1): Presentation Layer
+          - (3 unlabeled / structural shapes)
+
+        Component flow:
+          - "Authentication Gateway" --> "Email Service"  [label: "Send emails"]
+          - "Bitbucket Integration Adapter" --> "Authentication Gateway"
+          - "Tooling Team Member" --> "Portal UI"
+          - "Portal UI" <--> "Workflow Orchestrator"
+          - "Audit Log Store" -- "Notification Service"  (undirected)
+          ...
+
+    Connection direction is inferred from arrow styles on the two endpoints:
+      ep2.style="Arrow" + ep1.style="None"  →  ep1 --> ep2   (standard directed)
+      both "Arrow"                          →  ep1 <--> ep2  (bidirectional)
+      neither "Arrow"                       →  ep1 --  ep2   (undirected, e.g. swim-lane membership)
+
+    Connection labels (the line's textAreas[].text) are included when present
+    — these often carry the action verb that makes the architecture readable
+    ("Send emails", "Trigger workflow", "Validates request").
+
+    Defensive — degrades silently on unexpected schema rather than blowing
+    up the section worker. Lucid's shape libraries can introduce variants.
+    """
+    if not isinstance(doc, dict):
+        logger.warning(f"[SAD][lucid_fmt] input is not a dict (got {type(doc).__name__}); returning empty")
+        return ""
+
+    out: List[str] = []
+    title = doc.get("title") or doc.get("id") or "Lucid document"
+    product = doc.get("product") or "lucidchart"
+
+    pages = doc.get("pages") if isinstance(doc.get("pages"), list) else []
+
+    # Document-level summary (one line, scannable)
+    total_shapes = 0
+    total_lines = 0
+    for p in pages:
+        if not isinstance(p, dict):
+            continue
+        items = p.get("items") if isinstance(p.get("items"), dict) else {}
+        total_shapes += len(items.get("shapes") or [])
+        total_lines += len(items.get("lines") or [])
+
+    logger.info(
+        f"[SAD][lucid_fmt] formatting doc title={title!r} product={product} "
+        f"pages={len(pages)} shapes={total_shapes} connections={total_lines}"
+    )
+
+    out.append(f'# Lucid diagram: "{title}"')
+    out.append(
+        f"Product: {product}  |  Pages: {len(pages)}  |  "
+        f"Shapes: {total_shapes}  |  Connections: {total_lines}"
+    )
+
+    for page in pages:
+        if not isinstance(page, dict):
+            continue
+        page_title = page.get("title") or f"page {page.get('index', '?')}"
+        items = page.get("items") if isinstance(page.get("items"), dict) else {}
+        shapes = items.get("shapes") if isinstance(items.get("shapes"), list) else []
+        lines_items = items.get("lines") if isinstance(items.get("lines"), list) else []
+
+        out.append("")
+        out.append(f'## Page "{page_title}"')
+
+        # Build shape-id -> label map
+        shape_label: Dict[str, str] = {}
+        shape_class: Dict[str, str] = {}
+        for s in shapes:
+            if not isinstance(s, dict):
+                continue
+            sid = s.get("id")
+            if not sid:
+                continue
+            cls = s.get("class") or "Shape"
+            shape_class[sid] = cls
+            label = ""
+            text_areas = s.get("textAreas") if isinstance(s.get("textAreas"), list) else []
+            for ta in text_areas:
+                if isinstance(ta, dict) and ta.get("text"):
+                    # Compress whitespace + truncate so long descriptive text
+                    # (e.g. multi-line callout boxes) doesn't dominate context.
+                    txt = " ".join(str(ta["text"]).split())
+                    label = txt if len(txt) <= 100 else (txt[:97] + "...")
+                    break
+            shape_label[sid] = label
+
+        # 1. Components grouped by class — gives Claude a quick inventory
+        if shapes:
+            by_class: Dict[str, List[str]] = {}
+            unlabeled = 0
+            for sid in shape_label:
+                lbl = shape_label[sid]
+                cls = shape_class.get(sid, "Shape")
+                if lbl:
+                    by_class.setdefault(cls, []).append(lbl)
+                else:
+                    unlabeled += 1
+
+            out.append("")
+            out.append("### Components by type")
+            # Sort classes by member count desc, then alpha for stable ordering
+            for cls in sorted(by_class.keys(), key=lambda c: (-len(by_class[c]), c)):
+                members = by_class[cls]
+                labels_joined = ", ".join(f'"{m}"' for m in members)
+                out.append(f"  - {cls} ({len(members)}): {labels_joined}")
+            if unlabeled:
+                out.append(f"  - ({unlabeled} unlabeled / structural shape(s))")
+
+        # 2. Connections (with direction inference and labels)
+        if lines_items:
+            out.append("")
+            out.append("### Component flow")
+            for ln in lines_items:
+                if not isinstance(ln, dict):
+                    continue
+                ep1 = ln.get("endpoint1") if isinstance(ln.get("endpoint1"), dict) else {}
+                ep2 = ln.get("endpoint2") if isinstance(ln.get("endpoint2"), dict) else {}
+                # Lucid's schema: endpoints have `connectedTo` referencing
+                # a shape id, plus a `style` indicating the arrowhead.
+                src_id = ep1.get("connectedTo")
+                dst_id = ep2.get("connectedTo")
+                if not src_id and not dst_id:
+                    continue
+
+                ep1_arrow = ep1.get("style") == "Arrow"
+                ep2_arrow = ep2.get("style") == "Arrow"
+
+                src_lbl = shape_label.get(src_id) or "?"
+                dst_lbl = shape_label.get(dst_id) or "?"
+
+                # Direction logic — based on which endpoint has the arrowhead
+                if ep2_arrow and not ep1_arrow:
+                    arrow = "-->"          # ep1 directs to ep2
+                    a, b = src_lbl, dst_lbl
+                elif ep1_arrow and not ep2_arrow:
+                    arrow = "-->"          # ep2 directs to ep1 — swap order so arrow always points right
+                    a, b = dst_lbl, src_lbl
+                elif ep1_arrow and ep2_arrow:
+                    arrow = "<-->"         # bidirectional
+                    a, b = src_lbl, dst_lbl
+                else:
+                    arrow = "--"           # undirected (often swim-lane membership or grouping)
+                    a, b = src_lbl, dst_lbl
+
+                # Pull the connector's label text if any
+                edge_label = ""
+                edge_text_areas = ln.get("textAreas") if isinstance(ln.get("textAreas"), list) else []
+                for ta in edge_text_areas:
+                    if isinstance(ta, dict) and ta.get("text"):
+                        edge_label = " ".join(str(ta["text"]).split())
+                        if len(edge_label) > 80:
+                            edge_label = edge_label[:77] + "..."
+                        break
+
+                if edge_label:
+                    out.append(f'  - "{a}" {arrow} "{b}"  [label: "{edge_label}"]')
+                else:
+                    out.append(f'  - "{a}" {arrow} "{b}"')
+
+    result = "\n".join(out)
+    logger.info(
+        f"[SAD][lucid_fmt] done: emitted {len(out)} lines / {len(result)} chars of LLM context"
+    )
+    return result
+
+
+def load_diagram_xml(session_id: str, diagram_type: str = "logical") -> str:
+    """Read a session's saved diagram context as text for LLM prompts.
+
+    Tries multiple formats so both drawio and Lucid diagrams produce
+    structured text Claude can reason about:
+
+      1. drawio mxGraph XML at `diagram/{type}.xml`            (primary)
+      2. Lucid structured JSON at `diagram/{type}.lucid.json`  (Lucid imports)
+      3. Same fallbacks against `logical.*` when the requested type is
+         missing (legacy un-migrated sessions)
+
+    Returns an empty string if nothing is found — prompt builders treat
+    that as "no diagram authored yet" and produce a placeholder section.
+
+    Despite the name `load_diagram_xml` (kept for back-compat), the
+    returned string may be either mxGraph XML or a Lucid-formatted text
+    representation. Downstream prompts read it as opaque "diagram context".
     """
     if diagram_type not in ("logical", "infrastructure", "security"):
+        logger.info(f"[SAD][diagram_ctx] normalized unknown type to 'logical' (was {diagram_type!r})")
         diagram_type = "logical"
-    primary = _s3_get_text(_key(session_id, "diagram", f"{diagram_type}.xml"))
+
+    logger.info(f"[SAD][diagram_ctx] loading context for session={session_id} type={diagram_type}")
+
+    # 1. drawio XML for this type
+    xml_key = _key(session_id, "diagram", f"{diagram_type}.xml")
+    primary = _s3_get_text(xml_key)
     if primary:
+        logger.info(
+            f"[SAD][diagram_ctx] OK source=drawio_xml key={xml_key} "
+            f"bytes={len(primary)} (chars)"
+        )
         return primary
+    logger.info(f"[SAD][diagram_ctx] no drawio XML at {xml_key}")
+
+    # 2. Lucid JSON for this type — format to text for LLM consumption
+    lucid_key = _key(session_id, "diagram", f"{diagram_type}.lucid.json")
+    lucid_raw = _s3_get_text(lucid_key)
+    if lucid_raw:
+        logger.info(
+            f"[SAD][diagram_ctx] found Lucid JSON at {lucid_key} "
+            f"({len(lucid_raw)} bytes) — formatting for LLM..."
+        )
+        try:
+            formatted = _format_lucid_for_llm(json.loads(lucid_raw))
+            logger.info(
+                f"[SAD][diagram_ctx] OK source=lucid_json key={lucid_key} "
+                f"formatted_chars={len(formatted)} (preview: {formatted[:160]!r}...)"
+            )
+            return formatted
+        except Exception as e:
+            logger.warning(
+                f"[SAD][diagram_ctx] failed to format Lucid JSON at {lucid_key} "
+                f"for {diagram_type}: {e}"
+            )
+    else:
+        logger.info(f"[SAD][diagram_ctx] no Lucid JSON at {lucid_key}")
+
+    # 3. Fall back to logical.* if the requested type is missing
     if diagram_type != "logical":
-        # Per-type slot empty → fall back to logical so prompts that
-        # reference 'the diagram' still see something useful.
-        return _s3_get_text(_key(session_id, "diagram", "logical.xml"))
+        logger.info(
+            f"[SAD][diagram_ctx] no per-type context for {diagram_type}; "
+            f"falling back to logical.*"
+        )
+        fallback_xml_key = _key(session_id, "diagram", "logical.xml")
+        primary = _s3_get_text(fallback_xml_key)
+        if primary:
+            logger.info(
+                f"[SAD][diagram_ctx] OK source=drawio_xml_fallback "
+                f"key={fallback_xml_key} bytes={len(primary)}"
+            )
+            return primary
+        fallback_lucid_key = _key(session_id, "diagram", "logical.lucid.json")
+        lucid_raw = _s3_get_text(fallback_lucid_key)
+        if lucid_raw:
+            try:
+                formatted = _format_lucid_for_llm(json.loads(lucid_raw))
+                logger.info(
+                    f"[SAD][diagram_ctx] OK source=lucid_json_fallback "
+                    f"key={fallback_lucid_key} formatted_chars={len(formatted)}"
+                )
+                return formatted
+            except Exception as e:
+                logger.warning(
+                    f"[SAD][diagram_ctx] fallback Lucid JSON also failed: {e}"
+                )
+
+    logger.warning(
+        f"[SAD][diagram_ctx] no diagram context found for "
+        f"session={session_id} type={diagram_type} — section worker will get empty string"
+    )
     return ""
 
 

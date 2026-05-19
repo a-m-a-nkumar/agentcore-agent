@@ -707,34 +707,51 @@ def download_sad(
                         for c_idx, cell in enumerate(r[: len(headers)]):
                             table.cell(r_idx, c_idx).text = str(cell)
             elif t == "diagram":
-                # Embed the diagram. Preference order:
-                #   1. Direct PNG from sessions/{id}/diagram/logical.png
-                #      (browser pre-rendered via the draw.io iframe).
-                #   2. SVG from `block.s3_key` → PNG via cairosvg
-                #      (legacy path; only works if SVG export succeeded
-                #      at save time and cairosvg is installed).
-                #   3. Placeholder paragraph.
-                png_key = f"sessions/{session_id}/diagram/logical.png"
-                svg_key = block.get("s3_key")
+                # Embed the per-section diagram. The section JSON's `s3_key`
+                # already points to the correct file for THIS section (set
+                # by lambda_sad_orchestrator._diagram_block_for_section from
+                # the diagram_slots[type].artifact_key field), so we trust
+                # that path and dispatch on the file extension:
+                #
+                #   - .png / .jpg / .jpeg  →  embed directly via python-docx
+                #                             (Lucid imports + future drawio
+                #                              PNG exports both land here)
+                #   - .svg                 →  cairosvg → PNG → embed
+                #                             (current drawio path)
+                #
+                # Earlier this code hardcoded `sessions/{id}/diagram/logical.png`
+                # which silently fed the §4 logical image into §6 (security)
+                # and §7 (infrastructure) DOCX exports. Bug fixed by using
+                # the section-specific s3_key.
+                artifact_key = block.get("s3_key", "")
                 embedded = False
-                # Try PNG first.
-                try:
-                    png_bytes = _s3().get_object(Bucket=S3_BUCKET_NAME, Key=png_key)["Body"].read()
-                    doc.add_picture(io.BytesIO(png_bytes), width=Inches(6.5))
-                    embedded = True
-                except Exception as e:
-                    logger.info(f"[SAD] PNG diagram not available ({png_key}): {e}; trying SVG fallback")
-                # Try SVG → PNG fallback.
-                if not embedded and svg_key and cairosvg:
+                if artifact_key:
                     try:
-                        svg = _s3().get_object(Bucket=S3_BUCKET_NAME, Key=svg_key)["Body"].read()
-                        png_buf = io.BytesIO()
-                        cairosvg.svg2png(bytestring=svg, write_to=png_buf, output_width=900)
-                        png_buf.seek(0)
-                        doc.add_picture(png_buf, width=Inches(6.5))
-                        embedded = True
+                        body = _s3().get_object(Bucket=S3_BUCKET_NAME, Key=artifact_key)["Body"].read()
+                        lower = artifact_key.lower()
+                        if lower.endswith((".png", ".jpg", ".jpeg")):
+                            # python-docx natively embeds PNG/JPEG bytes.
+                            doc.add_picture(io.BytesIO(body), width=Inches(6.5))
+                            embedded = True
+                        elif lower.endswith(".svg"):
+                            if cairosvg:
+                                png_buf = io.BytesIO()
+                                cairosvg.svg2png(bytestring=body, write_to=png_buf, output_width=900)
+                                png_buf.seek(0)
+                                doc.add_picture(png_buf, width=Inches(6.5))
+                                embedded = True
+                            else:
+                                logger.warning(
+                                    f"[SAD] cairosvg unavailable; cannot embed SVG diagram {artifact_key}"
+                                )
+                        else:
+                            logger.warning(
+                                f"[SAD] unsupported diagram extension for DOCX: {artifact_key}"
+                            )
                     except Exception as e:
-                        logger.warning(f"[SAD] failed to embed SVG diagram: {e}")
+                        logger.warning(
+                            f"[SAD] failed to embed diagram {artifact_key} in DOCX: {e}"
+                        )
                 if not embedded:
                     doc.add_paragraph(
                         "[diagram unavailable — open the SAD in the app to "
