@@ -93,10 +93,23 @@ def _build_bmad_prompt(base_prompt: str, workflow_key: str = "create-prd") -> st
 
     return "\n\n".join(parts)
 
-# Add CORS middleware to allow frontend on localhost:8080
+# Add CORS middleware. The localhost origins cover the typical Vite + CRA dev
+# servers. The two deployed frontend hosts are included so a developer can
+# point the deployed UI at their LOCAL backend (running this file directly)
+# during integration testing — without that, the browser blocks the cross-
+# origin POST with "Response to preflight request doesn't pass access control
+# check: No 'Access-Control-Allow-Origin' header is present".
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080", "http://localhost:8081", "http://localhost:5173", "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:5173"],
+    allow_origins=[
+        # Local dev servers
+        "http://localhost:8080", "http://localhost:8081", "http://localhost:5173",
+        "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:5173",
+        # Deployed frontends — needed when testing local backend against
+        # the deployed UI in the browser.
+        "https://sdlc-dev.deluxe.com",
+        "https://ai-labs.deluxe.com",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*", "Authorization", "Content-Type"],
