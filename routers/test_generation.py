@@ -616,12 +616,22 @@ RULES:
 - Output ONLY valid JSON, nothing else
 """
 
+    # max_tokens raised from 8000 → 32000. The earlier 8000 ceiling was the
+    # silent culprit behind "Unterminated string starting at: line 280 ..."
+    # JSON-parse failures on pages with 40+ scenarios: Claude was producing
+    # ~3.7 chars per token, so the full structured output (46 scenarios with
+    # description + requirement_ref + steps each) ran ~25-30k chars / ~6.5-8k
+    # tokens — and hit the cap mid-string. Claude Sonnet 4.5 supports 64k
+    # output tokens, so 32k is comfortably safe and leaves headroom for
+    # ~100-scenario pages.
+    _EXTRACTION_MAX_TOKENS = 32000
+
     logger.info(f"Calling LLM to extract scenarios from: {page_title}")
     content_text = chat_completion(
         messages=[{"role": "user", "content": extraction_prompt}],
         model=BEDROCK_MODEL_ID,
         temperature=0.1,
-        max_tokens=8000,
+        max_tokens=_EXTRACTION_MAX_TOKENS,
         user_id=user_id,
     )
     logger.info(f"Bedrock extraction response length: {len(content_text)} chars")
@@ -632,7 +642,33 @@ RULES:
         cleaned = re.sub(r'^```(?:json)?\s*', '', cleaned)
         cleaned = re.sub(r'\s*```$', '', cleaned)
 
-    result = json.loads(cleaned)
+    # Detect truncation explicitly. Claude returns a partial response when it
+    # hits max_tokens; the JSON ends mid-string and json.loads fails with a
+    # confusing "Unterminated string" line/column error. Catch that case here
+    # and surface a clearer message that names the actual cause so the next
+    # operator knows to raise the cap (or split the input).
+    try:
+        result = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        # Last char is a heuristic: a complete JSON object/array ends in } or ].
+        # If it doesn't, the response was almost certainly cut off by the token
+        # cap. Otherwise it's a real format issue from Claude.
+        last_char = cleaned.rstrip()[-1:] if cleaned.strip() else ""
+        if last_char not in ("}", "]"):
+            logger.error(
+                f"Bedrock response truncated at {_EXTRACTION_MAX_TOKENS} tokens "
+                f"({len(content_text)} chars). Page '{page_title}' likely has "
+                f"too many scenarios for one extraction pass."
+            )
+            raise json.JSONDecodeError(
+                f"AI response was truncated at the {_EXTRACTION_MAX_TOKENS}-token "
+                f"output cap. The Confluence page has more scenarios than fit in "
+                f"one extraction pass — raise max_tokens or split the page.",
+                cleaned, e.pos,
+            )
+        # Genuine format problem — let it propagate with the original error.
+        raise
+
     return result
 
 
