@@ -1430,8 +1430,13 @@ def get_user_figma_credentials(user_id: str):
 _VALID_ACCESS_ROLES = frozenset({"BOTH", "TECH", "BUSINESS", "NONE"})
 
 
-def update_user_access_role(user_id: str, access_role: str) -> bool:
-    """Upsert users.access_role for the given user_id.
+def update_user_access_role(
+    user_id: str,
+    access_role: str,
+    email: Optional[str] = None,
+    name: Optional[str] = None,
+) -> bool:
+    """Single-shot upsert of users.access_role for the given user_id.
 
     Returns True iff the DB now contains the requested access_role for this
     user — caller uses the return value to decide whether to update the
@@ -1439,18 +1444,30 @@ def update_user_access_role(user_id: str, access_role: str) -> bool:
     the cache from claiming a value the DB doesn't actually hold (which would
     short-circuit retries on subsequent requests and leave the row stuck).
 
-    Acceptable roles: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. Uses INSERT ... ON
-    CONFLICT so the role is recorded even when the row doesn't yet exist —
-    `get_current_user` runs this BEFORE the route handler's
-    `create_or_update_user` call, so on a brand-new user's very first
-    request the target row hasn't been INSERTed yet. The INSERT branch fails
-    in that case because `email` is NOT NULL; this function returns False,
-    cache stays empty, and the next request (after `create_or_update_user`
-    has populated the row) retries the UPSERT successfully.
+    Acceptable roles: 'BOTH', 'TECH', 'BUSINESS', 'NONE'.
 
-    The ON CONFLICT clause uses `IS DISTINCT FROM` so unchanged values are a
-    no-op write. Silently skips on missing user_id or invalid role; never
-    raises — auth flow must not break on a tracking write.
+    email + name come from the verified JWT in get_current_user. We supply
+    them in the INSERT VALUES so the NOT NULL constraint on users.email is
+    satisfied even when the row doesn't yet exist. (PostgreSQL evaluates
+    NOT NULL on the prospective INSERT row BEFORE running ON CONFLICT
+    detection, so without these we'd fail the constraint and never even
+    reach the UPDATE branch — manifesting as a "stuck NONE / stuck NO
+    GROUPS" pill on the org-usage page.)
+
+    On the ON CONFLICT path:
+      - access_role is updated unconditionally to the JWT-derived value
+        (when it differs from stored).
+      - email and name are filled via COALESCE so an admin who edits a
+        user's name in the DB isn't stomped by the auth flow on the next
+        request — the auth-supplied value only wins if the stored cell
+        is null.
+
+    Logs an INFO line on every successful write describing whether the
+    role was unchanged or actually flipped, so the auth flow's effect on
+    the row is grep-able from CloudWatch / local logs.
+
+    Silently skips on missing user_id or invalid role; never raises —
+    auth flow must not break on a tracking write.
     """
     if not user_id:
         return False
@@ -1463,17 +1480,44 @@ def update_user_access_role(user_id: str, access_role: str) -> bool:
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
+                # RETURNING (xmax = 0) is PostgreSQL's idiomatic way of
+                # detecting which branch of an UPSERT actually fired:
+                #   xmax = 0 → INSERT (row was newly created)
+                #   xmax > 0 → UPDATE (existing row was modified)
+                # We log this so a quick `grep [access_role]` shows
+                # whether your row got created, updated, or left alone.
                 cursor.execute(
                     """
-                    INSERT INTO users (id, access_role)
-                    VALUES (%s, %s)
+                    INSERT INTO users (id, email, name, access_role)
+                    VALUES (%s, %s, %s, %s)
                     ON CONFLICT (id) DO UPDATE
-                       SET access_role = EXCLUDED.access_role
+                       SET access_role = EXCLUDED.access_role,
+                           email       = COALESCE(users.email, EXCLUDED.email),
+                           name        = COALESCE(users.name,  EXCLUDED.name)
                      WHERE users.access_role IS DISTINCT FROM EXCLUDED.access_role
+                        OR users.email IS NULL
+                        OR users.name  IS NULL
+                    RETURNING (xmax = 0) AS inserted, access_role
                     """,
-                    (user_id, access_role),
+                    (user_id, email, name, access_role),
                 )
+                row = cursor.fetchone()
                 conn.commit()
+                if row is None:
+                    # No-op: existing row already had matching access_role
+                    # and email/name. The WHERE clause filtered the UPDATE
+                    # out, so RETURNING produces nothing. Still a success.
+                    logger.info(
+                        f"[access_role] no-op for user {user_id} "
+                        f"(already at {access_role!r})"
+                    )
+                else:
+                    inserted, stored = row[0], row[1]
+                    branch = "INSERTED" if inserted else "UPDATED"
+                    logger.info(
+                        f"[access_role] {branch} user {user_id} "
+                        f"(email={email!r}, role -> {stored!r})"
+                    )
                 return True
         finally:
             release_db_connection(conn)

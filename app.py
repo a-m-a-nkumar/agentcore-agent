@@ -312,13 +312,16 @@ async def get_current_user(request: Request) -> dict:
 
     # Persist access_role to users.access_role (cached per worker so we only
     # write when the role actually changes for this user).
-    # The function returns False if the write didn't actually land (e.g.
-    # brand-new user whose row hasn't been INSERTed yet by
-    # create_or_update_user); in that case we deliberately DON'T cache, so the
-    # next request retries the UPSERT once the row exists.
+    #
+    # We pass email + name from the verified JWT so the UPSERT's INSERT
+    # branch can satisfy users.email NOT NULL on a brand-new (or admin-
+    # deleted) row. Without these, PostgreSQL's NOT NULL check on the
+    # prospective INSERT row would fire BEFORE ON CONFLICT detection,
+    # blocking the write even when the row already exists — that was the
+    # "stuck NONE / NO GROUPS" pill scenario.
     if user_id and _LAST_ACCESS_ROLE_CACHE.get(user_id) != access_role:
         try:
-            if update_user_access_role(user_id, access_role):
+            if update_user_access_role(user_id, access_role, email=email, name=name):
                 _LAST_ACCESS_ROLE_CACHE[user_id] = access_role
         except Exception as e:
             print(f"[AUTH] Warning: Failed to persist access_role for {user_id}: {e}")
