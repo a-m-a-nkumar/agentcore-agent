@@ -1,25 +1,40 @@
+import time
 import requests
 from requests.auth import HTTPBasicAuth
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import logging
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache of the FULL Jira project list, keyed by user email so
+# different users never see each other's projects. Mirrors the equivalent
+# cache in confluence_service. 5-min TTL: new Jira projects appear within
+# that window but every modal open after the first hits memory, not Jira.
+_PROJECT_LIST_CACHE: Dict[str, Tuple[float, List[Dict]]] = {}
+_PROJECT_LIST_CACHE_TTL_SECS = 300  # 5 minutes
+
+
 class JiraService:
     """Service for interacting with Jira Cloud API"""
-    
+
     def __init__(self, domain: str, email: str, api_token: str):
         """
         Initialize Jira service
-        
+
         Args:
             domain: Atlassian domain (e.g., 'mycompany.atlassian.net')
             email: User's email address
             api_token: Atlassian API token
         """
         self.base_url = f"https://{domain}"
+        self.email = email                          # used as cache key for the project list
         self.auth = HTTPBasicAuth(email, api_token)
         self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        # requests.Session pools TCP + TLS so subsequent paginated calls reuse
+        # warm connections instead of paying a fresh handshake each time.
+        # Same change we made on Confluence — and the right baseline for any
+        # service that does multi-page enumeration against Atlassian.
+        self._session = requests.Session()
     
     def test_connection(self) -> tuple[bool, Optional[str]]:
         """
@@ -51,46 +66,78 @@ class JiraService:
             logger.error(f"Jira connection test failed: {e}")
             return (False, f"Connection test failed: {str(e)}")
     
+    def _fetch_all_projects(self) -> List[Dict]:
+        """One full paginated enumeration of /rest/api/3/project/search.
+
+        Used to (re)populate the module-level cache. Sequential pagination
+        (no parallelism): Jira's /project/search endpoint is fast enough
+        and adding ThreadPoolExecutor here is unnecessary risk — Atlassian's
+        WAF was happy to serve linear page-by-page reads on this endpoint
+        in our testing. Session reuse keeps TLS warm across the pages.
+        """
+        url = f"{self.base_url}/rest/api/3/project/search"
+        all_projects: List[Dict] = []
+        start_at = 0
+        page_size = 50  # Jira /project/search hard cap
+        while True:
+            response = self._session.get(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                params={"startAt": start_at, "maxResults": page_size},
+                timeout=30,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            values = payload.get("values", [])
+            all_projects.extend(values)
+            if payload.get("isLast", True) or len(values) < page_size:
+                break
+            start_at += page_size
+
+        return [
+            {
+                "key": project["key"],
+                "name": project["name"],
+                "id": project["id"],
+                "type": project.get("projectTypeKey", "software"),
+            }
+            for project in all_projects
+        ]
+
     def get_projects(self) -> List[Dict]:
         """
-        Fetch ALL accessible Jira projects via the paginated search endpoint.
+        Return all accessible Jira projects for the linked account.
 
-        The legacy /rest/api/3/project endpoint caps responses at ~50 items
-        with no pagination, which means tenants with more projects silently
-        miss entries — search-by-name in the UI then "can't find" them
-        even though they exist. /rest/api/3/project/search is paginated;
-        we walk all pages to return the complete set.
+        Backed by `_PROJECT_LIST_CACHE` keyed by user email with a 5-min TTL.
+        First call within the window fills the cache (one full paginated
+        enumeration of /rest/api/3/project/search); every subsequent call
+        — including each time the user re-opens the create-project modal —
+        returns the cached list instantly without touching Jira.
+
+        Why a cache: the frontend Jira picker loads the full project list
+        on every modal open and then does cmdk-side filtering. Without a
+        cache that's a fresh ~2s Jira round-trip every time the user clicks
+        "+ New Project", on top of the same call that already fires for
+        Confluence spaces. With it, the second-and-onwards modal open is
+        effectively free.
         """
-        try:
-            url = f"{self.base_url}/rest/api/3/project/search"
-            all_projects: List[Dict] = []
-            start_at = 0
-            page_size = 50
-            while True:
-                response = requests.get(
-                    url,
-                    headers=self.headers,
-                    auth=self.auth,
-                    params={"startAt": start_at, "maxResults": page_size},
-                    timeout=30,
-                )
-                response.raise_for_status()
-                payload = response.json()
-                values = payload.get("values", [])
-                all_projects.extend(values)
-                if payload.get("isLast", True) or len(values) < page_size:
-                    break
-                start_at += page_size
+        now = time.time()
+        cached = _PROJECT_LIST_CACHE.get(self.email)
+        if cached and (now - cached[0]) < _PROJECT_LIST_CACHE_TTL_SECS:
+            return cached[1]
 
-            return [
-                {
-                    "key": project["key"],
-                    "name": project["name"],
-                    "id": project["id"],
-                    "type": project.get("projectTypeKey", "software"),
-                }
-                for project in all_projects
-            ]
+        try:
+            logger.info(
+                f"[Jira] cache miss/expired for {self.email}; fetching full project list…"
+            )
+            projects = self._fetch_all_projects()
+            _PROJECT_LIST_CACHE[self.email] = (now, projects)
+            logger.info(
+                f"[Jira] cached {len(projects)} projects for {self.email} "
+                f"(TTL {_PROJECT_LIST_CACHE_TTL_SECS}s)"
+            )
+            return projects
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Jira projects: {e}")
             raise Exception(f"Failed to fetch Jira projects: {str(e)}")
