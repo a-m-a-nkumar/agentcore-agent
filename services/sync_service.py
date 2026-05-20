@@ -7,7 +7,6 @@ import asyncio
 import hashlib
 from typing import List, Dict, Optional
 from datetime import datetime
-import requests
 from services.embedding_service import embedding_service
 from services.rag_service import _strip_html
 from services.confluence_service import ConfluenceService
@@ -20,9 +19,8 @@ from db_helper_vector import (
     get_jira_issue,
     get_all_confluence_pages_metadata,
     get_all_jira_issues_metadata,
-    find_existing_embedding,
-    insert_document_embedding,
-    delete_embeddings
+    find_existing_embeddings_bulk,
+    replace_document_embeddings_bulk,
 )
 import logging
  
@@ -135,95 +133,115 @@ async def sync_confluence_space(
         api_token=credentials['atlassian_api_token']
     )
    
-    # Fetch every page in the space — paginated, newest-first, descendants
-    # included. The legacy get_space_pages(space_key, 1000) made a single
-    # REST call (effective ceiling ~100, oldest-first) and never walked the
-    # child page tree, which is why users reported missing recent and
-    # nested pages. See ConfluenceService.get_all_pages_in_space for the
-    # exhaustive two-phase implementation.
-    logger.info(f"Fetching pages from Confluence space {space_key} (exhaustive, newest-first)...")
-    pages = await asyncio.to_thread(confluence.get_all_pages_in_space, space_key)
+    # Fetch all pages WITH BODY in a single paginated call.
+    # See get_space_pages docstring for why this is dramatically cheaper than
+    # the previous per-page detail-fetch pattern.
+    logger.info(f"Fetching pages from Confluence space {space_key} (body inline)...")
+    pages = await asyncio.to_thread(confluence.get_space_pages, space_key, None, True)
     logger.info(f"Found {len(pages)} pages in space {space_key}")
- 
-    synced_count = 0
-    skipped_count = 0
 
-    # OPTIMIZATION: Bulk fetch all page metadata in 1 DB call instead of N individual calls
+    # Bulk fetch existing metadata in one DB call.
     logger.info(f"[OPTIMIZATION] Bulk-fetching all Confluence page metadata for project {project_id}...")
     local_pages_map = await asyncio.to_thread(get_all_confluence_pages_metadata, project_id)
-    logger.info(f"[OPTIMIZATION] Loaded {len(local_pages_map)} existing page records in 1 DB call (saved {len(local_pages_map)} individual DB connections)")
+    logger.info(f"[OPTIMIZATION] Loaded {len(local_pages_map)} existing page records in 1 DB call")
 
+    # ── Filter pages that need updating BEFORE fanning out. Unchanged pages
+    # cost zero work in the concurrent loop below.
+    pages_to_sync: List[tuple] = []
+    skipped_count = 0
     for idx, page in enumerate(pages):
-        try:
-            page_id = page['id']
+        page_id = page['id']
+        title = page.get('title', '')
+        version_number = page.get('version', {}).get('number')
 
-            # Fetch full page details with content (offload blocking HTTP)
-            page_url = f"{confluence.base_url}/rest/api/content/{page_id}?expand=body.storage,version"
-            response = await asyncio.to_thread(
-                requests.get, page_url, headers=confluence.headers, auth=confluence.auth, timeout=30
-            )
-            response.raise_for_status()
-            full_page = response.json()
+        local_page = local_pages_map.get(page_id)
+        if not local_page:
+            logger.info(f"  New page: {title}")
+            pages_to_sync.append((idx, page))
+        elif local_page['version_number'] < version_number:
+            logger.info(f"  Updated page: {title} (v{local_page['version_number']} -> v{version_number})")
+            pages_to_sync.append((idx, page))
+        else:
+            skipped_count += 1
 
-            version_number = full_page['version']['number']
+    logger.info(
+        f"[SYNC_PLAN] {len(pages_to_sync)} pages need sync, {skipped_count} unchanged "
+        f"(total {len(pages)})"
+    )
 
-            # Check if page needs update (in-memory lookup, NO DB call)
-            local_page = local_pages_map.get(page_id)
+    # ── Concurrent page processor.
+    # The bounded semaphore caps in-flight pages so we don't:
+    #   (a) saturate the DB connection pool (50 connections max),
+    #   (b) hammer the gateway with so many parallel batch-embed calls that the
+    #       provider's throttling kicks in — generate_embedding/batch already
+    #       has retry/backoff but it's better not to provoke 429s in the first place.
+    sync_concurrency = 8
+    semaphore = asyncio.Semaphore(sync_concurrency)
+    completed = [0]   # mutable counter shared between coroutines (single-threaded asyncio = safe)
 
-            needs_update = False
-            if not local_page:
-                # New page
-                logger.info(f"  New page: {full_page['title']}")
-                needs_update = True
-            elif local_page['version_number'] < version_number:
-                # Updated page
-                logger.info(f"  Updated page: {full_page['title']} (v{local_page['version_number']} → v{version_number})")
-                needs_update = True
-            else:
-                # Unchanged page
-                logger.debug(f"  Skipping unchanged page: {full_page['title']}")
-                skipped_count += 1
-                continue
- 
-            if needs_update:
-                _update_sync_status(project_id, message=f"Syncing Confluence page {idx+1}/{len(pages)}: {full_page['title']}")
- 
-                # Update metadata (offload blocking DB call)
+    async def process_one(idx: int, page: Dict):
+        async with semaphore:
+            try:
+                page_id = page['id']
+                title = page.get('title', '')
+                version_number = page.get('version', {}).get('number')
+                page_web_url = f"{confluence.base_url}{page.get('_links', {}).get('webui', '')}"
+
+                raw_html = page.get('body', {}).get('storage', {}).get('value', '') or ''
+                content = embedding_service._preprocess_confluence_content(raw_html)
+
+                # 1. Generate + store embeddings (delete-old + bulk-insert-new in 1 txn).
+                await generate_and_store_embeddings(
+                    project_id=project_id,
+                    user_id=user_id,
+                    source_type='confluence',
+                    source_id=page_id,
+                    title=title,
+                    content=content,
+                    url=page_web_url,
+                    source_updated_at=page.get('version', {}).get('when'),
+                )
+
+                # 2. Mark the page synced ONLY after embeddings are safely in the vector DB.
                 await asyncio.to_thread(
                     upsert_confluence_page,
                     project_id=project_id,
                     user_id=user_id,
                     page_id=page_id,
                     space_key=space_key,
-                    title=full_page['title'],
-                    url=f"{confluence.base_url}{full_page['_links']['webui']}",
+                    title=title,
+                    url=page_web_url,
                     version_number=version_number,
-                    last_modified_at=full_page['version']['when']
+                    last_modified_at=page.get('version', {}).get('when'),
                 )
- 
-                # Delete old embeddings (offload blocking DB call)
-                await asyncio.to_thread(delete_embeddings, project_id, 'confluence', page_id)
- 
-                # Generate new embeddings — preprocess HTML to Markdown for header-aware chunking
-                raw_html = full_page['body']['storage']['value']
-                content = embedding_service._preprocess_confluence_content(raw_html)
-                await generate_and_store_embeddings(
-                    project_id=project_id,
-                    user_id=user_id,
-                    source_type='confluence',
-                    source_id=page_id,
-                    title=full_page['title'],
-                    content=content,
-                    url=f"{confluence.base_url}{full_page['_links']['webui']}"
-                )
- 
-                synced_count += 1
- 
-        except Exception as e:
-            logger.error(f"Error syncing page {page.get('title', page.get('id', 'unknown'))}: {e}")
-            continue
- 
-    logger.info(f"Confluence sync complete: {synced_count} synced, {skipped_count} skipped")
+
+                completed[0] += 1
+                # Update progress occasionally — every 10 pages avoids hammering
+                # the in-memory status dict from 8 concurrent writers.
+                if completed[0] % 10 == 0 or completed[0] == len(pages_to_sync):
+                    _update_sync_status(
+                        project_id,
+                        message=f"Syncing Confluence: {completed[0]}/{len(pages_to_sync)} (last: {title})",
+                    )
+                return True
+            except Exception as e:
+                logger.error(f"Error syncing page {page.get('title', page.get('id', 'unknown'))}: {e}")
+                return False
+
+    # Kick off all pages — semaphore caps concurrency.
+    if pages_to_sync:
+        results = await asyncio.gather(
+            *(process_one(idx, page) for idx, page in pages_to_sync),
+            return_exceptions=False,
+        )
+        synced_count = sum(1 for r in results if r)
+    else:
+        synced_count = 0
+
+    logger.info(
+        f"Confluence sync complete: {synced_count} synced, {skipped_count} skipped, "
+        f"concurrency={sync_concurrency}"
+    )
  
  
 async def sync_jira_project(
@@ -312,7 +330,7 @@ async def sync_jira_project(
  
             if needs_update:
                 _update_sync_status(project_id, message=f"Syncing Jira issue {idx+1}/{len(issues)}: {issue_key}")
- 
+
                 # Calculate actual duration if resolved
                 actual_duration_days = None
                 if fields.get('resolutiondate') and fields.get('created'):
@@ -320,8 +338,32 @@ async def sync_jira_project(
                     resolved = parse_atlassian_date(fields['resolutiondate'])
                     if created and resolved:
                         actual_duration_days = (resolved - created).days
- 
-                # Update metadata (offload blocking DB call)
+
+                clean_domain = credentials['atlassian_domain'].replace('https://', '').replace('http://', '')
+                issue_url = f"https://{clean_domain}/browse/{issue_key}"
+
+                # 1. Generate new embeddings FIRST. delete-old + insert-new is done atomically
+                #    inside generate_and_store_embeddings, AFTER all chunks have been embedded.
+                #    A throttled Bedrock call leaves the existing embeddings in place and
+                #    raises here, skipping the upsert below so the next sync retries cleanly.
+                raw_desc = fields.get('description', '') or ''
+                if isinstance(raw_desc, dict):
+                    raw_desc = _extract_text_from_adf(raw_desc)
+                content = f"{fields['summary']}\n\n{_strip_html(raw_desc)}"
+                await generate_and_store_embeddings(
+                    project_id=project_id,
+                    user_id=user_id,
+                    source_type='jira',
+                    source_id=issue_key,
+                    title=f"{issue_key}: {fields['summary']}",
+                    content=content,
+                    url=issue_url,
+                    # updated_date_str is Jira's "updated" field — an ISO-8601
+                    # string from the Jira API; Postgres converts to TIMESTAMPTZ.
+                    source_updated_at=updated_date_str,
+                )
+
+                # 2. Only AFTER embeddings are safely in the vector DB do we mark the issue synced.
                 await asyncio.to_thread(
                     upsert_jira_issue,
                     project_id=project_id,
@@ -330,7 +372,7 @@ async def sync_jira_project(
                     issue_id=issue['id'],
                     project_key=project_key,
                     summary=fields['summary'],
-                    url=f"https://{credentials['atlassian_domain'].replace('https://', '').replace('http://', '')}/browse/{issue_key}",
+                    url=issue_url,
                     issue_type=fields.get('issuetype', {}).get('name'),
                     status=fields.get('status', {}).get('name'),
                     priority=fields.get('priority', {}).get('name'),
@@ -345,28 +387,9 @@ async def sync_jira_project(
                     created_date=fields.get('created'),
                     updated_date=updated_date_str,
                     resolved_date=fields.get('resolutiondate'),
-                    actual_duration_days=actual_duration_days
+                    actual_duration_days=actual_duration_days,
                 )
- 
-                # Delete old embeddings (offload blocking DB call)
-                await asyncio.to_thread(delete_embeddings, project_id, 'jira', issue_key)
- 
-                # Generate new embeddings
-                # Jira API v3 returns description as ADF dict, not a string
-                raw_desc = fields.get('description', '') or ''
-                if isinstance(raw_desc, dict):
-                    raw_desc = _extract_text_from_adf(raw_desc)
-                content = f"{fields['summary']}\n\n{_strip_html(raw_desc)}"
-                await generate_and_store_embeddings(
-                    project_id=project_id,
-                    user_id=user_id,
-                    source_type='jira',
-                    source_id=issue_key,
-                    title=f"{issue_key}: {fields['summary']}",
-                    content=content,
-                    url=f"https://{credentials['atlassian_domain'].replace('https://', '').replace('http://', '')}/browse/{issue_key}"
-                )
- 
+
                 synced_count += 1
  
         except Exception as e:
@@ -383,11 +406,24 @@ async def generate_and_store_embeddings(
     source_id: str,
     title: str,
     content: str,
-    url: str
-):
+    url: str,
+    source_updated_at: Optional[str] = None,
+) -> bool:
     """
-    Chunk content, generate embeddings, and store in database
-   
+    Chunk content, generate embeddings, and store in database.
+
+    SAFETY ORDERING:
+      1. Chunk text and compute ALL embeddings into memory FIRST.
+         If Bedrock/gateway throttles mid-page or any chunk fails, we raise
+         before touching the database. Old embeddings stay intact and the
+         caller leaves the metadata row unchanged, so the next sync retries.
+      2. Only AFTER all embeddings are generated do we perform the swap:
+         delete the old embeddings, then insert the new ones.
+
+    Previous implementation deleted old embeddings BEFORE generation, so any
+    mid-loop failure left the page with zero embeddings ("orphans") that
+    subsequent syncs skipped because the version_number already matched.
+
     Args:
         project_id: Project ID
         user_id: User ID
@@ -396,6 +432,10 @@ async def generate_and_store_embeddings(
         title: Document title
         content: Full document content
         url: Document URL
+
+    Returns:
+        True if embeddings were generated and stored, False if no chunks
+        were produced (e.g. empty content). Raises on any failure.
     """
     try:
         # Chunk the content using LangChain two-stage pipeline
@@ -407,49 +447,62 @@ async def generate_and_store_embeddings(
 
         if not chunks:
             logger.warning(f"No chunks generated for {source_type} {source_id}")
-            return
+            return False
 
         logger.info(f"  Generated {len(chunks)} chunks for {source_type} {source_id} (LangChain pipeline)")
- 
-        # Generate and store embeddings for each chunk
-        reused_count = 0
-        for i, chunk in enumerate(chunks):
-            # Compute content hash for dedup safety net
-            content_hash = hashlib.sha256(chunk.encode('utf-8')).hexdigest()
- 
-            # Check if an embedding already exists from any project (offload blocking DB call)
-            existing_embedding = await asyncio.to_thread(find_existing_embedding, source_type, source_id, i)
- 
-            if existing_embedding is not None:
-                embedding = existing_embedding
-                reused_count += 1
-            else:
-                # Generate embedding via Bedrock (offload blocking HTTP call)
-                embedding = await asyncio.to_thread(embedding_service.generate_embedding, chunk)
- 
-            # Store in database (offload blocking DB call)
-            await asyncio.to_thread(
-                insert_document_embedding,
-                project_id=project_id,
-                user_id=user_id,
-                source_type=source_type,
-                source_id=source_id,
-                title=title,
-                content_chunk=chunk,
-                chunk_index=i,
-                embedding=embedding,
-                url=url,
-                content_hash=content_hash
+
+        # ── PHASE 1: prepare all embeddings in memory ──
+        # Any exception here propagates BEFORE we touch document_embeddings, so
+        # the page remains searchable via its existing chunks.
+        #
+        # 1a. ONE DB call to look up all existing embeddings (cross-project dedup).
+        existing_map: Dict[int, List[float]] = await asyncio.to_thread(
+            find_existing_embeddings_bulk, source_type, source_id, len(chunks),
+        )
+        reused_count = len(existing_map)
+
+        # 1b. Identify chunks that still need new embeddings.
+        to_embed: List[tuple] = [(i, chunk) for i, chunk in enumerate(chunks) if i not in existing_map]
+
+        # 1c. Single batched embedding call (or batched loop on Bedrock fallback)
+        #     for all new chunks at once — one HTTP round trip, N embeddings.
+        if to_embed:
+            texts_to_embed = [c[1] for c in to_embed]
+            new_vectors = await asyncio.to_thread(
+                embedding_service.generate_embeddings_batch, texts_to_embed,
             )
- 
-            # Yield control back to event loop between chunks
-            await asyncio.sleep(0)
- 
+            for (idx, _chunk_text), vec in zip(to_embed, new_vectors):
+                existing_map[idx] = vec
+
+        # 1d. Re-assemble in original chunk order.
+        prepared: List[Dict] = [
+            {
+                'chunk_index': i,
+                'chunk': chunk,
+                'content_hash': hashlib.sha256(chunk.encode('utf-8')).hexdigest(),
+                'embedding': existing_map[i],
+                'source_updated_at': source_updated_at,
+            }
+            for i, chunk in enumerate(chunks)
+        ]
+
+        # ── PHASE 2: atomic swap (delete old + bulk insert new) in ONE transaction ──
+        # Replaces the previous N-statement-per-chunk loop with a single connection
+        # borrow, one DELETE, one execute_values INSERT, and one COMMIT. For an
+        # 11-chunk page that's 13 DB borrows → 1.
+        await asyncio.to_thread(
+            replace_document_embeddings_bulk,
+            project_id, user_id, source_type, source_id,
+            title, url, prepared,
+        )
+
         if reused_count > 0:
-            logger.info(f"  Stored {len(chunks)} embeddings for {source_type} {source_id} (reused {reused_count} from existing projects)")
+            logger.info(f"  Stored {len(prepared)} embeddings for {source_type} {source_id} (reused {reused_count} from existing projects)")
         else:
-            logger.info(f"  Stored {len(chunks)} embeddings for {source_type} {source_id}")
- 
+            logger.info(f"  Stored {len(prepared)} embeddings for {source_type} {source_id}")
+
+        return True
+
     except Exception as e:
         logger.error(f"Error generating embeddings for {source_type} {source_id}: {e}")
         raise

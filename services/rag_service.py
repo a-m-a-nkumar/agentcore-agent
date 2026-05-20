@@ -8,6 +8,11 @@ from services.search_service import search_service
 from langfuse_client import get_langfuse
 # Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
 from environment import chat_completion
+from utils.recency import (
+    recency_multiplier,
+    W_TEMPORAL_QA,
+    W_TEMPORAL_PROMPT_ENHANCE,
+)
 import os
 import re
 import logging
@@ -298,7 +303,10 @@ class RAGService:
         Does NOT call the LLM, just returns the prompt string.
         """
         try:
-            # 1. Multi-query hybrid search
+            # 1. Multi-query hybrid search.
+            # Prompt enhancement runs into IDE code generators where stale
+            # context produces wrong code, so use the stronger recency weight
+            # (W_TEMPORAL_PROMPT_ENHANCE=0.5) instead of the Q&A default (0.35).
             results = self._multi_query_search(
                 project_id=project_id,
                 user_query=user_query,
@@ -306,8 +314,9 @@ class RAGService:
                 source_type=source_filter,
                 include_context=True,
                 user_id=user_id,
+                w_temporal=W_TEMPORAL_PROMPT_ENHANCE,
             )
-           
+
             if not results:
                 return f"No relevant documentation found for: {user_query}"
            
@@ -462,10 +471,17 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
         source_type: Optional[str] = None,
         include_context: bool = True,
         user_id: Optional[str] = None,
+        w_temporal: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
         """
         Multi-query search: rewrite the user query into variants, run hybrid search
-        on each in parallel, and merge results with appearance-based boosting.
+        on each in parallel, and merge results with appearance-based boosting and
+        a recency multiplier on each chunk's final score.
+
+        Args:
+            w_temporal: Recency weight override. None -> uses W_TEMPORAL_QA (0.35).
+                        Pass W_TEMPORAL_PROMPT_ENHANCE (0.5) from get_enhanced_prompt
+                        for a stronger recency tilt in the pair-programming flow.
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -520,8 +536,10 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
                 if key not in doc_map or result.get('similarity', 0) > doc_map[key].get('similarity', 0):
                     doc_map[key] = result
 
-        # Step 4: Apply appearance bonus + title matching bonus
+        # Step 4: Apply appearance bonus + title matching bonus + recency multiplier
         query_terms = set(re.findall(r'[a-zA-Z]+', user_query.lower()))
+        effective_w_temporal = w_temporal if w_temporal is not None else W_TEMPORAL_QA
+        recency_applied = 0
         for key in score_map:
             count = appearance_count[key]
             # Appearance bonus: +10% per additional query that found this chunk
@@ -537,17 +555,56 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
             elif title_hits == 1:
                 score_map[key] *= 1.1
 
-        # Sort by score and take top max_chunks
+            # Recency multiplier: demote older content multiplicatively so that
+            # relevance stays dominant but freshness breaks near-ties. Old-but-
+            # canonical docs are protected by DECAY_FLOOR (=0.5 in our config).
+            # NULL source_updated_at (legacy / orphan) treated as DECAY_FLOOR.
+            r_mult = recency_multiplier(
+                doc.get('source_updated_at'),
+                w_temporal=effective_w_temporal,
+            )
+            score_map[key] *= r_mult
+            if r_mult < 1.0:
+                recency_applied += 1
+
+        logger.info(
+            f"[RECENCY] w_temporal={effective_w_temporal:.2f} applied; "
+            f"{recency_applied}/{len(score_map)} chunks received a < 1.0 multiplier"
+        )
+
+        # Sort by score, then enforce source-level diversity in the top-K.
         sorted_keys = sorted(score_map.keys(), key=lambda x: score_map[x], reverse=True)
 
-        merged_results = []
-        for key in sorted_keys[:max_chunks]:
+        # SOURCE DEDUP: cap chunks per source page so a megapage with 75+ chunks
+        # cannot monopolise top-K. Previous eval showed cases like "eDeposit Retail"
+        # filling 4 of 8 result slots with chunks from the same page, drowning out
+        # other relevant pages entirely. With max 2 chunks/source we keep room for
+        # 1-2 deep contributions from the best-matching page while guaranteeing
+        # at least max_chunks/2 distinct sources appear in the top-K.
+        MAX_CHUNKS_PER_SOURCE = 2
+
+        merged_results: List[Dict[str, Any]] = []
+        per_source_count: Dict[str, int] = {}
+        for key in sorted_keys:
+            source_id = key[0]
+            if per_source_count.get(source_id, 0) >= MAX_CHUNKS_PER_SOURCE:
+                continue
+            per_source_count[source_id] = per_source_count.get(source_id, 0) + 1
+
             result = dict(doc_map[key])
             result['rrf_score'] = score_map[key]
             result['query_appearances'] = appearance_count[key]
             merged_results.append(result)
 
-        logger.info(f"[MULTI_QUERY] Merged {sum(len(rl) for rl in all_result_lists if rl)} total results into {len(merged_results)} unique results")
+            if len(merged_results) >= max_chunks:
+                break
+
+        unique_sources = len(per_source_count)
+        logger.info(
+            f"[MULTI_QUERY] Merged {sum(len(rl) for rl in all_result_lists if rl)} candidates "
+            f"-> {len(merged_results)} chunks across {unique_sources} unique sources "
+            f"(cap={MAX_CHUNKS_PER_SOURCE}/source)"
+        )
         return merged_results
 
     def _build_rag_prompt(self, query: str, context_chunks: List[Dict]) -> str:

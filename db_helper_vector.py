@@ -321,6 +321,171 @@ def find_existing_embedding(
         release_db_connection(conn)
 
 
+def find_existing_embeddings_bulk(
+    source_type: str,
+    source_id: str,
+    num_chunks: int,
+) -> Dict[int, List[float]]:
+    """
+    Bulk dedup lookup: for one source_id, find existing embeddings for chunks 0..num_chunks-1
+    in a SINGLE DB call (instead of N round-trips via find_existing_embedding).
+
+    Returns a dict keyed by chunk_index → embedding (parsed to List[float]). Missing
+    chunk_indexes simply aren't in the dict — caller treats them as "needs generation".
+
+    Same cross-project dedup semantics as find_existing_embedding (we don't filter by
+    project_id), so embeddings synced for the same Confluence space by a different
+    project still get reused.
+    """
+    if num_chunks <= 0:
+        return {}
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        # DISTINCT ON chunk_index keeps the first matching row per chunk —
+        # cross-project, any project's copy is fine since the content is identical.
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (chunk_index) chunk_index, embedding
+            FROM document_embeddings
+            WHERE source_type = %s
+              AND source_id   = %s
+              AND chunk_index < %s
+            ORDER BY chunk_index, id
+            """,
+            (source_type, source_id, num_chunks),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+
+        result: Dict[int, List[float]] = {}
+        for r in rows:
+            raw = r['embedding']
+            if isinstance(raw, str):
+                result[r['chunk_index']] = [float(x) for x in raw.strip('[]').split(',')]
+            else:
+                result[r['chunk_index']] = raw
+
+        logger.info(
+            f"[DEDUP_BULK] {source_type} {source_id}: "
+            f"found {len(result)}/{num_chunks} chunks via existing embeddings"
+        )
+        return result
+    finally:
+        release_db_connection(conn)
+
+
+def replace_document_embeddings_bulk(
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_id: str,
+    title: str,
+    url: Optional[str],
+    rows: List[Dict],
+) -> int:
+    """
+    Atomic delete-and-bulk-insert in ONE transaction.
+
+    `rows` is a list of dicts: {chunk_index, chunk, embedding, content_hash}.
+    Each chunk's embedding is a list[float] or pgvector string.
+
+    This replaces:
+        delete_embeddings(...)   +  N x insert_document_embedding(...)
+    with a single connection borrow, one DELETE, one bulk INSERT via execute_values,
+    and one COMMIT. For an 11-chunk page that's 13 DB borrows → 1, plus all the
+    inserts go in a single statement.
+
+    If the bulk insert fails for any reason, the DELETE is rolled back too —
+    so a partial-failure mid-write no longer leaves the page in a state where
+    old embeddings are gone and new ones never landed.
+    """
+    if not rows:
+        # Caller chunked to zero — just clear any stale rows.
+        return _delete_embeddings_inplace(project_id, source_type, source_id)
+
+    from psycopg2.extras import execute_values
+
+    # Pre-serialise embeddings to the pgvector textual form once.
+    values_to_insert: List[tuple] = []
+    for r in rows:
+        emb = r['embedding']
+        if isinstance(emb, str):
+            emb_str = emb
+        else:
+            emb_str = '[' + ','.join(map(str, emb)) + ']'
+
+        values_to_insert.append((
+            project_id, user_id, source_type, source_id, title,
+            r['chunk'], r['chunk_index'], emb_str, url,
+            r.get('metadata_json', '{}'),
+            r.get('content_hash'),
+            r.get('source_updated_at'),
+        ))
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        # DELETE + bulk INSERT in one transaction — autocommit is off by default
+        # for psycopg2 connections, so neither statement is visible until commit().
+        cursor.execute(
+            "DELETE FROM document_embeddings WHERE project_id = %s AND source_type = %s AND source_id = %s",
+            (project_id, source_type, source_id),
+        )
+        deleted = cursor.rowcount
+
+        # execute_values uses one round trip to insert N rows. The :: cast
+        # template tells psycopg2 to cast the embedding placeholder to vector
+        # for each row of the VALUES list.
+        execute_values(
+            cursor,
+            """
+            INSERT INTO document_embeddings (
+                project_id, user_id, source_type, source_id, title,
+                content_chunk, chunk_index, embedding, url, metadata, content_hash,
+                source_updated_at
+            ) VALUES %s
+            """,
+            values_to_insert,
+            template="(%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s)",
+            page_size=200,
+        )
+        conn.commit()
+        cursor.close()
+
+        logger.info(
+            f"[REPLACE_BULK] {source_type} {source_id}: "
+            f"deleted {deleted} old, inserted {len(values_to_insert)} new (1 txn)"
+        )
+        return len(values_to_insert)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def _delete_embeddings_inplace(project_id: str, source_type: str, source_id: str) -> int:
+    """Internal helper used when replace is called with zero rows."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM document_embeddings WHERE project_id = %s AND source_type = %s AND source_id = %s",
+            (project_id, source_type, source_id),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        return deleted
+    finally:
+        release_db_connection(conn)
+
+
 def insert_document_embedding(
     project_id: str,
     user_id: str,
@@ -332,9 +497,17 @@ def insert_document_embedding(
     embedding: List[float],
     url: Optional[str] = None,
     metadata: Optional[Dict] = None,
-    content_hash: Optional[str] = None
+    content_hash: Optional[str] = None,
+    source_updated_at: Optional[str] = None,
 ) -> Dict:
-    """Insert a document embedding"""
+    """Insert a document embedding.
+
+    `source_updated_at` is the timestamp of the underlying Confluence page's
+    last_modified_at or the Jira issue's updated_date. Used by the recency
+    re-ranking stage in rag_service. Pass as an ISO-8601 string; Postgres
+    converts to TIMESTAMPTZ. NULL is acceptable — the recency function treats
+    missing timestamps as DECAY_FLOOR (conservative, never boosted).
+    """
     conn = get_db_connection()
     try:
         cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -349,20 +522,22 @@ def insert_document_embedding(
         cursor.execute("""
             INSERT INTO document_embeddings (
                 project_id, user_id, source_type, source_id, title,
-                content_chunk, chunk_index, embedding, url, metadata, content_hash
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s)
+                content_chunk, chunk_index, embedding, url, metadata, content_hash,
+                source_updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s)
             RETURNING *
         """, (
             project_id, user_id, source_type, source_id, title,
             content_chunk, chunk_index, embedding_str, url,
             json.dumps(metadata) if metadata else '{}',
-            content_hash
+            content_hash,
+            source_updated_at,
         ))
-        
+
         result = cursor.fetchone()
         conn.commit()
         cursor.close()
-        
+
         return dict(result) if result else None
     finally:
         release_db_connection(conn)

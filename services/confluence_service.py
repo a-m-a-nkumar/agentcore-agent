@@ -12,15 +12,21 @@ class ConfluenceService:
     def __init__(self, domain: str, email: str, api_token: str):
         """
         Initialize Confluence service
-        
+
         Args:
             domain: Atlassian domain (e.g., 'mycompany.atlassian.net')
             email: User's email address
             api_token: Atlassian API token
         """
-        self.base_url = f"https://{domain}/wiki"
+        self.domain = domain                       # bare host, for building v2 URLs
+        self.base_url = f"https://{domain}/wiki"   # legacy v1 root
+        self.v2_base  = f"https://{domain}/wiki/api/v2"  # v2 API root
         self.auth = HTTPBasicAuth(email, api_token)
         self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        # Cache for space_key -> numeric space ID (required by v2 endpoints).
+        # Populated lazily; one entry per space encountered per ConfluenceService
+        # instance, so a sync touches the v2 /spaces lookup at most once.
+        self._space_id_cache: Dict[str, str] = {}
     
     def test_connection(self) -> bool:
         """Test if credentials are valid by fetching current user info"""
@@ -123,27 +129,154 @@ class ConfluenceService:
         logger.error(f"Confluence spaces failed after 3 retries (start={start}): {last_err}")
         raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
 
-    def get_space_pages(self, space_key: str, limit: int = 100) -> List[Dict]:
+    def _resolve_space_id(self, space_key: str) -> str:
         """
-        Fetch pages from a specific Confluence space
-        
+        Resolve a space key to its numeric space ID (required by v2 endpoints).
+
+        Cached per ConfluenceService instance so a sync makes at most ONE extra
+        HTTP call per space, regardless of how many times get_space_pages is invoked.
+        """
+        if space_key in self._space_id_cache:
+            return self._space_id_cache[space_key]
+
+        url = f"{self.v2_base}/spaces"
+        response = requests.get(
+            url,
+            params={"keys": space_key, "limit": 1},
+            headers={"Accept": "application/json"},
+            auth=self.auth, timeout=30,
+        )
+        response.raise_for_status()
+        results = response.json().get("results", [])
+        if not results:
+            raise Exception(f"Confluence v2 API: space key '{space_key}' not found or not accessible")
+        space_id = results[0]["id"]
+        self._space_id_cache[space_key] = space_id
+        logger.info(f"[v2] resolved space_key='{space_key}' -> space_id={space_id}")
+        return space_id
+
+    def get_space_pages(
+        self,
+        space_key: str,
+        max_pages: Optional[int] = None,
+        with_body: bool = False,
+    ) -> List[Dict]:
+        """
+        Fetch ALL pages from a Confluence space via the Confluence Cloud v2 API.
+
+        Why v2 instead of v1:
+          - The v1 endpoint /rest/api/space/{key}/content/page does NOT return pages
+            that live inside Confluence Folders (the content type Atlassian introduced
+            in 2024). For real customer spaces this can hide ~10-15% of content.
+          - The v2 endpoint /api/v2/spaces/{id}/pages returns every page in the space
+            regardless of folder nesting, with proper cursor-based pagination.
+          - On the Digital Payments space, v1 returned 2,299 pages, v2 returned 2,601
+            (302 / 11.6% folder-nested and previously invisible to RAG).
+
         Args:
-            space_key: The Confluence space key
-            limit: Maximum number of pages to return
-            
+            space_key:  Confluence space key (e.g. 'APP'). Internally resolved to
+                        a numeric space ID via the v2 /spaces lookup.
+            max_pages:  Optional ceiling on total pages returned. None = fetch all.
+            with_body:  When True, request body inline via `?body-format=storage`
+                        so the caller does NOT need a per-page detail fetch later.
+                        Confluence caps body-inclusive batches at 25 (vs 250
+                        without body), so list-call count grows but total HTTP
+                        traffic drops drastically. For the 2,601-page Digital
+                        Payments sync: 11 list + 2,601 detail = 2,612 calls
+                        becomes 105 list + 0 detail = 105 calls (~25x fewer
+                        round trips). The body lives at returned dict path
+                        `page['body']['storage']['value']` to match the v1
+                        shape downstream callers already consume.
+
         Returns:
-            List of pages with id, title, and content
+            List of normalised page dicts. Shape:
+                id, title, status, parentId, parentType, spaceId,
+                version.{number, when}, _links.webui,
+                body.storage.value   (only when with_body=True)
         """
         try:
-            url = f"{self.base_url}/rest/api/space/{space_key}/content/page"
-            params = {"limit": limit}
-            response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
-            response.raise_for_status()
-            
-            data = response.json()
-            return data.get("results", [])
+            space_id = self._resolve_space_id(space_key)
+
+            if with_body:
+                # body-format=storage caps per-request limit to 25 in v2.
+                page_size = 25
+                next_url = f"{self.v2_base}/spaces/{space_id}/pages?limit={page_size}&body-format=storage"
+            else:
+                # Metadata-only — bigger batches are fine, fewer round trips.
+                page_size = 250
+                next_url = f"{self.v2_base}/spaces/{space_id}/pages?limit={page_size}"
+
+            all_pages: List[Dict] = []
+            batch_num = 0
+
+            while next_url:
+                batch_num += 1
+                response = requests.get(
+                    next_url,
+                    headers={"Accept": "application/json"},
+                    auth=self.auth, timeout=60 if with_body else 30,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                results = payload.get("results", [])
+
+                for p in results:
+                    # Normalise v2 -> v1-like dict that downstream code already consumes.
+                    version = p.get("version") or {}
+                    links = p.get("_links") or {}
+                    normalised: Dict = {
+                        "id": p.get("id"),
+                        "title": p.get("title"),
+                        "status": p.get("status"),
+                        "parentId": p.get("parentId"),
+                        "parentType": p.get("parentType"),
+                        "spaceId": p.get("spaceId"),
+                        "version": {
+                            "number": version.get("number"),
+                            "when": version.get("createdAt"),   # v2 'createdAt' -> v1 'when'
+                        },
+                        "_links": {
+                            "webui": links.get("webui", ""),
+                        },
+                    }
+                    if with_body:
+                        # v2 body shape: body.storage.value. Mirror v1 exactly so
+                        # callers can use page['body']['storage']['value'] either way.
+                        body_obj = p.get("body") or {}
+                        storage = body_obj.get("storage") or {}
+                        normalised["body"] = {
+                            "storage": {
+                                "value": storage.get("value", "") or "",
+                                "representation": storage.get("representation", "storage"),
+                            }
+                        }
+                    all_pages.append(normalised)
+
+                logger.info(
+                    f"[get_space_pages v2{' +body' if with_body else ''}] "
+                    f"space={space_key} batch {batch_num}: {len(results)} pages "
+                    f"(running total={len(all_pages)})"
+                )
+
+                if max_pages is not None and len(all_pages) >= max_pages:
+                    all_pages = all_pages[:max_pages]
+                    break
+
+                # Cursor pagination: _links.next is /wiki/api/v2/.../pages?cursor=...
+                next_rel = (payload.get("_links") or {}).get("next")
+                if next_rel:
+                    next_url = f"https://{self.domain}{next_rel}" if next_rel.startswith("/") else next_rel
+                else:
+                    next_url = None
+
+            logger.info(
+                f"[get_space_pages v2] space={space_key} TOTAL pages fetched: "
+                f"{len(all_pages)}{' (with body)' if with_body else ''}"
+            )
+            return all_pages
+
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error fetching Confluence pages: {e}")
+            logger.error(f"Error fetching Confluence pages (v2): {e}")
             raise Exception(f"Failed to fetch Confluence pages: {str(e)}")
 
     def get_all_pages_in_space(self, space_key: str) -> List[Dict]:
@@ -515,13 +648,49 @@ class ConfluenceService:
             logger.error(f"Error updating Confluence page: {e}")
             raise Exception(f"Failed to update Confluence page: {str(e)}")
 
+    def get_page_version(self, page_id: str, version_number: int) -> Dict:
+        """
+        Fetch a specific historical version of a Confluence page.
+        Used by Jira Sync to retrieve the "before" body of a BRD page so
+        the Diff agent can compare it against the current body.
+
+        Returns:
+            {id, title, content, version} — same shape as get_page_content,
+            but content reflects the requested historical version.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/content/{page_id}"
+            params = {
+                "expand": "body.storage,version",
+                "version": str(version_number),
+            }
+            response = requests.get(
+                url,
+                params=params,
+                headers=self.headers,
+                auth=self.auth,
+                timeout=30,
+            )
+            response.raise_for_status()
+            page_data = response.json()
+            return {
+                "id": page_data.get("id"),
+                "title": page_data.get("title"),
+                "type": page_data.get("type"),
+                "content": page_data.get("body", {}).get("storage", {}).get("value", ""),
+                "version": page_data.get("version", {}).get("number", version_number),
+            }
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error fetching Confluence page {page_id} version {version_number}: {e}")
+            raise Exception(f"Failed to fetch Confluence page version: {str(e)}")
+
     def get_page_content(self, page_id: str) -> Dict:
         """
         Get full content of a Confluence page by ID
-        
+
         Args:
             page_id: Confluence page ID
-            
+
         Returns:
             Page data with title, content, and metadata
         """
@@ -610,11 +779,16 @@ class ConfluenceService:
             logger.error(f"Error searching pages by label '{label}' in space {space_key}: {e}")
             raise Exception(f"Failed to search Confluence pages by label: {str(e)}")
 
-    def list_children_with_label(self, parent_id: str, label: str, limit: int = 50) -> List[Dict]:
+    def list_children_with_label(self, parent_id: str, label: str, limit: int = 1000) -> List[Dict]:
         """
         List child pages of `parent_id` that carry `label`, newest first.
         Uses the content tree (instant), not CQL search (eventually consistent),
         so freshly-published pages appear without indexing delay.
+
+        The default `limit` is now 1000 (previously 50). The function already
+        paginates the underlying API call correctly; the limit only caps the
+        final filtered+sorted output. Folders with >50 labelled children were
+        being silently truncated to the first 50 by the old default.
         """
         try:
             url = f"{self.base_url}/rest/api/content/{parent_id}/child/page"

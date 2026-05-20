@@ -12,6 +12,7 @@ Set EMBEDDING_PROVIDER=bedrock in .env to use local Bedrock mode.
 
 import re
 import json
+import time
 from typing import List
 import os
 import logging
@@ -218,62 +219,201 @@ class EmbeddingService:
 
         return result_chunks
     
+    # Transient-error signals (case-insensitive substring match on str(exc))
+    # plus exact exception-class names from boto3/openai for fast-path detection.
+    _TRANSIENT_SUBSTRINGS = (
+        'throttl', 'rate limit', 'rate-limit', 'too many requests',
+        'timeout', 'timed out', 'connection', 'reset by peer',
+        '429', '500', '502', '503', '504',
+        'service unavailable', 'gateway',
+    )
+    _TRANSIENT_EXC_TYPES = (
+        'ThrottlingException', 'ServiceUnavailableException',
+        'ModelTimeoutException', 'ModelStreamErrorException',
+        'RequestTimeout', 'RequestTimeoutException',
+        'ConnectionError', 'ReadTimeout', 'ReadTimeoutError',
+        'APITimeoutError', 'APIConnectionError', 'RateLimitError',
+        'InternalServerError',
+    )
+
+    @classmethod
+    def _is_transient(cls, exc: Exception) -> bool:
+        """Return True if the exception looks like a retry-worthy transient failure."""
+        if type(exc).__name__ in cls._TRANSIENT_EXC_TYPES:
+            return True
+        msg = str(exc).lower()
+        return any(s in msg for s in cls._TRANSIENT_SUBSTRINGS)
+
     def generate_embedding(self, text: str) -> List[float]:
         """
-        Generate embedding vector for text.
+        Generate embedding vector for text with retry/backoff on transient errors.
         VDI:   calls the Deluxe gateway (OpenAI-compatible).
         Local: calls AWS Bedrock Titan Embeddings directly.
+
+        Retries up to 3 times with exponential backoff (1s, 2s, 4s) on common
+        transient failures: 429 throttling, 5xx errors, connection resets, and
+        provider-specific timeout exceptions. Non-transient errors (e.g. invalid
+        input, auth) raise immediately on the first attempt.
         """
-        try:
-            input_length = len(text)
-            word_count = len(text.split())
-            logger.info(f"[EmbeddingService] generate_embedding: input_length={input_length} chars, {word_count} words")
+        max_attempts = 3
+        base_delay = 1.0  # seconds; doubles each attempt
 
-            if self.provider == 'bedrock':
-                logger.info(f"[EmbeddingService] Calling Bedrock embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
-                body = json.dumps({"inputText": text})
-                response = self.bedrock_client.invoke_model(
-                    modelId=self.embedding_model_id,
-                    body=body,
-                    contentType='application/json',
-                    accept='application/json',
-                )
-                result = json.loads(response['body'].read())
-                embedding = result['embedding']
-            else:
-                logger.info(f"[EmbeddingService] Calling gateway embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
-                response = self.client.embeddings.create(
-                    model=self.embedding_model_id,
-                    input=text,
-                    dimensions=EMBEDDING_DIMS,
-                )
-                if not response or not response.data:
-                    raise ValueError("No embedding returned from gateway")
-                embedding = response.data[0].embedding
+        input_length = len(text)
+        word_count = len(text.split())
 
-            logger.info(f"[EmbeddingService] Embedding generated: dimension={len(embedding)}")
-            return embedding
+        last_exc: Exception = None
+        for attempt in range(max_attempts):
+            try:
+                if attempt == 0:
+                    logger.info(f"[EmbeddingService] generate_embedding: input_length={input_length} chars, {word_count} words")
+                else:
+                    logger.info(f"[EmbeddingService] generate_embedding RETRY {attempt + 1}/{max_attempts}: input_length={input_length} chars")
 
-        except Exception as e:
-            logger.error(f"[EmbeddingService] FAILED to generate embedding: {type(e).__name__}: {e}")
-            raise
+                if self.provider == 'bedrock':
+                    logger.info(f"[EmbeddingService] Calling Bedrock embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
+                    body = json.dumps({"inputText": text})
+                    response = self.bedrock_client.invoke_model(
+                        modelId=self.embedding_model_id,
+                        body=body,
+                        contentType='application/json',
+                        accept='application/json',
+                    )
+                    result = json.loads(response['body'].read())
+                    embedding = result['embedding']
+                else:
+                    logger.info(f"[EmbeddingService] Calling gateway embeddings (model={self.embedding_model_id}, dims={EMBEDDING_DIMS})...")
+                    response = self.client.embeddings.create(
+                        model=self.embedding_model_id,
+                        input=text,
+                        dimensions=EMBEDDING_DIMS,
+                    )
+                    if not response or not response.data:
+                        raise ValueError("No embedding returned from gateway")
+                    embedding = response.data[0].embedding
+
+                logger.info(f"[EmbeddingService] Embedding generated: dimension={len(embedding)}")
+                return embedding
+
+            except Exception as e:
+                last_exc = e
+                err_type = type(e).__name__
+                transient = self._is_transient(e)
+                if attempt < max_attempts - 1 and transient:
+                    delay = base_delay * (2 ** attempt)
+                    logger.warning(
+                        f"[EmbeddingService] transient error '{err_type}: {e}' — "
+                        f"retrying in {delay:.1f}s (attempt {attempt + 1}/{max_attempts})"
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.error(f"[EmbeddingService] FAILED to generate embedding: {err_type}: {e}")
+                raise
+
+        # Defensive — should never reach here because the loop either returns or raises.
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("generate_embedding exited retry loop without a result")
     
+    def generate_embeddings_batch(
+        self,
+        texts: List[str],
+        batch_size: int = 25,
+    ) -> List[List[float]]:
+        """
+        Generate embeddings for many chunks with significantly fewer API round trips.
+
+        Gateway path (production / VDI):
+            Sends `batch_size` chunks per HTTP call via the OpenAI-compatible
+            embeddings API (which accepts `input` as a list). For 13,000 chunks
+            this collapses 13,000 sequential calls down to ~520, yielding a
+            ~15-25x speedup on the embedding stage of an initial sync.
+
+        Bedrock path (local dev):
+            Titan-v2's invoke_model only accepts a single inputText per request.
+            We fall back to calling generate_embedding() in a tight loop. Each
+            call still benefits from the retry/backoff in generate_embedding.
+
+        Order is preserved: result[i] is the embedding of texts[i].
+
+        Args:
+            texts:      List of strings to embed.
+            batch_size: How many chunks per request on the gateway path.
+                        25 is conservative and safe for Titan-v2 via the gateway.
+
+        Returns:
+            List of embedding vectors, same length and order as `texts`.
+        """
+        if not texts:
+            return []
+
+        # Bedrock path: Titan-v2 is single-input only — loop and reuse retry logic.
+        if self.provider == 'bedrock':
+            logger.info(f"[EmbeddingService] generate_embeddings_batch: Bedrock single-input path, {len(texts)} chunks")
+            return [self.generate_embedding(t) for t in texts]
+
+        # Gateway path: batch via OpenAI-compatible `input` list parameter.
+        logger.info(
+            f"[EmbeddingService] generate_embeddings_batch: gateway path, "
+            f"{len(texts)} chunks in batches of {batch_size}"
+        )
+        all_embeddings: List[List[float]] = []
+        max_attempts = 3
+        base_delay = 1.0
+
+        for start in range(0, len(texts), batch_size):
+            chunk_batch = texts[start:start + batch_size]
+            batch_label = f"{start + 1}-{start + len(chunk_batch)}/{len(texts)}"
+
+            # Per-batch retry loop (reusing the same transient classifier).
+            last_exc: Exception = None
+            for attempt in range(max_attempts):
+                try:
+                    if attempt == 0:
+                        logger.info(f"[EmbeddingService] batch {batch_label}: {len(chunk_batch)} inputs")
+                    else:
+                        logger.info(f"[EmbeddingService] batch {batch_label} RETRY {attempt + 1}/{max_attempts}")
+
+                    response = self.client.embeddings.create(
+                        model=self.embedding_model_id,
+                        input=chunk_batch,            # list, not a single string
+                        dimensions=EMBEDDING_DIMS,
+                    )
+                    if not response or not response.data or len(response.data) != len(chunk_batch):
+                        raise ValueError(
+                            f"Gateway returned {len(response.data) if response else 0} embeddings "
+                            f"for batch of {len(chunk_batch)}"
+                        )
+                    # response.data preserves input order per OpenAI API contract.
+                    all_embeddings.extend(d.embedding for d in response.data)
+                    break  # success — move to next batch
+
+                except Exception as e:
+                    last_exc = e
+                    err_type = type(e).__name__
+                    if attempt < max_attempts - 1 and self._is_transient(e):
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(
+                            f"[EmbeddingService] batch {batch_label} transient error "
+                            f"'{err_type}: {e}' — retrying in {delay:.1f}s"
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.error(f"[EmbeddingService] batch {batch_label} FAILED: {err_type}: {e}")
+                    raise
+
+        logger.info(f"[EmbeddingService] generate_embeddings_batch: produced {len(all_embeddings)} embeddings")
+        return all_embeddings
+
     def generate_embeddings_for_chunks(self, chunks: List[str]) -> List[List[float]]:
         """
-        Generate embeddings for multiple chunks
-        
-        Args:
-            chunks: List of text chunks
-            
-        Returns:
-            List of embedding vectors
+        Legacy per-chunk loop. Kept for backward compatibility with any caller
+        still using it; new code should call generate_embeddings_batch().
         """
         embeddings = []
         for i, chunk in enumerate(chunks):
             print(f"  Generating embedding {i+1}/{len(chunks)}...")
             embedding = self.generate_embedding(chunk)
             embeddings.append(embedding)
-        
         return embeddings
 
 

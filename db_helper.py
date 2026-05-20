@@ -210,25 +210,30 @@ def _run_migrations(db_params: dict, sslmode: str):
 
 def get_db_connection():
     """
-    Get a connection from the pool with health check.
-    If the connection is stale (RDS dropped it), discard and get a fresh one.
+    Get a connection from the pool with a CHEAP stale-connection check.
+
+    The old implementation ran `SELECT 1` against RDS on every borrow as a
+    health check. Over a cross-region/VDI network that round-trip cost ~400ms
+    per borrow, which combined with N borrows per RAG sync page added up to
+    hours of pure network latency on initial syncs.
+
+    The new check uses psycopg2's `Connection.closed` attribute — a local read
+    of the socket state with NO network round-trip. If the connection passes
+    `closed` but is silently dead (e.g. RDS killed it without our knowing),
+    the caller's actual query will raise, and the per-function exception
+    handlers + TCP keepalive (keepalives_idle=30, configured at pool creation)
+    will detect and recover. So we trade an exotic safety net for ~400ms back
+    on every single borrow.
     """
     start_time = time.time()
     max_retries = 2
     for attempt in range(max_retries):
         try:
             conn = get_db_pool().getconn()
-            # Health check: ping the connection
-            try:
-                with conn.cursor() as cur:
-                    cur.execute("SELECT 1")
-            except Exception:
-                # Connection is stale — discard it and retry
-                logger.warning(f"[DB] Stale connection detected (attempt {attempt + 1}), discarding and retrying...")
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+
+            # Cheap local check: is the socket closed?
+            if conn.closed:
+                logger.warning(f"[DB] Closed connection from pool (attempt {attempt + 1}), discarding and retrying...")
                 try:
                     get_db_pool().putconn(conn, close=True)
                 except Exception:
@@ -237,7 +242,7 @@ def get_db_connection():
                     continue
                 # Last attempt: reset the entire pool
                 global _db_pool
-                logger.warning("[DB] Resetting connection pool after stale connections")
+                logger.warning("[DB] Resetting connection pool after closed connections")
                 with _db_pool_lock:
                     try:
                         _db_pool.closeall()
@@ -245,9 +250,12 @@ def get_db_connection():
                         pass
                     _db_pool = None
                 conn = get_db_pool().getconn()
-            
+
             duration = (time.time() - start_time) * 1000
-            logger.info(f"[DB_PERF] Borrowed connection from pool in {duration:.2f}ms")
+            # Only log when slow — healthy borrows should be sub-millisecond
+            # and would otherwise flood the log during heavy sync work.
+            if duration > 50:
+                logger.info(f"[DB_PERF] Borrowed connection from pool in {duration:.2f}ms")
             return conn
         except Exception as e:
             if attempt < max_retries - 1:

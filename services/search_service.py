@@ -102,7 +102,11 @@ class SearchService:
                     'url': result.get('url', ''),
                     'similarity': float(result.get('similarity', result.get('rrf_score', 0))),
                     'chunk_index': result['chunk_index'],
-                    'metadata': result.get('metadata', {})
+                    'metadata': result.get('metadata', {}),
+                    # Passed through for recency-aware re-ranking in rag_service.
+                    # NULL when source row was deleted or for legacy embeddings
+                    # not yet backfilled — recency function handles None safely.
+                    'source_updated_at': result.get('source_updated_at'),
                 })
             
             logger.info(f"Search Service found {len(search_results)} results")
