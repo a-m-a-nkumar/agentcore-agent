@@ -83,51 +83,96 @@ class ConfluenceService:
     
     def get_spaces_page(self, start: int = 0, limit: int = 100, search: str = "") -> Dict:
         """
-        Fetch a single page of Confluence spaces (for lazy loading).
-        Retries up to 3 times on transient connection errors.
+        Fetch a page of Confluence spaces.
+
+        Behaviour split:
+          - search == "": single-page lazy-load (start/limit window, scroll-paginated).
+            Returns `hasMore=True` when the page is saturated so the UI can fetch
+            the next slice on scroll.
+          - search != "": exhaustive paginate-and-filter across the *entire* space
+            list, then return all matches with `hasMore=False`. Confluence v1's
+            /rest/api/space endpoint has no `q`/`search` query parameter, so we
+            cannot push filtering down to Atlassian — the only way to find a
+            space whose key/name matches the user's query is to enumerate every
+            space and filter client-side. Without this, typing "SDLC" with the
+            actual SDLC space sitting on page 3 of 5 returns "No space found"
+            even though the space exists.
+
+        Retries up to 3 times on transient connection errors per HTTP call.
 
         Returns:
             dict with keys: spaces, hasMore
         """
         import time
         url = f"{self.base_url}/rest/api/space"
-        params = {"limit": limit, "start": start}
-        last_err = None
 
-        for attempt in range(3):
-            try:
-                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
-                response.raise_for_status()
+        def _matches(s: Dict) -> bool:
+            if s["key"].startswith("~"):
+                return False
+            if not search:
+                return True
+            q = search.lower()
+            return q in s["key"].lower() or q in s["name"].lower()
 
-                data = response.json()
-                batch = data.get("results", [])
+        def _shape(s: Dict) -> Dict:
+            return {
+                "key": s["key"],
+                "name": s["name"],
+                "id": s["id"],
+                "type": s.get("type", "global"),
+            }
 
-                # Filter personal spaces and apply optional search
-                spaces = [
-                    {
-                        "key": s["key"],
-                        "name": s["name"],
-                        "id": s["id"],
-                        "type": s.get("type", "global"),
-                    }
-                    for s in batch
-                    if not s["key"].startswith("~")
-                    and (not search or search.lower() in s["key"].lower() or search.lower() in s["name"].lower())
-                ]
+        def _fetch_once(page_start: int, page_limit: int) -> List[Dict]:
+            """One HTTP call with up to 3 retries on transient errors."""
+            last_err = None
+            for attempt in range(3):
+                try:
+                    response = requests.get(
+                        url,
+                        headers=self.headers,
+                        auth=self.auth,
+                        params={"limit": page_limit, "start": page_start},
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+                    return response.json().get("results", [])
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                    last_err = e
+                    logger.warning(
+                        f"Confluence spaces attempt {attempt + 1}/3 failed "
+                        f"(start={page_start}): {e}"
+                    )
+                    if attempt < 2:
+                        time.sleep(1)
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"Error fetching Confluence spaces (start={page_start}): {e}")
+                    raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
+            logger.error(
+                f"Confluence spaces failed after 3 retries (start={page_start}): {last_err}"
+            )
+            raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
 
-                has_more = len(batch) >= limit
-                return {"spaces": spaces, "hasMore": has_more}
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                last_err = e
-                logger.warning(f"Confluence spaces attempt {attempt + 1}/3 failed (start={start}): {e}")
-                if attempt < 2:
-                    time.sleep(1)
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Error fetching Confluence spaces page (start={start}): {e}")
-                raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
+        # ── Search path: exhaust every page, return all matches ─────────
+        if search:
+            all_matches: List[Dict] = []
+            page_size = 100  # Confluence Cloud per-page cap
+            page_start = 0
+            while True:
+                batch = _fetch_once(page_start, page_size)
+                all_matches.extend(_shape(s) for s in batch if _matches(s))
+                if len(batch) < page_size:
+                    break
+                page_start += page_size
+            logger.info(
+                f"[Confluence] search='{search}' matched {len(all_matches)} space(s) "
+                f"after enumerating all pages"
+            )
+            return {"spaces": all_matches, "hasMore": False}
 
-        logger.error(f"Confluence spaces failed after 3 retries (start={start}): {last_err}")
-        raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
+        # ── No-search path: single page (lazy-load on scroll) ───────────
+        batch = _fetch_once(start, limit)
+        spaces = [_shape(s) for s in batch if _matches(s)]
+        return {"spaces": spaces, "hasMore": len(batch) >= limit}
 
     def _resolve_space_id(self, space_key: str) -> str:
         """
