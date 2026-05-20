@@ -152,20 +152,37 @@ class ConfluenceService:
             )
             raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
 
-        # ── Search path: exhaust every page, return all matches ─────────
+        # ── Search path: exhaust every page in parallel waves ──────────
+        # Sequential pagination was correct but slow — on an instance with
+        # ~500 spaces (5 pages × 300ms) the user typed faster than results
+        # could come back. Parallel waves of N concurrent fetches collapse
+        # that cost to roughly one round trip per wave. wave_size=8 keeps
+        # us well under Confluence Cloud's rate-limit envelope for short
+        # bursts.
         if search:
+            import concurrent.futures
             all_matches: List[Dict] = []
             page_size = 100  # Confluence Cloud per-page cap
-            page_start = 0
-            while True:
-                batch = _fetch_once(page_start, page_size)
-                all_matches.extend(_shape(s) for s in batch if _matches(s))
-                if len(batch) < page_size:
-                    break
-                page_start += page_size
+            wave_size = 8
+            wave_start = 0
+            with concurrent.futures.ThreadPoolExecutor(max_workers=wave_size) as executor:
+                while True:
+                    offsets = [wave_start + i * page_size for i in range(wave_size)]
+                    futures = [executor.submit(_fetch_once, off, page_size) for off in offsets]
+                    # Preserve offset order so the returned space list reflects
+                    # Confluence's own ordering (otherwise the picker rows
+                    # would shuffle on every keystroke).
+                    batches = [f.result() for f in futures]
+                    for batch in batches:
+                        all_matches.extend(_shape(s) for s in batch if _matches(s))
+                    # Any short page in this wave means we've hit the tail of
+                    # the global list — stop firing further waves.
+                    if any(len(b) < page_size for b in batches):
+                        break
+                    wave_start += wave_size * page_size
             logger.info(
                 f"[Confluence] search='{search}' matched {len(all_matches)} space(s) "
-                f"after enumerating all pages"
+                f"(parallel pagination, {wave_size}x concurrency)"
             )
             return {"spaces": all_matches, "hasMore": False}
 
