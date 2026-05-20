@@ -1,14 +1,31 @@
+import time
 import requests
 from requests.auth import HTTPBasicAuth
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 import logging
 import html
 
 logger = logging.getLogger(__name__)
 
+# Module-level cache of the FULL space list, keyed by user email so a request
+# from one user can't see another user's spaces. TTL is short enough that
+# brand-new spaces appear quickly (5 min) but long enough that typing every
+# character in the search box doesn't re-enumerate Atlassian.
+#
+# Why a cache: without it, each keystroke ("sd", "sdl", "sdlc", ...) triggers
+# a fresh full pagination across (in some instances) thousands of pages,
+# which both consumes Atlassian's WAF burst budget — surfacing as
+# "SSL: UNEXPECTED_EOF_WHILE_READING" errors when too many parallel
+# connections handshake at once — and gives a poor UX (each keystroke
+# pays the full cost). The cache means: pay it ONCE per 5-min window per
+# user, then every keystroke is in-memory.
+_SPACE_LIST_CACHE: Dict[str, Tuple[float, List[Dict]]] = {}
+_SPACE_LIST_CACHE_TTL_SECS = 300  # 5 minutes
+
+
 class ConfluenceService:
     """Service for interacting with Confluence Cloud API"""
-    
+
     def __init__(self, domain: str, email: str, api_token: str):
         """
         Initialize Confluence service
@@ -21,8 +38,14 @@ class ConfluenceService:
         self.domain = domain                       # bare host, for building v2 URLs
         self.base_url = f"https://{domain}/wiki"   # legacy v1 root
         self.v2_base  = f"https://{domain}/wiki/api/v2"  # v2 API root
+        self.email = email                          # used as cache key for the spaces list
         self.auth = HTTPBasicAuth(email, api_token)
         self.headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        # requests.Session pools TCP+TLS connections across calls. Without it,
+        # every parallel page fetch did a fresh SSL handshake to Atlassian and
+        # the burst tore connections (UNEXPECTED_EOF). With Session, the
+        # ThreadPoolExecutor reuses a small set of warm connections.
+        self._session = requests.Session()
         # Cache for space_key -> numeric space ID (required by v2 endpoints).
         # Populated lazily; one entry per space encountered per ConfluenceService
         # instance, so a sync touches the v2 /spaces lookup at most once.
@@ -81,115 +104,140 @@ class ConfluenceService:
             logger.error(f"Error fetching Confluence spaces: {e}")
             raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
     
+    def _fetch_spaces_batch(self, page_start: int, page_limit: int) -> List[Dict]:
+        """One paginated HTTP call to /rest/api/space with up to 3 retries on
+        transient errors. Uses the instance-level Session for connection
+        pooling so a burst of concurrent fetches does NOT trigger fresh SSL
+        handshakes on every call — the previous "SSLError: UNEXPECTED_EOF"
+        storm came from doing exactly that against Atlassian's WAF."""
+        url = f"{self.base_url}/rest/api/space"
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                resp = self._session.get(
+                    url,
+                    headers=self.headers,
+                    auth=self.auth,
+                    params={"limit": page_limit, "start": page_start},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                return resp.json().get("results", [])
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                last_err = e
+                logger.warning(
+                    f"Confluence spaces attempt {attempt + 1}/3 failed (start={page_start}): {e}"
+                )
+                if attempt < 2:
+                    # Exponential backoff — Atlassian's edge needs a moment
+                    # after a SSL EOF storm to release sockets.
+                    time.sleep(1 + attempt)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Error fetching Confluence spaces (start={page_start}): {e}")
+                raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
+        logger.error(
+            f"Confluence spaces failed after 3 retries (start={page_start}): {last_err}"
+        )
+        raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
+
+    def _fetch_all_spaces(self) -> List[Dict]:
+        """Enumerate every space in the Confluence instance (one full pass).
+
+        Used to (re)populate the module-level cache. Bounded to 3 concurrent
+        in-flight fetches per wave: anything higher kept tripping Atlassian's
+        WAF and surfacing as `UNEXPECTED_EOF_WHILE_READING`. The Session above
+        keeps connections warm so 3 parallel calls reuse 1–2 TCP sockets
+        rather than handshaking 8 fresh ones.
+
+        Filters personal spaces (keys starting with `~`) at ingestion time
+        so the cache holds only what's actually pickable.
+        """
+        import concurrent.futures
+        all_spaces: List[Dict] = []
+        page_size = 100   # Confluence Cloud per-page cap
+        wave_size = 3     # Empirically safe under Atlassian's burst limit
+        wave_start = 0
+        with concurrent.futures.ThreadPoolExecutor(max_workers=wave_size) as executor:
+            while True:
+                offsets = [wave_start + i * page_size for i in range(wave_size)]
+                futures = [executor.submit(self._fetch_spaces_batch, off, page_size) for off in offsets]
+                batches = [f.result() for f in futures]
+                for batch in batches:
+                    for s in batch:
+                        if s["key"].startswith("~"):
+                            continue
+                        all_spaces.append({
+                            "key": s["key"],
+                            "name": s["name"],
+                            "id": s["id"],
+                            "type": s.get("type", "global"),
+                        })
+                if any(len(b) < page_size for b in batches):
+                    break
+                wave_start += wave_size * page_size
+        return all_spaces
+
+    def _get_cached_all_spaces(self) -> List[Dict]:
+        """Return the cached full space list, refreshing if stale or missing.
+
+        Cache is per-user (keyed by email) so credentials from different
+        accounts don't see each other's spaces.
+        """
+        now = time.time()
+        cached = _SPACE_LIST_CACHE.get(self.email)
+        if cached and (now - cached[0]) < _SPACE_LIST_CACHE_TTL_SECS:
+            return cached[1]
+        logger.info(
+            f"[Confluence] cache miss/expired for {self.email}; fetching full space list…"
+        )
+        spaces = self._fetch_all_spaces()
+        _SPACE_LIST_CACHE[self.email] = (now, spaces)
+        logger.info(
+            f"[Confluence] cached {len(spaces)} spaces for {self.email} (TTL {_SPACE_LIST_CACHE_TTL_SECS}s)"
+        )
+        return spaces
+
     def get_spaces_page(self, start: int = 0, limit: int = 100, search: str = "") -> Dict:
         """
-        Fetch a page of Confluence spaces.
+        Page through (or search) Confluence spaces, backed by an in-memory
+        cache of the full list.
 
-        Behaviour split:
-          - search == "": single-page lazy-load (start/limit window, scroll-paginated).
-            Returns `hasMore=True` when the page is saturated so the UI can fetch
-            the next slice on scroll.
-          - search != "": exhaustive paginate-and-filter across the *entire* space
-            list, then return all matches with `hasMore=False`. Confluence v1's
-            /rest/api/space endpoint has no `q`/`search` query parameter, so we
-            cannot push filtering down to Atlassian — the only way to find a
-            space whose key/name matches the user's query is to enumerate every
-            space and filter client-side. Without this, typing "SDLC" with the
-            actual SDLC space sitting on page 3 of 5 returns "No space found"
-            even though the space exists.
-
-        Retries up to 3 times on transient connection errors per HTTP call.
+        Behaviour:
+          - First call (any path) fills the cache by enumerating every page
+            of /rest/api/space with bounded concurrency. ~1 round trip per
+            wave of 3, so a 2,000-space instance completes in ~7 waves.
+          - All subsequent calls within `_SPACE_LIST_CACHE_TTL_SECS` (5 min)
+            serve from memory — instant, no Atlassian network cost.
+          - search != "": filter the cached list by key/name substring,
+            return all matches with hasMore=False.
+          - search == "": slice the cached list at [start:start+limit],
+            return hasMore=True iff more items remain. The scroll-to-load
+            sentinel in the UI advances `start` to fetch the next slice
+            (still from memory, also instant).
 
         Returns:
             dict with keys: spaces, hasMore
         """
-        import time
-        url = f"{self.base_url}/rest/api/space"
+        spaces = self._get_cached_all_spaces()
 
-        def _matches(s: Dict) -> bool:
-            if s["key"].startswith("~"):
-                return False
-            if not search:
-                return True
-            q = search.lower()
-            return q in s["key"].lower() or q in s["name"].lower()
-
-        def _shape(s: Dict) -> Dict:
-            return {
-                "key": s["key"],
-                "name": s["name"],
-                "id": s["id"],
-                "type": s.get("type", "global"),
-            }
-
-        def _fetch_once(page_start: int, page_limit: int) -> List[Dict]:
-            """One HTTP call with up to 3 retries on transient errors."""
-            last_err = None
-            for attempt in range(3):
-                try:
-                    response = requests.get(
-                        url,
-                        headers=self.headers,
-                        auth=self.auth,
-                        params={"limit": page_limit, "start": page_start},
-                        timeout=30,
-                    )
-                    response.raise_for_status()
-                    return response.json().get("results", [])
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                    last_err = e
-                    logger.warning(
-                        f"Confluence spaces attempt {attempt + 1}/3 failed "
-                        f"(start={page_start}): {e}"
-                    )
-                    if attempt < 2:
-                        time.sleep(1)
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Error fetching Confluence spaces (start={page_start}): {e}")
-                    raise Exception(f"Failed to fetch Confluence spaces: {str(e)}")
-            logger.error(
-                f"Confluence spaces failed after 3 retries (start={page_start}): {last_err}"
-            )
-            raise Exception(f"Failed to fetch Confluence spaces after 3 retries: {str(last_err)}")
-
-        # ── Search path: exhaust every page in parallel waves ──────────
-        # Sequential pagination was correct but slow — on an instance with
-        # ~500 spaces (5 pages × 300ms) the user typed faster than results
-        # could come back. Parallel waves of N concurrent fetches collapse
-        # that cost to roughly one round trip per wave. wave_size=8 keeps
-        # us well under Confluence Cloud's rate-limit envelope for short
-        # bursts.
         if search:
-            import concurrent.futures
-            all_matches: List[Dict] = []
-            page_size = 100  # Confluence Cloud per-page cap
-            wave_size = 8
-            wave_start = 0
-            with concurrent.futures.ThreadPoolExecutor(max_workers=wave_size) as executor:
-                while True:
-                    offsets = [wave_start + i * page_size for i in range(wave_size)]
-                    futures = [executor.submit(_fetch_once, off, page_size) for off in offsets]
-                    # Preserve offset order so the returned space list reflects
-                    # Confluence's own ordering (otherwise the picker rows
-                    # would shuffle on every keystroke).
-                    batches = [f.result() for f in futures]
-                    for batch in batches:
-                        all_matches.extend(_shape(s) for s in batch if _matches(s))
-                    # Any short page in this wave means we've hit the tail of
-                    # the global list — stop firing further waves.
-                    if any(len(b) < page_size for b in batches):
-                        break
-                    wave_start += wave_size * page_size
+            q = search.lower()
+            matches = [
+                s for s in spaces
+                if q in s["key"].lower() or q in s["name"].lower()
+            ]
             logger.info(
-                f"[Confluence] search='{search}' matched {len(all_matches)} space(s) "
-                f"(parallel pagination, {wave_size}x concurrency)"
+                f"[Confluence] search='{search}' matched {len(matches)}/{len(spaces)} space(s) "
+                f"(cached list)"
             )
-            return {"spaces": all_matches, "hasMore": False}
+            return {"spaces": matches, "hasMore": False}
 
-        # ── No-search path: single page (lazy-load on scroll) ───────────
-        batch = _fetch_once(start, limit)
-        spaces = [_shape(s) for s in batch if _matches(s)]
-        return {"spaces": spaces, "hasMore": len(batch) >= limit}
+        # No-search: slice the cached list. The frontend's lazy-load sentinel
+        # advances `start` by `limit` on each scroll hit; we serve the next
+        # slice from memory until exhausted.
+        page = spaces[start : start + limit]
+        has_more = (start + limit) < len(spaces)
+        return {"spaces": page, "hasMore": has_more}
 
     def _resolve_space_id(self, space_key: str) -> str:
         """
