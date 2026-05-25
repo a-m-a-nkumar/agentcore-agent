@@ -785,8 +785,119 @@ def _do_ask_question(
     )
 
 
-def _do_suggest(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_suggest lands in Phase 2 commit 7")
+def _do_suggest(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """3-5 concrete improvements for one section. One LLM call with the
+    brd_suggest prompt. Reuses any prior audit findings on the section
+    as the primary signal and optionally seeds long-term project facts
+    so suggestions can cite established context.
+
+    Target resolution order:
+      1. router.target_section (int) — explicit pick.
+      2. router.target_title (str)   — fuzzy match.
+      3. Neither — pick the section with the lowest stored audit score
+         (or section 1 if no audits run yet). Fallback mirrors SAD's
+         _do_suggest pattern so a bare "give me suggestions" works.
+    """
+    from services.brd_orchestrator_utils import (
+        brd_structure_key,
+        extract_json,
+        get_long_term_facts,
+        s3_get_json_with_etag,
+    )
+    from prompts.brd_suggest_prompts import SUGGEST_SYSTEM_PROMPT, build_suggest_prompt
+    from llm_gateway import chat_completion
+
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+    brd_id     = session.get("brd_id")
+    if not brd_id:
+        return card("text", text="There's no BRD to suggest improvements for yet.",
+                    kind="warning")
+
+    try:
+        structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card("error", code="malformed_brd",
+                    message="BRD structure malformed", retryable=False)
+
+    sections = structure["sections"]
+    section, section_number = _resolve_target_section(
+        sections=sections,
+        target_number=router.get("target_section"),
+        target_title=router.get("target_title"),
+    )
+    if section == "ambiguous":
+        return card(
+            "clarification",
+            candidates=[{"number": s.get("number"), "title": s.get("title")} for s in section_number],
+            original_intent="SUGGEST",
+        )
+    if section is None:
+        # Fall back to the lowest-scored section, or §1 if no audits yet.
+        worst: Optional[Tuple[int, Dict[str, Any]]] = None
+        for s in sections:
+            score = int((s.get("audit") or {}).get("score", 100))
+            if worst is None or score < worst[0]:
+                worst = (score, s)
+        section = worst[1] if worst else sections[0]
+        section_number = section.get("number")
+
+    audit_issues = (section.get("audit") or {}).get("issues") or []
+
+    known_facts: List[str] = []
+    if session.get("use_long_term_context", True):
+        try:
+            known_facts = get_long_term_facts(
+                user_id=user_id,
+                project_id=project_id,
+                query=section.get("title") or f"section {section_number}",
+            )
+        except Exception as e:
+            logger.warning(f"[BRD] suggest long-term facts load failed (non-fatal): {e}")
+
+    user_content = build_suggest_prompt(
+        section_number=section_number,
+        section_title=section.get("title") or "",
+        current_content=section.get("content") or [],
+        audit_issues=audit_issues,
+        known_facts=known_facts,
+    )
+
+    try:
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=SUGGEST_SYSTEM_PROMPT,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.4,
+            max_tokens=BRD_SUGGEST_MAX_TOKENS,
+            user_id=user_id,
+            token_source=f"lambda_brd_orchestrator:suggest_{section_number}",
+        )
+        parsed = extract_json(raw)
+        items = parsed.get("items") if isinstance(parsed, dict) else []
+        if not isinstance(items, list):
+            items = []
+    except Exception as e:
+        logger.warning(f"[BRD] _do_suggest LLM/parse failed: {e}")
+        items = []
+
+    # Stamp a stable id per item so the frontend's "Apply" button can
+    # round-trip an opaque handle back to the orchestrator without
+    # leaking the LLM's exact wording into a URL.
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and "id" not in it:
+            it["id"] = f"sugg-{section_number}-{i}"
+
+    return card(
+        "suggestions",
+        target_section=section_number,
+        title=section.get("title"),
+        items=items,
+    )
 
 
 def _do_add_info(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
@@ -1059,8 +1170,214 @@ def _do_audit(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, 
     )
 
 
-def _do_regenerate_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_regenerate_section lands in Phase 2 commit 7")
+def _do_regenerate_section(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Rewrite ONE section from scratch using its current content +
+    accumulated facts as context. Differs from _do_edit_section in
+    that there's no surgical "change X to Y" instruction — the model
+    is told to produce a fresh, improved version.
+
+    Pipeline:
+      1. Resolve target section (number > title fuzzy match).
+      2. Load BRD with etag.
+      3. Build a regenerate prompt that includes:
+           - section title + number
+           - current content (so the LLM can preserve hard-won facts)
+           - known long-term facts (when opted in)
+           - the user's regen reason (router.edit_instruction or the
+             original message — often "redo §4 with the new info")
+      4. Parse JSON, push old content onto previous_versions, write
+         back conditionally.
+      5. Return section_regenerated card.
+    """
+    from services.brd_orchestrator_utils import (
+        ConcurrentEditError,
+        brd_structure_key,
+        extract_json,
+        get_long_term_facts,
+        s3_get_json_with_etag,
+        s3_put_json_if_match,
+    )
+    from llm_gateway import chat_completion
+
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+    brd_id     = session.get("brd_id")
+    regen_reason = (router.get("edit_instruction") or (event or {}).get("message") or "").strip()
+
+    if not brd_id:
+        return card("text", text="There's no BRD to regenerate yet.", kind="warning")
+
+    try:
+        structure, etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card("error", code="malformed_brd",
+                    message="BRD structure malformed", retryable=False)
+
+    section, section_number = _resolve_target_section(
+        sections=structure["sections"],
+        target_number=router.get("target_section"),
+        target_title=router.get("target_title"),
+    )
+    if section == "ambiguous":
+        return card(
+            "clarification",
+            candidates=[{"number": s.get("number"), "title": s.get("title")} for s in section_number],
+            original_intent="REGENERATE_SECTION",
+        )
+    if section is None:
+        return card("text",
+                    text=("Which section should I regenerate? "
+                          f"Try specifying a section number (1-{len(structure['sections'])})."),
+                    kind="warning")
+
+    known_facts: List[str] = []
+    if session.get("use_long_term_context", True):
+        try:
+            known_facts = get_long_term_facts(
+                user_id=user_id,
+                project_id=project_id,
+                query=section.get("title") or f"section {section_number}",
+            )
+        except Exception as e:
+            logger.warning(f"[BRD] regen long-term facts load failed (non-fatal): {e}")
+
+    user_content = _build_regenerate_prompt(
+        section_number=section_number,
+        section_title=section.get("title") or "",
+        current_content=section.get("content") or [],
+        known_facts=known_facts,
+        regen_reason=regen_reason,
+    )
+
+    try:
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=_REGENERATE_SYSTEM_PROMPT,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.3,
+            max_tokens=BRD_SECTION_MAX_TOKENS,
+            user_id=user_id,
+            token_source=f"lambda_brd_orchestrator:regenerate_section_{section_number}",
+        )
+        parsed = extract_json(raw)
+    except Exception as e:
+        logger.warning(f"[BRD] _do_regenerate_section LLM/parse failed: {e}")
+        return card("text",
+                    text="Sorry, the regeneration failed — model returned an unexpected response.",
+                    kind="warning")
+
+    new_content = parsed.get("content") if isinstance(parsed, dict) else None
+    if not isinstance(new_content, list):
+        return card("text",
+                    text="The model returned the section without a content array. "
+                         "Try rephrasing or use a more specific instruction.",
+                    kind="warning")
+
+    _push_previous_version(section, reason="regenerate_section")
+    section["content"] = new_content
+    section["status"] = "llm_regenerated"
+    section["last_updated_ts"] = _now_iso()
+    if isinstance(parsed.get("title"), str) and parsed["title"].strip():
+        section["title"] = parsed["title"].strip()
+
+    try:
+        s3_put_json_if_match(brd_structure_key(brd_id), structure, etag)
+    except ConcurrentEditError as ce:
+        return card("concurrent_edit",
+                    section_number=section_number,
+                    current_etag=ce.current_etag,
+                    your_etag=ce.your_etag)
+    except Exception as e:
+        return card("error", code="s3_write_failed", message=str(e), retryable=True)
+
+    return card(
+        "section_regenerated",
+        section_number=section_number,
+        title=section["title"],
+        content_json=section["content"],
+        previous_versions_count=len(section["previous_versions"]),
+        regen_reason=_short_summary(regen_reason) if regen_reason else "(no specific instruction)",
+        status=section["status"],
+    )
+
+
+# ============================================
+# REGENERATE_SECTION prompt — inline because the proper per-section
+# builder lives in lambda_brd_generator's prompt module, which gets
+# refactored into reusable builders in Phase 2 commit 11. Keep this
+# prompt minimal and structurally compatible so the future migration
+# is a drop-in replacement.
+# ============================================
+
+_REGENERATE_SYSTEM_PROMPT = """\
+You rewrite ONE section of a Business Requirements Document (BRD).
+
+You receive:
+  • The section's current title and number.
+  • The section's CURRENT content (JSON content blocks) — preserve
+    every concrete fact already in there. Only rephrase, restructure,
+    or fill gaps.
+  • Optional "known project context" — long-term facts established
+    across prior sessions. Treat as authoritative; do not contradict.
+  • An optional regeneration instruction from the user
+    (e.g. "redo this with the new latency NFR"). If present, prioritise
+    incorporating that change.
+
+Output ONLY a JSON object:
+
+  {
+    "title": "<preserved section title>",
+    "content": [<content blocks>]
+  }
+
+Content block schema (use these types only):
+  paragraph    {"type": "paragraph",    "text": "..."}
+  heading      {"type": "heading", "level": 2-4, "text": "..."}
+  bullet_list  {"type": "bullet_list",  "items": ["...", ...]}
+  ordered_list {"type": "ordered_list", "items": ["...", ...]}
+  table        {"type": "table", "headers": [...], "rows": [[...], ...]}
+
+Rules:
+  • Do not invent facts. If something is unknown, omit it or call it
+    out as "(to be confirmed)" — never fabricate.
+  • Preserve every measurable / numeric value from the current content.
+  • If the section is already strong, return it largely unchanged
+    rather than rewriting for the sake of rewriting.
+"""
+
+
+def _build_regenerate_prompt(
+    *,
+    section_number: int,
+    section_title: str,
+    current_content: List[Dict[str, Any]],
+    known_facts: List[str],
+    regen_reason: str,
+) -> str:
+    """Compose the user-content block for the regenerate call."""
+    facts_block = (
+        "\n".join(f"  - {f}" for f in known_facts)
+        if known_facts else "(no project context loaded for this session)"
+    )
+    instruction_block = (
+        f"User's regeneration request:\n  {regen_reason}\n\n"
+        if regen_reason else
+        "User asked for a regeneration with no specific instruction — "
+        "improve the section's clarity, structure, and completeness "
+        "without changing intent.\n\n"
+    )
+    return (
+        f"Section {section_number}: {section_title}\n\n"
+        f"Current content (JSON):\n"
+        f"```json\n{json.dumps(current_content, indent=2)}\n```\n\n"
+        f"Known project context:\n{facts_block}\n\n"
+        f"{instruction_block}"
+        f"Return regenerated section JSON."
+    )
 
 
 def _do_ingest_doc(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
