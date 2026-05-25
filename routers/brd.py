@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from db_helper import (
@@ -1084,3 +1085,278 @@ def brd_revert_section(
 
     _maybe_promote_to_refining(session, result)
     return result
+
+
+# ============================================
+# POST /turn-stream — Real SSE for two intents: GATHER_REQUIREMENTS
+# (Mary follow-ups) and ASK_QUESTION (long answers). All other intents
+# fall through to /turn (Lambda invoke, complete card). Replaces the
+# fake-3-word-chunker hack at app.py:2099-2108 with actual LLM token
+# streaming via the DLX gateway's stream=true path.
+#
+# Intent router runs INLINE in the FastAPI worker -- no Lambda hop for
+# this path. Cheaper (one Sonnet/Haiku call instead of Sonnet+Sonnet)
+# and faster (300-400ms latency floor lifted).
+#
+# SSE event types yielded:
+#   data: {"type": "intent", "intent": "..."}          (first event)
+#   data: {"type": "chunk", "text": "..."}             (during streaming)
+#   data: {"type": "done", "card_summary": "..."}      (last event)
+#   data: {"type": "fallback", "card": {...}}          (when intent
+#                                                       isn't streamable)
+#   data: {"type": "error", "message": "..."}          (on any failure)
+# ============================================
+
+# Hard-coded set so a future intent rename in the orchestrator doesn't
+# silently enable streaming for a handler that doesn't support it. The
+# orchestrator dispatch table is the source of truth for non-streaming
+# intents; this list governs streaming eligibility.
+_STREAMABLE_INTENTS = frozenset({"GATHER_REQUIREMENTS", "ASK_QUESTION"})
+
+# Per-user SSE caps. Hard timeout bounds a runaway stream; idle timeout
+# (not enforced here but documented for the frontend) bounds a client
+# that connected but isn't reading.
+BRD_SSE_HARD_TIMEOUT_SECONDS = int(os.getenv("BRD_SSE_HARD_TIMEOUT_SECONDS", "120"))
+
+
+def _stream_sse(event_type: str, **payload: Any) -> str:
+    """Format one SSE event line. Trailing \\n\\n is the framing the
+    EventSource spec requires."""
+    return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+
+
+def _classify_intent_inline(
+    user_message: str, stage: str, brd_exists: bool, available_sections: List[Dict[str, Any]],
+    user_id: str,
+) -> str:
+    """Run the intent router inline (no Lambda hop). Returns just the
+    intent string -- the streaming path doesn't need the full router
+    payload, only the routing decision. Failures fall back to
+    GATHER_REQUIREMENTS (cheapest streamable intent) so the user still
+    gets a useful response.
+    """
+    from llm_gateway import chat_completion
+    from prompts.brd_intent_router import (
+        build_router_prompt, get_router_system_prompt,
+    )
+    from services.brd_orchestrator_utils import extract_json
+    try:
+        user_content = build_router_prompt(
+            user_message=user_message,
+            stage=stage,
+            brd_exists=brd_exists,
+            available_sections=available_sections,
+            currently_viewing_section=None,
+            file_attached=False,
+            template_attached=False,
+            transcript_attached=False,
+            last_assistant_card_type=None,
+            last_assistant_proposed_section=None,
+        )
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=get_router_system_prompt(),
+            model=os.getenv("BRD_ROUTER_MODEL", "Claude-4.5-Sonnet"),
+            temperature=0.0,
+            max_tokens=400,
+            user_id=user_id,
+            token_source="routers.brd:turn_stream_router",
+        )
+        parsed = extract_json(raw)
+        return (parsed.get("intent") or "GATHER_REQUIREMENTS")
+    except Exception as e:
+        logger.warning(f"[BRD /turn-stream] router failed, falling back: {e}")
+        return "GATHER_REQUIREMENTS"
+
+
+def _stream_mary_or_qa(
+    *,
+    intent: str,
+    user_message: str,
+    session: Dict[str, Any],
+    user_id: str,
+):
+    """Generator that yields SSE events for streamable intents. Calls
+    chat_completion_stream and re-yields its data: lines through the
+    event-type wrapper.
+
+    GATHER_REQUIREMENTS uses Mary's persona + recent history; ASK_QUESTION
+    uses the QA prompt + the loaded BRD structure.
+    """
+    from llm_gateway import chat_completion_stream
+
+    yield _stream_sse("intent", intent=intent)
+
+    if intent == "GATHER_REQUIREMENTS":
+        yield from _stream_gather(
+            user_message=user_message, session=session, user_id=user_id,
+        )
+    elif intent == "ASK_QUESTION":
+        yield from _stream_ask_question(
+            user_message=user_message, session=session, user_id=user_id,
+        )
+    else:  # safety net -- caller should have filtered already
+        yield _stream_sse("error", message=f"intent {intent!r} is not streamable")
+
+    yield _stream_sse("done")
+
+
+def _stream_gather(*, user_message: str, session: Dict[str, Any], user_id: str):
+    """Yield SSE chunks for Mary's follow-up."""
+    from llm_gateway import chat_completion_stream
+    from prompts.requirements_gathering_prompts import (
+        MARY_REQUIREMENTS_PROMPT,
+        get_requirements_gathering_prompt,
+    )
+    from services.brd_orchestrator_utils import get_long_term_facts, read_memory_history
+
+    # Build the same context the Lambda's _do_gather would.
+    history_lines: List[str] = []
+    try:
+        for m in read_memory_history(session["id"], user_id, max_messages=12):
+            history_lines.append(f"{(m.get('role') or 'assistant').upper()}: {m.get('content', '')}")
+    except Exception as e:
+        logger.warning(f"[BRD /turn-stream gather] history load failed: {e}")
+
+    facts_block = ""
+    if session.get("use_long_term_context", True):
+        try:
+            facts = get_long_term_facts(
+                user_id=user_id, project_id=session.get("project_id"), query=user_message,
+            )
+            if facts:
+                facts_block = ("\n\nKNOWN PROJECT CONTEXT:\n" +
+                               "\n".join(f"  - {f}" for f in facts))
+        except Exception as e:
+            logger.warning(f"[BRD /turn-stream gather] facts load failed: {e}")
+
+    conversation_context = ("Conversation so far:\n" +
+                            ("\n".join(history_lines) if history_lines else "(this is the first message)") +
+                            facts_block)
+    prompt = get_requirements_gathering_prompt(conversation_context, user_message)
+
+    yield from chat_completion_stream(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=MARY_REQUIREMENTS_PROMPT,
+        model=os.getenv("BRD_HANDLER_MODEL", "Claude-4.5-Sonnet"),
+        temperature=0.6,
+        max_tokens=int(os.getenv("BRD_GATHER_MAX_TOKENS", "600")),
+        user_id=user_id,
+        token_source="routers.brd:turn_stream_gather",
+    )
+
+
+def _stream_ask_question(*, user_message: str, session: Dict[str, Any], user_id: str):
+    """Yield SSE chunks for a Q&A answer grounded in the BRD."""
+    from llm_gateway import chat_completion_stream
+    from prompts.brd_qa_prompts import QA_SYSTEM_PROMPT, build_qa_prompt
+
+    brd_id = session.get("brd_id")
+    relevant_sections: List[Dict[str, Any]] = []
+    if brd_id:
+        try:
+            structure = _read_brd_structure(brd_id)
+            relevant_sections = list(structure.get("sections") or [])
+        except HTTPException:
+            # No BRD yet -- still stream a graceful "no BRD to query" reply.
+            pass
+
+    if not relevant_sections:
+        # Yield a single canned chunk + done so the client closes cleanly
+        # instead of an empty stream.
+        yield _stream_sse("chunk", text=(
+            "There's no BRD draft to answer questions about yet. "
+            "Want to start gathering requirements?"
+        ))
+        return
+
+    user_content = build_qa_prompt(
+        question=user_message,
+        relevant_sections=relevant_sections,
+        known_facts=[],
+    )
+    yield from chat_completion_stream(
+        messages=[{"role": "user", "content": user_content}],
+        system_prompt=QA_SYSTEM_PROMPT,
+        model=os.getenv("BRD_HANDLER_MODEL", "Claude-4.5-Sonnet"),
+        temperature=0.3,
+        max_tokens=int(os.getenv("BRD_QA_MAX_TOKENS", "900")),
+        user_id=user_id,
+        token_source="routers.brd:turn_stream_qa",
+    )
+
+
+@router.post("/turn-stream")
+async def brd_turn_stream(
+    session_id: str               = Form(...),
+    message: str                  = Form(""),
+    project_id: Optional[str]     = Form(None),
+    current_user: dict            = Depends(get_current_user),
+):
+    """SSE endpoint for streamable intents. Client opens an EventSource
+    and reads `data:` lines until `{"type": "done"}` arrives.
+
+    Routing flow:
+      1. Auth + load session.
+      2. Inline intent classification (no Lambda hop -- saves 200-400ms).
+      3. If intent is streamable (GATHER_REQUIREMENTS / ASK_QUESTION):
+         yield SSE events directly from chat_completion_stream.
+      4. If intent is NOT streamable: yield one "fallback" event with
+         a hint pointing the client at /turn for this turn. The client
+         then closes the stream and resubmits via /turn.
+
+    Why a fallback event instead of just running the non-streamable
+    handler here: a single endpoint that's "sometimes streaming,
+    sometimes not" is hostile to clients. The frontend chat box only
+    opens an EventSource when it WANTS streaming; if the router decides
+    "actually, this needs full orchestration", asking the client to
+    resubmit via /turn keeps both endpoints semantically clean.
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(session_id, user_id)
+
+    # Pre-load section list for the router so its disambiguation rules
+    # can apply (e.g. ASK_QUESTION needs target_section guess).
+    brd_id = session.get("brd_id")
+    available_sections: List[Dict[str, Any]] = []
+    brd_exists = False
+    if brd_id:
+        try:
+            structure = _read_brd_structure(brd_id)
+            brd_exists = True
+            available_sections = [
+                {"number": s.get("number"), "title": s.get("title") or "(untitled)"}
+                for s in (structure.get("sections") or [])
+                if s.get("number") is not None
+            ]
+        except HTTPException:
+            brd_exists = False
+
+    intent = _classify_intent_inline(
+        user_message=message,
+        stage=session.get("stage", "NEW"),
+        brd_exists=brd_exists,
+        available_sections=available_sections,
+        user_id=user_id,
+    )
+
+    if intent not in _STREAMABLE_INTENTS:
+        # Fallback: emit a single SSE event pointing the client at /turn.
+        def fallback_gen():
+            yield _stream_sse("intent", intent=intent)
+            yield _stream_sse(
+                "fallback",
+                hint=f"Intent {intent!r} is not streamable; resubmit via POST /api/brd/turn.",
+            )
+            yield _stream_sse("done")
+        return StreamingResponse(fallback_gen(), media_type="text/event-stream")
+
+    return StreamingResponse(
+        _stream_mary_or_qa(
+            intent=intent,
+            user_message=message,
+            session=session,
+            user_id=user_id,
+        ),
+        media_type="text/event-stream",
+    )
