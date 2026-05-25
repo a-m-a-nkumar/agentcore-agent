@@ -130,6 +130,53 @@ DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
     "arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda",
 )
 
+# ---------------------------------------------------------------------------
+# Unified BRD Agent (features/aman) — Phase 2 plumbing
+# Mirrors the section in env_vdi.py. Keep the two files in sync.
+# ---------------------------------------------------------------------------
+BRD_USE_UNIFIED_AGENT = os.getenv("BRD_USE_UNIFIED_AGENT", "false").lower() == "true"
+
+# In local/dev we hit Bedrock directly, so the router/handler models are
+# Bedrock model IDs rather than gateway model names. The llm_gateway shim
+# remaps anyway, but having distinct defaults documents intent.
+BRD_ROUTER_MODEL  = os.getenv("BRD_ROUTER_MODEL",  "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+BRD_HANDLER_MODEL = os.getenv("BRD_HANDLER_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+
+BRD_ROUTER_MAX_TOKENS    = int(os.getenv("BRD_ROUTER_MAX_TOKENS",    "400"))
+BRD_ROUTER_TEMPERATURE   = float(os.getenv("BRD_ROUTER_TEMPERATURE", "0.0"))
+BRD_EDIT_MAX_TOKENS      = int(os.getenv("BRD_EDIT_MAX_TOKENS",      "3000"))
+BRD_SECTION_MAX_TOKENS   = int(os.getenv("BRD_SECTION_MAX_TOKENS",   "4000"))
+BRD_AUDIT_MAX_TOKENS     = int(os.getenv("BRD_AUDIT_MAX_TOKENS",     "1500"))
+BRD_QA_MAX_TOKENS        = int(os.getenv("BRD_QA_MAX_TOKENS",        "900"))
+BRD_SUGGEST_MAX_TOKENS   = int(os.getenv("BRD_SUGGEST_MAX_TOKENS",   "900"))
+BRD_GATHER_MAX_TOKENS    = int(os.getenv("BRD_GATHER_MAX_TOKENS",    "600"))
+
+BRD_PREVIOUS_VERSIONS_CAP = int(os.getenv("BRD_PREVIOUS_VERSIONS_CAP", "5"))
+BRD_SECTION_PARALLELISM   = int(os.getenv("BRD_SECTION_PARALLELISM",   "5"))
+
+BRD_RATE_LIMIT_TURNS_PER_HOUR        = int(os.getenv("BRD_RATE_LIMIT_TURNS_PER_HOUR",        "60"))
+BRD_RATE_LIMIT_GENERATIONS_PER_DAY   = int(os.getenv("BRD_RATE_LIMIT_GENERATIONS_PER_DAY",   "5"))
+
+BRD_SSE_MAX_CONCURRENT_STREAMS = int(os.getenv("BRD_SSE_MAX_CONCURRENT_STREAMS", "3"))
+BRD_SSE_HARD_TIMEOUT_SECONDS   = int(os.getenv("BRD_SSE_HARD_TIMEOUT_SECONDS",   "120"))
+BRD_SSE_IDLE_TIMEOUT_SECONDS   = int(os.getenv("BRD_SSE_IDLE_TIMEOUT_SECONDS",   "30"))
+
+BRD_AGENTCORE_ACTOR_PREFIX = os.getenv("BRD_AGENTCORE_ACTOR_PREFIX", "user-")
+BRD_AGENTCORE_LEGACY_ACTOR = os.getenv("BRD_AGENTCORE_LEGACY_ACTOR", "analyst-session")
+
+BRD_FACTS_NAMESPACE_TEMPLATE = os.getenv(
+    "BRD_FACTS_NAMESPACE_TEMPLATE",
+    "user-{user_id}:project-{project_id}",
+)
+BRD_FACTS_TOP_K = int(os.getenv("BRD_FACTS_TOP_K", "10"))
+
+BRD_ORCHESTRATOR_LAMBDA = os.getenv("BRD_ORCHESTRATOR_LAMBDA", "brd_orchestrator_lambda")
+BRD_GENERATOR_LAMBDA    = os.getenv("BRD_GENERATOR_LAMBDA",    "brd_generator_lambda")
+BRD_FROM_HISTORY_LAMBDA = os.getenv("BRD_FROM_HISTORY_LAMBDA", "brd_from_history_lambda")
+
+OTEL_EXPORTER     = os.getenv("OTEL_EXPORTER",     "console")  # local: spans to stdout
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "brd-orchestrator")
+
 
 def _get_bedrock_config():
     from botocore.config import Config
