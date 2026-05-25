@@ -50,6 +50,17 @@ def _aws_common_args():
 # decommissioning happens once the legacy /api/analyst-* endpoints
 # stop calling them.
 LAMBDAS = {
+    # Unified BRD agent (features/aman) -- replaces the dead PM + Analyst
+    # Runtimes and the legacy /api/analyst-* endpoints. Needs the new
+    # services.brd_orchestrator_utils module + all brd_* prompt modules.
+    # db_helper is bundled because verify_session_owned imports it lazily.
+    "brd-orchestrator": {
+        "function_name": "sdlc-dev-brd-orchestrator",
+        "handler_file": "lambda_brd_orchestrator.py",
+        "needs_prompts": True,
+        "extra_shared_files": ["db_helper.py"],
+        "extra_shared_dir_files": {"services": ["brd_orchestrator_utils.py"]},
+    },
     "brd-from-history": {
         "function_name": "sdlc-dev-brd-from-history",
         "handler_file": "lambda_brd_from_history.py",
@@ -80,7 +91,9 @@ SHARED_FILES = [
     "db_config.py",  # imported transitively by env_vdi
 ]
 
-# Shared directories (copied as-is)
+# Shared directories (copied as-is). Per-lambda extra entries live on the
+# LAMBDAS dict so a Lambda that needs e.g. services/brd_orchestrator_utils.py
+# can opt in without bloating every other zip.
 SHARED_DIRS = {
     "services": ["__init__.py", "s3_service.py"],
 }
@@ -111,15 +124,32 @@ def build_lambda(name: str, config: dict) -> str:
     shutil.copy2(src, pkg_dir)
     print(f"  + {config['handler_file']}")
 
-    # 2. Copy shared files
-    for f in SHARED_FILES:
+    # 2. Copy shared files (+ per-lambda extra_shared_files)
+    extra_files = config.get("extra_shared_files", [])
+    for f in SHARED_FILES + extra_files:
         src = os.path.join(REPO_ROOT, f)
         if os.path.exists(src):
             shutil.copy2(src, pkg_dir)
             print(f"  + {f}")
 
-    # 3. Copy shared directories (services/)
+    # 3. Copy shared directories (services/) + per-lambda extras. The extras
+    # map appends extra file names to the same directory the SHARED_DIRS
+    # entry already targets.
+    extra_dir_files = config.get("extra_shared_dir_files", {})
     for dir_name, files in SHARED_DIRS.items():
+        merged = list(files) + list(extra_dir_files.get(dir_name, []))
+        dest_dir = os.path.join(pkg_dir, dir_name)
+        os.makedirs(dest_dir, exist_ok=True)
+        for f in merged:
+            src = os.path.join(REPO_ROOT, dir_name, f)
+            if os.path.exists(src):
+                shutil.copy2(src, os.path.join(dest_dir, f))
+                print(f"  + {dir_name}/{f}")
+    # Lambdas may also need dirs that don't exist in SHARED_DIRS at all --
+    # handle those here.
+    for dir_name, files in extra_dir_files.items():
+        if dir_name in SHARED_DIRS:
+            continue
         dest_dir = os.path.join(pkg_dir, dir_name)
         os.makedirs(dest_dir, exist_ok=True)
         for f in files:
@@ -178,23 +208,93 @@ def build_lambda(name: str, config: dict) -> str:
     return zip_path
 
 
-def deploy_lambda(name: str, config: dict, zip_path: str):
-    """Deploy a lambda zip to AWS."""
-    func_name = config["function_name"]
-    print(f"\nDeploying {name} -> {func_name}...")
+def _function_exists(func_name: str) -> bool:
+    """True if the Lambda function exists in the target account."""
+    try:
+        subprocess.run(
+            [
+                "aws", "lambda", "get-function",
+                "--function-name", func_name,
+                *_aws_common_args(),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except subprocess.CalledProcessError:
+        return False
 
-    # Update function code
+
+# Defaults used when CREATING a new Lambda. Mirrors what the other
+# Lambdas in this account already use (looked up via
+# get-function-configuration). Hard-coded here rather than env-driven
+# because they're account-level constants, not per-deploy choices.
+DEFAULT_LAMBDA_ROLE = "arn:aws:iam::590184044598:role/sdlc-orch-dev-us-east-1-lambda-role"
+DEFAULT_LAMBDA_RUNTIME = "python3.12"
+DEFAULT_LAMBDA_MEMORY = 1024
+DEFAULT_LAMBDA_TIMEOUT = 600  # 10 minutes -- generation paths can use it
+
+
+def _create_function(name: str, config: dict, zip_path: str) -> None:
+    """Create a new Lambda function from the zip. Used the first time
+    a new lambda lands in LAMBDAS (e.g. brd-orchestrator on its first
+    deploy). Subsequent runs go through update-function-code instead.
+    """
+    func_name = config["function_name"]
+    handler_module = config["handler_file"].replace(".py", "")
+    handler = f"{handler_module}.lambda_handler"
+    print(f"  Function {func_name} does not exist yet -- creating...")
     subprocess.run(
         [
-            "aws", "lambda", "update-function-code",
+            "aws", "lambda", "create-function",
             "--function-name", func_name,
+            "--runtime", DEFAULT_LAMBDA_RUNTIME,
+            "--role", DEFAULT_LAMBDA_ROLE,
+            "--handler", handler,
             "--zip-file", f"fileb://{zip_path}",
+            "--memory-size", str(DEFAULT_LAMBDA_MEMORY),
+            "--timeout", str(DEFAULT_LAMBDA_TIMEOUT),
+            "--description", f"Auto-created by deploy_lambdas.py for {name}",
             *_aws_common_args(),
         ],
         check=True,
         capture_output=True,
     )
-    print(f"  Code updated.")
+    print(f"  Created {func_name}.")
+    # Newly-created functions need a moment before update-function-
+    # configuration calls work cleanly.
+    subprocess.run(
+        [
+            "aws", "lambda", "wait", "function-active-v2",
+            "--function-name", func_name,
+            *_aws_common_args(),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def deploy_lambda(name: str, config: dict, zip_path: str):
+    """Deploy a lambda zip to AWS. Creates the function on first run
+    if it doesn't exist; otherwise updates the existing function's code."""
+    func_name = config["function_name"]
+    print(f"\nDeploying {name} -> {func_name}...")
+
+    if not _function_exists(func_name):
+        _create_function(name, config, zip_path)
+    else:
+        # Update function code
+        subprocess.run(
+            [
+                "aws", "lambda", "update-function-code",
+                "--function-name", func_name,
+                "--zip-file", f"fileb://{zip_path}",
+                *_aws_common_args(),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        print(f"  Code updated.")
 
     # Wait for update to complete
     print(f"  Waiting for update to complete...")
