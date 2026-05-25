@@ -1314,12 +1314,129 @@ def _do_gather(
     return card("text", text=text)
 
 
-def _do_generate_from_docs(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_generate_from_docs lands in Phase 2 commit 9")
+def _do_generate_from_docs(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """User attached a template + transcript and triggered full BRD
+    generation. Pipeline:
+
+      1. Pull template + transcript out of event (router doesn't
+         carry them; FastAPI puts them on the event directly).
+      2. Mint a brd_id if the session doesn't have one yet (first
+         generation). The FastAPI router persists this onto the
+         analyst_sessions row in its post-Lambda step.
+      3. Fire lambda_brd_generator ASYNCHRONOUSLY (InvocationType=
+         'Event') -- the user-blocking path returns immediately;
+         worker runs in background and writes results to S3.
+      4. Return a generation_starting card so the frontend can
+         render a skeleton/loader. handle_turn's caller bumps stage
+         to GENERATING via _next_stage_hint.
+    """
+    return _start_generation(
+        event=event,
+        session=session,
+        worker_lambda=BRD_GENERATOR_LAMBDA,
+        worker_payload_extras={
+            "template": (event or {}).get("template") or (event or {}).get("template_text"),
+            "transcript": (event or {}).get("transcript") or (event or {}).get("transcript_text"),
+            "template_s3_bucket": (event or {}).get("template_s3_bucket"),
+            "template_s3_key":    (event or {}).get("template_s3_key"),
+            "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
+            "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
+        },
+        expected_seconds=45,
+        source="docs",
+    )
 
 
-def _do_generate_from_history(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_generate_from_history lands in Phase 2 commit 9")
+def _do_generate_from_history(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """User said "generate the BRD" -- worker reads chat history from
+    AgentCore Memory and the long-term facts buffer. No file payload
+    needed.
+
+    Same async-invoke + generation_starting pattern as
+    _do_generate_from_docs; the worker Lambda is different
+    (lambda_brd_from_history).
+    """
+    return _start_generation(
+        event=event,
+        session=session,
+        worker_lambda=BRD_FROM_HISTORY_LAMBDA,
+        worker_payload_extras={
+            # lambda_brd_from_history needs the session_id to pull chat
+            # history; pass it explicitly so the worker doesn't have to
+            # know about the orchestrator's dual-actor read pattern.
+            "session_id": (event or {}).get("session_id") or session.get("session_id"),
+        },
+        expected_seconds=60,
+        source="history",
+    )
+
+
+# ============================================
+# Shared generation kickoff. Both _do_generate_* funnel through here
+# so the brd_id minting, async-invoke pattern, and generation_starting
+# card shape stay in one place.
+# ============================================
+
+def _start_generation(
+    *,
+    event: Dict[str, Any],
+    session: Dict[str, Any],
+    worker_lambda: str,
+    worker_payload_extras: Dict[str, Any],
+    expected_seconds: int,
+    source: str,
+) -> Dict[str, Any]:
+    """Mint brd_id if needed, fire worker Lambda async, return
+    generation_starting card.
+
+    Failures invoking the worker -> generation_failed card with a
+    retryable flag so the frontend can offer a "Retry" button. The
+    FastAPI router observes the returned card type to decide whether
+    to advance to GENERATING or stay at the prior stage.
+    """
+    user_id    = (event or {}).get("user_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+
+    brd_id = session.get("brd_id") or (event or {}).get("brd_id") or str(uuid.uuid4())
+
+    payload: Dict[str, Any] = {
+        "brd_id":    brd_id,
+        "user_id":   user_id,
+        "project_id": project_id,
+        "session_id": session_id,
+    }
+    payload.update({k: v for k, v in (worker_payload_extras or {}).items() if v is not None})
+
+    try:
+        _lambda().invoke(
+            FunctionName=worker_lambda,
+            InvocationType="Event",  # async fire-and-forget
+            Payload=json.dumps(payload).encode("utf-8"),
+        )
+    except Exception as e:
+        logger.exception(f"[BRD] generation worker invoke failed: lambda={worker_lambda} brd_id={brd_id}")
+        return card(
+            "generation_failed",
+            code="worker_invoke_failed",
+            message=f"Couldn't start generation: {e}",
+            retryable=True,
+            stage_reverted_to=session.get("stage") or "GATHERING",
+            brd_id=brd_id,
+            source=source,
+        )
+
+    return card(
+        "generation_starting",
+        session_id=session_id,
+        brd_id=brd_id,
+        expected_seconds=expected_seconds,
+        source=source,
+    )
 
 
 def _do_audit(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
@@ -1569,11 +1686,74 @@ INTENT_TO_HANDLER_MAP: Dict[str, Callable[..., Dict[str, Any]]] = {
 
 
 def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_generate_from_docs lands in a later Phase 2 commit")
+    """Action-level entry for `POST /api/brd/generate-from-docs`.
+
+    Verifies session, then delegates to the same _start_generation
+    body the intent path uses. Returns the same generation_starting /
+    generation_failed card the chat path returns so the frontend
+    renders both identically.
+    """
+    from services.brd_orchestrator_utils import verify_session_owned
+
+    session_id = (event or {}).get("session_id")
+    user_id    = (event or {}).get("user_id")
+    if not session_id or not user_id:
+        return card("error", code="bad_request",
+                    message="session_id and user_id are required", retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=session_id, retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    return _start_generation(
+        event=event,
+        session=session,
+        worker_lambda=BRD_GENERATOR_LAMBDA,
+        worker_payload_extras={
+            "template":   (event or {}).get("template")   or (event or {}).get("template_text"),
+            "transcript": (event or {}).get("transcript") or (event or {}).get("transcript_text"),
+            "template_s3_bucket":   (event or {}).get("template_s3_bucket"),
+            "template_s3_key":      (event or {}).get("template_s3_key"),
+            "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
+            "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
+        },
+        expected_seconds=45,
+        source="docs",
+    )
 
 
 def handle_generate_from_history(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_generate_from_history lands in a later Phase 2 commit")
+    """Action-level entry for `POST /api/brd/generate-from-history`.
+    Mirrors handle_generate_from_docs but fires the history worker.
+    """
+    from services.brd_orchestrator_utils import verify_session_owned
+
+    session_id = (event or {}).get("session_id")
+    user_id    = (event or {}).get("user_id")
+    if not session_id or not user_id:
+        return card("error", code="bad_request",
+                    message="session_id and user_id are required", retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=session_id, retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    return _start_generation(
+        event=event,
+        session=session,
+        worker_lambda=BRD_FROM_HISTORY_LAMBDA,
+        worker_payload_extras={
+            "session_id": session_id,
+        },
+        expected_seconds=60,
+        source="history",
+    )
 
 
 def handle_audit(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -2061,7 +2241,39 @@ def handle_save_section(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_cancel_generation(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_cancel_generation lands in a later Phase 2 commit")
+    """Action-level entry for `POST /api/brd/cancel-generation`.
+
+    The Lambda does NOT try to kill the in-flight worker -- AWS Lambda
+    has no stop-execution API for async invokes. Instead this is a
+    pure acknowledgement: the FastAPI router records the cancelled
+    brd_id in the analyst_sessions row, flips stage back to prior,
+    and discards any late-arriving worker result by brd_id check.
+
+    The Lambda's job is to verify session ownership (defense in depth)
+    and return the generation_cancelled card the frontend renders.
+    """
+    from services.brd_orchestrator_utils import verify_session_owned
+
+    session_id = (event or {}).get("session_id")
+    user_id    = (event or {}).get("user_id")
+    brd_id     = (event or {}).get("brd_id")
+
+    if not session_id or not user_id:
+        return card("error", code="bad_request",
+                    message="session_id and user_id are required", retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=session_id, retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    return card(
+        "generation_cancelled",
+        brd_id=brd_id or session.get("brd_id"),
+        stage_reverted_to=session.get("prior_stage") or "GATHERING",
+    )
 
 
 def handle_ingest_doc(event: Dict[str, Any]) -> Dict[str, Any]:
