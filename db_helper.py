@@ -14,7 +14,7 @@ import base64
 import boto3
 from psycopg2 import pool
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -664,6 +664,33 @@ def get_project_brd_session(project_id: str) -> Optional[Dict[str, Any]]:
 BRD_SESSION_STAGES = frozenset({
     "NEW", "GATHERING", "GENERATING", "DRAFTED", "REFINING",
 })
+
+
+# Canonical state-machine transitions documented in
+# hazy-gliding-hammock.md "State machine" -> "Stage transitions".
+# Format: (from_stage, event) -> to_stage.
+# `to_stage = None` means "revert to prior stage" — the orchestrator
+# stores prior_stage in the session row when entering GENERATING and
+# uses it on failure / cancellation paths.
+#
+# Events:
+#   generate_accepted        — router classified GENERATE_FROM_*
+#   generation_success       — worker Lambda returned successfully
+#   generation_failure       — worker raised / timed out / S3 write failed
+#   generation_cancel        — user invoked /api/brd/cancel-generation
+#   generation_in_progress   — user sent /turn while stage = GENERATING
+#                              (stage unchanged; recorded for completeness)
+#   first_refinement_action  — first EDIT / REGENERATE / AUDIT / save_section
+#                              after a successful generation
+BRD_STAGE_TRANSITIONS: Dict[Tuple[str, str], Optional[str]] = {
+    ("NEW",        "generate_accepted"):       "GENERATING",
+    ("GATHERING",  "generate_accepted"):       "GENERATING",
+    ("GENERATING", "generation_success"):      "DRAFTED",
+    ("GENERATING", "generation_failure"):      None,
+    ("GENERATING", "generation_cancel"):       None,
+    ("GENERATING", "generation_in_progress"):  "GENERATING",
+    ("DRAFTED",    "first_refinement_action"): "REFINING",
+}
 
 
 def validate_brd_session_stage(stage: str) -> str:
