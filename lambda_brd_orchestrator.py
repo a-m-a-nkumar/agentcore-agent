@@ -900,8 +900,132 @@ def _do_suggest(
     )
 
 
-def _do_add_info(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_add_info lands in Phase 2 commit 8")
+def _do_add_info(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """User volunteers a fact, no edit verb.
+
+    Pipeline:
+      1. Persist the fact to AgentCore Memory under the per-user actor
+         (USER event; the long-term SEMANTIC strategy picks it up
+         asynchronously and extracts structured facts into the
+         project namespace — writes always happen, even when the
+         current session opted out of READING long-term context).
+      2. Generate a Mary-style follow-up using the requirements-
+         gathering prompt so the conversation keeps moving instead of
+         dead-ending on a fact ack.
+      3. Return a fact_saved card. If router.regen_proposed is true
+         AND the fact maps to a known section, the frontend renders
+         a "Regenerate §N?" chip.
+
+    NOTE on memory write order: write_memory_event for the original
+    USER message already happened in handle_turn before dispatch;
+    here we only call gather to build the follow-up and return the
+    card. The follow-up text is what handle_turn writes back as the
+    ASSISTANT event.
+    """
+    from prompts.requirements_gathering_prompts import (
+        MARY_REQUIREMENTS_PROMPT,
+        get_requirements_gathering_prompt,
+    )
+    from services.brd_orchestrator_utils import get_long_term_facts, read_memory_history
+    from llm_gateway import chat_completion
+
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
+    fact_text  = (router.get("fact") or (event or {}).get("message") or "").strip()
+    target_section = router.get("target_section")
+    regen_proposed = bool(router.get("regen_proposed"))
+
+    if not fact_text:
+        return card("text", text="(empty input)", kind="warning")
+
+    follow_up = _build_mary_followup(
+        user_id=user_id,
+        project_id=project_id,
+        session_id=session_id,
+        user_message=fact_text,
+        use_long_term=session.get("use_long_term_context", True),
+        token_source="lambda_brd_orchestrator:add_info_followup",
+    )
+
+    return card(
+        "fact_saved",
+        fact_id=f"fact-{uuid.uuid4().hex[:8]}",
+        text=fact_text,
+        suggested_section=target_section,
+        regen_proposed=regen_proposed,
+        follow_up=follow_up,
+    )
+
+
+def _build_mary_followup(
+    *,
+    user_id: Optional[str],
+    project_id: Optional[str],
+    session_id: Optional[str],
+    user_message: str,
+    use_long_term: bool,
+    token_source: str,
+) -> str:
+    """Shared Mary follow-up builder used by ADD_INFO and GATHER.
+
+    Returns the LLM's text response, or "" on any failure (the caller
+    decides how to handle a missing follow-up — ADD_INFO surfaces an
+    empty follow_up gracefully; GATHER falls back to a generic prompt).
+    """
+    from prompts.requirements_gathering_prompts import (
+        MARY_REQUIREMENTS_PROMPT,
+        get_requirements_gathering_prompt,
+    )
+    from services.brd_orchestrator_utils import get_long_term_facts, read_memory_history
+    from llm_gateway import chat_completion
+
+    history_lines: List[str] = []
+    if session_id and user_id:
+        try:
+            history = read_memory_history(session_id, user_id, max_messages=12)
+            for m in history[-12:]:
+                role = (m.get("role") or "assistant").upper()
+                history_lines.append(f"{role}: {m.get('content', '')}")
+        except Exception as e:
+            logger.warning(f"[BRD] mary history load failed (non-fatal): {e}")
+
+    facts_block = ""
+    if use_long_term:
+        try:
+            facts = get_long_term_facts(
+                user_id=user_id,
+                project_id=project_id,
+                query=user_message,
+            )
+            if facts:
+                facts_block = (
+                    "\n\nKNOWN PROJECT CONTEXT (do not contradict; cite when relevant):\n"
+                    + "\n".join(f"  - {f}" for f in facts)
+                )
+        except Exception as e:
+            logger.warning(f"[BRD] mary long-term facts load failed (non-fatal): {e}")
+
+    conversation_context = "Conversation so far:\n" + (
+        "\n".join(history_lines) if history_lines else "(this is the first message)"
+    ) + facts_block
+
+    try:
+        prompt = get_requirements_gathering_prompt(conversation_context, user_message)
+        return chat_completion(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt=MARY_REQUIREMENTS_PROMPT,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.6,
+            max_tokens=BRD_GATHER_MAX_TOKENS,
+            user_id=user_id,
+            token_source=token_source,
+        ).strip()
+    except Exception as e:
+        logger.warning(f"[BRD] mary follow-up failed (non-fatal): {e}")
+        return ""
 
 
 def _do_edit_section(
@@ -1144,8 +1268,50 @@ def _now_iso() -> str:
     return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
-def _do_gather(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_gather lands in Phase 2 commit 8")
+def _do_gather(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Mary follow-up. Open-ended discovery: probes for missing
+    context, suggests directions, surfaces patterns. Differs from
+    ADD_INFO in that there's no fact to save — this intent fires when
+    the router classifies a message as elaborative / hesitant /
+    discovery-oriented ("tell me more about scale", "I'm not sure
+    about the security model").
+
+    Valid in EVERY stage (per INTENT_VALID_STAGES) — Mary can keep
+    probing even after the BRD is drafted.
+
+    Returns a plain text card. Long-term facts seeded only when the
+    session opted in (Resolved Q#5).
+    """
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
+    message    = ((event or {}).get("message") or "").strip()
+
+    if not message:
+        return card(
+            "text",
+            text="Let's start simple — what problem are you trying to solve, "
+                 "or what triggered this idea?",
+        )
+
+    text = _build_mary_followup(
+        user_id=user_id,
+        project_id=project_id,
+        session_id=session_id,
+        user_message=message,
+        use_long_term=session.get("use_long_term_context", True),
+        token_source="lambda_brd_orchestrator:gather",
+    )
+
+    if not text:
+        text = (
+            "Tell me a bit more about that — what's the most important outcome "
+            "you're trying to drive, and who feels the pain today?"
+        )
+
+    return card("text", text=text)
 
 
 def _do_generate_from_docs(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
