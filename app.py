@@ -1095,147 +1095,185 @@ async def generate_brd_from_s3(
                 "error": "Transcript is empty or too short. Please upload a transcript with meaningful content."
             })
 
-        # 4. Prepare Payload (same as /generate endpoint, with BMAD overlay if available)
-        base_prompt = "Generate a BRD based on the provided template and transcript."
-        bmad_prompt = _build_bmad_prompt(base_prompt, workflow_key="create-prd")
-        payload_dict = {
-            "prompt": bmad_prompt,
+        # 4. Generate brd_id + create the analyst_sessions row up front. This
+        #    replaces the legacy LAMBDA_BRD_CHAT session-creation call --
+        #    the unified BRD agent stores chat sessions in this table, and
+        #    /api/brd/* endpoints look them up via get_brd_session.
+        #
+        #    use_long_term_context=True so subsequent chat turns on this
+        #    session benefit from any project-scoped facts the user has
+        #    accumulated. session_id must be >= 33 chars for AgentCore
+        #    Memory; prefix "brd-" gets us to 36.
+        brd_id = str(uuid.uuid4())
+        session_id_memory = f"brd-{uuid.uuid4().hex}"
+
+        if project_id:
+            try:
+                from db_helper import create_session as _create_brd_session
+                _create_brd_session(
+                    session_id=session_id_memory,
+                    project_id=project_id,
+                    user_id=current_user.get("user_id"),
+                    title="PM generation (from S3)",
+                    stage="GENERATING",
+                    use_long_term_context=True,
+                )
+                # Stamp brd_id on the row so /api/brd/* readers see it.
+                try:
+                    from db_helper import update_session as _update_brd_session
+                    _update_brd_session(session_id=session_id_memory, brd_id=brd_id)
+                except Exception as _update_err:
+                    print(f"[APP] ⚠️  Failed to stamp brd_id on session: {_update_err}")
+                print(f"[APP] ✅ Created BRD session: {session_id_memory} (brd_id={brd_id})")
+            except Exception as _create_err:
+                # If session creation fails (e.g. project doesn't exist in
+                # analyst_sessions's FK target), proceed without it. The
+                # BRD content + ID still gets generated and saved to S3,
+                # the user just won't have a chat session pre-stamped.
+                print(f"[APP] ⚠️  Failed to create BRD session (non-fatal): {_create_err}")
+                session_id_memory = None
+        else:
+            session_id_memory = None
+
+        # 5. Invoke the unified BRD generator (parallel path) DIRECTLY.
+        #    This replaces the dead AgentCore PM Runtime call. Parallel=True
+        #    fans out the 16 sections across BRD_SECTION_PARALLELISM workers
+        #    (~30-40s wall-clock vs. the old ~90s monolithic call).
+        #
+        #    Synchronous invoke -- the legacy caller waits for the full
+        #    response, so we preserve that UX. Long-running call up to
+        #    Lambda's 10-minute timeout.
+        print(f"[APP] BRD ID: {brd_id}")
+        print(f"[APP] Note: BRD generation runs in parallel; expect ~30-40s.")
+
+        lambda_client = get_lambda_client()
+        generator_payload = {
+            "parallel": True,
+            "brd_id": brd_id,
+            "user_id": current_user.get("user_id"),
+            "project_id": project_id,
+            "session_id": session_id_memory,
             "template": template_text,
             "transcript": transcript_text,
-            "user_id": current_user.get("user_id"),  # for token usage tracking
         }
-        payload_bytes = json.dumps(payload_dict).encode('utf-8')
-        
-        print(f"[APP] Payload size: {len(payload_bytes)} bytes")
-        
-        # 5. Invoke Agent (same as /generate endpoint)
-        session_id = str(uuid.uuid4())
-        print(f"[APP] Session ID: {session_id}")
-        print(f"[APP] Agent ARN: {AGENT_ARN}")
-        print(f"[APP] Calling agent...")
-        print(f"[APP] Note: BRD generation may take 1-3 minutes. Please wait...")
-        
-        agent_core_client = get_agent_core_client()
-        
+
         try:
             loop = asyncio.get_event_loop()
             response = await loop.run_in_executor(
                 None,
-                lambda: agent_core_client.invoke_agent_runtime(
-                    agentRuntimeArn=AGENT_ARN,
-                    runtimeSessionId=session_id,
-                    payload=payload_bytes,
-                    qualifier="DEFAULT"
-                )
+                lambda: lambda_client.invoke(
+                    FunctionName=os.getenv(
+                        "BRD_GENERATOR_LAMBDA", "sdlc-dev-brd-generator"
+                    ),
+                    InvocationType="RequestResponse",
+                    Payload=json.dumps(generator_payload).encode("utf-8"),
+                ),
             )
         except Exception as timeout_error:
-            if "timeout" in str(timeout_error).lower() or "ReadTimeoutError" in str(type(timeout_error).__name__):
-                print(f"[APP] ⚠️  Request timed out. The agent may still be processing.")
+            if (
+                "timeout" in str(timeout_error).lower()
+                or "ReadTimeoutError" in str(type(timeout_error).__name__)
+            ):
+                print(f"[APP] ⚠️  Generation timed out.")
                 return JSONResponse(status_code=504, content={
-                    "error": "Request timeout - agent took too long to respond",
-                    "message": "BRD generation is taking longer than expected. The agent may still be processing.",
-                    "type": "TimeoutError"
+                    "error": "BRD generation timeout",
+                    "message": "Generation took longer than expected. The worker may still finish; "
+                               "poll /api/brd/{session_id}/sections to check.",
+                    "brd_id": brd_id,
+                    "session_id": session_id_memory,
+                    "type": "TimeoutError",
                 })
             raise
-        
-        print(f"[APP] Agent response received")
-        
-        # 6. Parse Response (same as /generate endpoint)
-        content = []
-        for chunk in response.get("response", []):
-            content.append(chunk.decode('utf-8'))
-            
-        full_response_str = ''.join(content)
-        
-        print(f"[APP] Response length: {len(full_response_str)} chars")
-        print(f"[APP] Response preview: {full_response_str[:300]}")
-        
-        try:
-            result_json = json.loads(full_response_str)
-            print(f"[APP] Parsed as JSON, keys: {list(result_json.keys())}")
-            
-            if 'result' in result_json:
-                result_str = result_json['result']
-                print(f"[APP] Result preview: {result_str[:200]}")
-                
-                try:
-                    agent_data = json.loads(result_str)
-                    print(f"[APP] Agent data keys: {list(agent_data.keys())}")
-                    
-                    if agent_data.get('brd'):
-                        print(f"[APP] Found BRD! Length: {len(agent_data['brd'])} chars")
-                        brd_id = agent_data.get('brd_id')
-                        
-                        # Create AgentCore Memory session for this BRD
-                        session_id_memory = None
-                        if brd_id:
-                            try:
-                                print(f"[APP] Creating AgentCore Memory session for BRD {brd_id}")
-                                lambda_client = get_lambda_client()
-                                session_payload = {
-                                    'action': 'create_session',
-                                    'brd_id': brd_id,
-                                    'template': template_text[:500],
-                                    'transcript': transcript_text[:500]
-                                }
-                                session_response = lambda_client.invoke(
-                                    FunctionName=LAMBDA_BRD_CHAT,
-                                    InvocationType='RequestResponse',
-                                    Payload=json.dumps(session_payload)
-                                )
-                                session_result = json.loads(session_response['Payload'].read())
-                                if session_result.get('statusCode') == 200:
-                                    session_body = json.loads(session_result.get('body', '{}'))
-                                    session_id_memory = session_body.get('session_id')
-                                    print(f"[APP] ✅ Created session: {session_id_memory}")
-                                else:
-                                    print(f"[APP] ⚠️  Session creation failed, will auto-create on first chat")
-                            except Exception as e:
-                                print(f"[APP] ⚠️  Failed to create session: {e}, will auto-create on first chat")
-                        
-                        # Persist BRD session to project for future restoration
-                        if project_id and brd_id:
-                            try:
-                                save_project_brd_session(
-                                    project_id=project_id,
-                                    brd_id=brd_id,
-                                    agentcore_session_id=session_id_memory
-                                )
-                                print(f"[APP] ✅ Persisted BRD session to project {project_id}")
-                            except Exception as e:
-                                print(f"[APP] ⚠️  Failed to persist BRD session: {e}")
-                        
-                        try:
-                            from db_helper import track_event
-                            track_event(
-                                current_user["user_id"],
-                                module="brd",
-                                event_type="pm_agent_brd_generated",
-                                project_id=project_id,
-                                metadata={
-                                    "transcript_s3_paths": s3_paths,
-                                    "transcript_count": len(s3_paths),
-                                    "brd_id": brd_id,
-                                    "duration_ms": int((time.time() - t0) * 1000),
-                                },
-                            )
-                        except Exception as _track_err:
-                            print(f"[APP] track_event failed (non-fatal): {_track_err}")
 
-                        return JSONResponse(content={
-                            'result': agent_data['brd'],
-                            'brd_id': brd_id,
-                            'session_id': session_id_memory,
-                            'status': 'success'
-                        })
-                except json.JSONDecodeError:
-                    pass
-            
-            return JSONResponse(content=result_json)
-            
-        except json.JSONDecodeError as e:
-            print(f"[APP] JSON decode error: {e}")
-            return JSONResponse(content={"result": full_response_str})
+        # 6. Unwrap the Lambda envelope. _handle_parallel returns a slim
+        #    {brd_id, status, section_count, failed_sections, s3_key,
+        #    mode} body via {statusCode, body}.
+        if "FunctionError" in response:
+            err_body = response.get("Payload").read().decode("utf-8", errors="replace")
+            return JSONResponse(status_code=502, content={
+                "error": "BRD generator failed",
+                "message": err_body[:500],
+                "brd_id": brd_id,
+                "session_id": session_id_memory,
+                "type": "WorkerError",
+            })
+
+        try:
+            outer = json.loads(response["Payload"].read())
+            inner_body = outer.get("body") if isinstance(outer, dict) else None
+            generator_result = json.loads(inner_body) if isinstance(inner_body, str) else outer
+        except Exception as parse_err:
+            print(f"[APP] ⚠️  Generator response parse failed: {parse_err}")
+            generator_result = {}
+
+        section_count = generator_result.get("section_count", 0)
+        failed_sections = generator_result.get("failed_sections", 0)
+        print(f"[APP] Generator returned: {section_count} sections, {failed_sections} failed")
+
+        # 7. Flip session stage GENERATING -> DRAFTED (or back on full failure).
+        if session_id_memory:
+            try:
+                from db_helper import update_brd_session_stage as _update_stage
+                final_stage = "DRAFTED" if section_count > failed_sections else "GATHERING"
+                _update_stage(session_id_memory, final_stage)
+            except Exception as _stage_err:
+                print(f"[APP] ⚠️  Stage update failed (non-fatal): {_stage_err}")
+
+        # 8. Render the produced brd_structure.json into plain text so the
+        #    legacy frontend (which expects {result: <text>, brd_id, ...})
+        #    keeps working without a UI change.
+        brd_text = ""
+        try:
+            structure_resp = s3_client.get_object(
+                Bucket=bucket_name,
+                Key=f"brds/{brd_id}/brd_structure.json",
+            )
+            brd_structure = json.loads(structure_resp["Body"].read().decode("utf-8"))
+            brd_text = render_brd_json_to_text(brd_structure)
+        except Exception as render_err:
+            print(f"[APP] ⚠️  Could not render BRD structure to text: {render_err}")
+            brd_text = ("BRD generation completed but the structured render failed. "
+                        "View at /api/brd/" + (session_id_memory or "") + "/sections")
+
+        # Persist BRD session to project so the user can resume later.
+        if project_id and brd_id:
+            try:
+                save_project_brd_session(
+                    project_id=project_id,
+                    brd_id=brd_id,
+                    agentcore_session_id=session_id_memory,
+                )
+                print(f"[APP] ✅ Persisted BRD session to project {project_id}")
+            except Exception as e:
+                print(f"[APP] ⚠️  Failed to persist BRD session: {e}")
+
+        try:
+            from db_helper import track_event
+            track_event(
+                current_user["user_id"],
+                module="brd",
+                event_type="pm_agent_brd_generated",
+                project_id=project_id,
+                metadata={
+                    "transcript_s3_paths": s3_paths,
+                    "transcript_count": len(s3_paths),
+                    "brd_id": brd_id,
+                    "section_count": section_count,
+                    "failed_sections": failed_sections,
+                    "duration_ms": int((time.time() - t0) * 1000),
+                },
+            )
+        except Exception as _track_err:
+            print(f"[APP] track_event failed (non-fatal): {_track_err}")
+
+        return JSONResponse(content={
+            "result": brd_text,
+            "brd_id": brd_id,
+            "session_id": session_id_memory,
+            "section_count": section_count,
+            "failed_sections": failed_sections,
+            "status": "success" if failed_sections == 0 else "partial",
+        })
 
     except Exception as e:
         error_msg = str(e)
