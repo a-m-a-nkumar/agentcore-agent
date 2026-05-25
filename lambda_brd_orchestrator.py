@@ -1046,7 +1046,17 @@ def _do_generate_from_history(event: Dict[str, Any], session: Dict[str, Any], ro
 
 
 def _do_audit(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_audit lands in Phase 2 commit 6")
+    """Per-section parallel audit. Intent-level wrapper around the shared
+    audit body. Honours router.target_section when the user asked to
+    audit just one section ("audit §4"); otherwise audits everything.
+    """
+    target_section = router.get("target_section")
+    return _run_audit_and_persist(
+        session=session,
+        user_id=(event or {}).get("user_id"),
+        project_id=(event or {}).get("project_id") or session.get("project_id"),
+        target_section=target_section,
+    )
 
 
 def _do_regenerate_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
@@ -1084,7 +1094,297 @@ def handle_generate_from_history(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_audit(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_audit lands in a later Phase 2 commit")
+    """Action-level entry for `POST /api/brd/audit`. Verifies session
+    ownership then delegates to the shared audit body. Returns an
+    `audit` card (same shape the intent-level handler returns) so the
+    frontend renders both paths identically.
+    """
+    from services.brd_orchestrator_utils import verify_session_owned
+
+    session_id = (event or {}).get("session_id")
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id")
+    target_section = (event or {}).get("section_number")
+
+    if not session_id or not user_id:
+        return card("error", code="bad_request",
+                    message="session_id and user_id are required",
+                    retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=session_id, retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    return _run_audit_and_persist(
+        session=session,
+        user_id=user_id,
+        project_id=project_id or session.get("project_id"),
+        target_section=target_section,
+    )
+
+
+# ============================================
+# AUDIT — shared body. Loads brd_structure with ETag, runs one LLM call
+# per section in parallel via ThreadPoolExecutor(max_workers=N), decorates
+# the structure with audit results, writes back conditionally. Returns a
+# ready-to-render `audit` card.
+# ============================================
+
+_AUDIT_RETRY_SUFFIX = (
+    "\n\nIMPORTANT — your previous response could not be parsed. Reply "
+    "with ONLY a single JSON object, no prose before or after, no "
+    "markdown fences. The object MUST have exactly two keys: "
+    '"score" (integer 0-100) and "issues" (array of {"code", "msg"} '
+    "objects).\n"
+)
+
+
+def _normalize_audit_payload(parsed: Any) -> Dict[str, Any]:
+    """Coerce common LLM output shapes into the canonical
+    {score: int, issues: [{code, msg}]} dict. Mirrors SAD's normaliser
+    so handlers downstream can trust the shape.
+
+    Recovers from:
+      • A bare list of issues   → {score: derived, issues: list}
+        (score = 100 - 10 * min(len(list), 5))
+      • An object that nests under "audit" / "result" / "data".
+    """
+    if isinstance(parsed, dict):
+        for k in ("audit", "result", "data"):
+            inner = parsed.get(k)
+            if isinstance(inner, dict) and ("score" in inner or "issues" in inner):
+                parsed = inner
+                break
+
+    if isinstance(parsed, list):
+        issues = [it for it in parsed if isinstance(it, dict) and "code" in it]
+        score = max(0, 100 - 10 * min(len(issues), 5))
+        return {"score": score, "issues": issues[:5]}
+
+    if isinstance(parsed, dict):
+        try:
+            score = int(parsed.get("score", 0))
+        except (TypeError, ValueError):
+            score = 0
+        return {
+            "score": max(0, min(100, score)),
+            "issues": parsed.get("issues") or [],
+        }
+
+    raise ValueError(f"audit returned unrecognized shape: {type(parsed).__name__}")
+
+
+def _score_to_status(score: int) -> str:
+    """Map a 0-100 audit score to the {OK, NEEDS_REVIEW, FAILED} badge
+    vocabulary the plan defines. Threshold rationale: 90+ is "ship it",
+    60-89 is "look before you ship", <60 is "fix before ship"."""
+    if score >= 90:
+        return "OK"
+    if score >= 60:
+        return "NEEDS_REVIEW"
+    return "FAILED"
+
+
+def _audit_one_section(
+    *,
+    section: Dict[str, Any],
+    known_facts: List[str],
+    user_id: Optional[str],
+) -> Tuple[int, Dict[str, Any]]:
+    """Run the audit prompt for ONE section. Returns (section_number,
+    normalized_payload). One retry on parse failure, then a final
+    sentinel payload so the parallel loop never explodes the whole audit.
+    """
+    from prompts.brd_audit_prompts import AUDIT_SYSTEM_PROMPT, build_audit_prompt
+    from services.brd_orchestrator_utils import extract_json
+    from llm_gateway import chat_completion
+
+    n = section.get("number")
+    prompt = build_audit_prompt(
+        section_number=n,
+        section_title=section.get("title") or "",
+        section_content=section.get("content") or [],
+        known_facts=known_facts,
+    )
+
+    last_raw = ""
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            raw = chat_completion(
+                messages=[{"role": "user", "content": prompt + (_AUDIT_RETRY_SUFFIX if attempt == 2 else "")}],
+                system_prompt=AUDIT_SYSTEM_PROMPT,
+                model=BRD_HANDLER_MODEL,
+                temperature=0.0,
+                max_tokens=BRD_AUDIT_MAX_TOKENS,
+                user_id=user_id,
+                token_source=f"lambda_brd_orchestrator:audit{n}",
+            )
+            last_raw = raw
+            parsed = extract_json(raw)
+            normalized = _normalize_audit_payload(parsed)
+            if attempt == 2:
+                logger.info(f"[BRD] audit section {n} recovered on retry")
+            return n, normalized
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                f"[BRD] audit section {n} attempt {attempt} failed: {e} "
+                f"raw[:300]={(last_raw or '')[:300]!r}"
+            )
+
+    snippet = (last_raw or "").strip()[:300].replace("\n", " ")
+    logger.error(
+        f"[BRD] audit section {n} unrecoverable: {last_err} raw_snippet={snippet!r}"
+    )
+    return n, {
+        "score": 0,
+        "issues": [{
+            "code": "AUDIT_PARSE_FAILED",
+            "msg": f"Auditor returned malformed output after retry: {last_err}".strip(),
+        }],
+    }
+
+
+def _run_audit_and_persist(
+    *,
+    session: Dict[str, Any],
+    user_id: Optional[str],
+    project_id: Optional[str],
+    target_section: Optional[int],
+) -> Dict[str, Any]:
+    """Shared audit body for both action and intent entry points.
+
+    Loads the BRD structure, runs per-section audits in parallel,
+    decorates the structure with each section's audit result, writes
+    back under If-Match (concurrent-edit safe), and returns an
+    `audit` card with overall_score / badges / details.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from services.brd_orchestrator_utils import (
+        ConcurrentEditError,
+        brd_structure_key,
+        get_long_term_facts,
+        s3_get_json_with_etag,
+        s3_put_json_if_match,
+    )
+
+    brd_id = session.get("brd_id")
+    if not brd_id:
+        return card("text",
+                    text="There's no BRD to audit yet.",
+                    kind="warning")
+
+    try:
+        structure, etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        logger.error(f"[BRD] audit S3 read failed for {brd_id}: {e}")
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card("error", code="malformed_brd",
+                    message="BRD structure malformed", retryable=False)
+
+    sections_all: List[Dict[str, Any]] = structure["sections"]
+
+    # Filter to one section if the caller asked for a targeted audit.
+    if target_section is not None:
+        sections_to_audit = [s for s in sections_all if s.get("number") == target_section]
+        if not sections_to_audit:
+            return card("error", code="section_not_found",
+                        message=f"Section #{target_section} not found",
+                        retryable=False)
+    else:
+        sections_to_audit = [s for s in sections_all if s.get("number") is not None]
+
+    # Long-term facts shape TRACEABILITY_GAP findings; only loaded when
+    # the session opted in (Resolved Q#5). Cheap to skip when off.
+    known_facts: List[str] = []
+    if session.get("use_long_term_context", True):
+        try:
+            known_facts = get_long_term_facts(
+                user_id=user_id,
+                project_id=project_id,
+                query="audit project context",
+            )
+        except Exception as e:
+            logger.warning(f"[BRD] audit long-term facts load failed (non-fatal): {e}")
+
+    # Parallel per-section audit — bounded by BRD_SECTION_PARALLELISM
+    # to keep gateway concurrency under control. Mirrors SAD's pattern
+    # at lambda_sad_orchestrator.py:1663-1671.
+    results: Dict[int, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=BRD_SECTION_PARALLELISM) as ex:
+        futures = [
+            ex.submit(_audit_one_section,
+                      section=s, known_facts=known_facts, user_id=user_id)
+            for s in sections_to_audit
+        ]
+        for fut in as_completed(futures):
+            try:
+                n, payload = fut.result()
+                results[n] = payload
+            except Exception as e:
+                logger.error(f"[BRD] audit worker exploded: {e}")
+
+    # Decorate structure with per-section results. Sections we didn't
+    # audit this pass keep their previous audit (if any) for the
+    # rendered card so partial-audit UX stays coherent.
+    badges: List[Dict[str, Any]] = []
+    details: List[Dict[str, Any]] = []
+    score_sum = 0
+    score_count = 0
+    for s in sections_all:
+        n = s.get("number")
+        if n in results:
+            r = results[n]
+            s["audit"] = r
+        elif "audit" in s:
+            r = s["audit"]
+        else:
+            continue
+        score = int(r.get("score", 0))
+        status = _score_to_status(score)
+        badges.append({
+            "section_number": n,
+            "title": s.get("title"),
+            "score": score,
+            "status": status,
+        })
+        for issue in r.get("issues", []) or []:
+            details.append({
+                "section_number": n,
+                "code": issue.get("code", "UNKNOWN"),
+                "message": issue.get("msg", "") or issue.get("message", ""),
+                "severity": "high" if status == "FAILED" else "medium",
+            })
+        score_sum += score
+        score_count += 1
+
+    overall_score = (score_sum // score_count) if score_count else 0
+
+    # Persist the decorated structure. ETag conflict → tell the user to
+    # reload; we don't auto-retry because the in-memory `s` may now be
+    # stale relative to whoever else wrote.
+    try:
+        s3_put_json_if_match(brd_structure_key(brd_id), structure, etag)
+    except ConcurrentEditError as ce:
+        return card("concurrent_edit",
+                    section_number=target_section,
+                    current_etag=ce.current_etag,
+                    your_etag=ce.your_etag)
+    except Exception as e:
+        logger.error(f"[BRD] audit S3 write failed for {brd_id}: {e}")
+        return card("error", code="s3_write_failed", message=str(e), retryable=True)
+
+    return card(
+        "audit",
+        overall_score=overall_score,
+        badges=badges,
+        details=details,
+    )
 
 
 def handle_revert_section(event: Dict[str, Any]) -> Dict[str, Any]:
