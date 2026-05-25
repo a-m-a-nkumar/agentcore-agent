@@ -679,7 +679,16 @@ def upload_brd_to_confluence(
         
         brd_json = None
 
-        # Try brd_structure.json first (created by lambda_brd_generator)
+        # brd_structure.json is the CANONICAL key the unified BRD
+        # agent writes to. Both lambda_brd_generator (Phase 2 commit
+        # 11 parallel path) and lambda_brd_from_history now write
+        # this canonical key, so the legacy BRD_{id}.json fallback
+        # is gone (deleted Phase 5 commit 4 -- the S3 backfill in
+        # migrations/add_brd_structure_previous_versions.py covered
+        # any historical BRDs missing the canonical key).
+        #
+        # The text fallback below stays as a last-ditch resort for
+        # BRDs that pre-date the structured JSON era entirely.
         try:
             logger.info(f"Fetching BRD from S3: s3://{bucket_name}/{json_key}")
             response = s3_client.get_object(Bucket=bucket_name, Key=json_key)
@@ -688,18 +697,8 @@ def upload_brd_to_confluence(
         except Exception as e:
             logger.warning(f"Could not load brd_structure.json: {e}")
 
-        # Try BRD_{id}.json (created by lambda_brd_from_history)
-        if not brd_json or not brd_json.get('sections'):
-            try:
-                alt_json_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.json"
-                logger.info(f"Trying alternative JSON: s3://{bucket_name}/{alt_json_key}")
-                response = s3_client.get_object(Bucket=bucket_name, Key=alt_json_key)
-                brd_json = json.loads(response['Body'].read().decode('utf-8'))
-                logger.info(f"Successfully loaded BRD JSON with {len(brd_json.get('sections', []))} sections")
-            except Exception as e2:
-                logger.warning(f"Could not load BRD JSON: {e2}")
-
-        # Final fallback: parse text file into structured format
+        # Last-ditch fallback: parse text file into structured format.
+        # Pre-dates the structured-JSON era; should be rare.
         if not brd_json or not brd_json.get('sections'):
             txt_key = f"brds/{request.brd_id}/BRD_{request.brd_id}.txt"
             logger.info(f"Falling back to text: s3://{bucket_name}/{txt_key}")
