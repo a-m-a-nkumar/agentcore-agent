@@ -632,3 +632,100 @@ async def brd_turn(
     _bump_message_count(session_id)
 
     return {"cards": cards}
+
+
+# ============================================
+# Write endpoints — direct (no LLM) section save + revert. The
+# orchestrator does the actual write under If-Match etag protection;
+# this router enforces auth, marshals the payload, and ensures any
+# successful write that crossed a stage boundary (DRAFTED -> REFINING
+# on first edit) is reflected on the analyst_sessions row.
+# ============================================
+
+class BRDSaveSectionRequest(BaseModel):
+    session_id: str
+    section_number: int
+    content: List[Dict[str, Any]]  # array of content blocks
+
+
+class BRDRevertSectionRequest(BaseModel):
+    session_id: str
+    section_number: int
+
+
+def _maybe_promote_to_refining(session: Dict[str, Any], result_card: Dict[str, Any]) -> None:
+    """First successful section_updated / section_regenerated /
+    concurrent_edit-recovery on a DRAFTED session bumps stage to
+    REFINING (canonical transition in db_helper.BRD_STAGE_TRANSITIONS).
+    The orchestrator doesn't compute next_stage_hint for action-level
+    write paths (it only does so for chat-intent paths) so the router
+    derives it here.
+    """
+    if session.get("stage") != "DRAFTED":
+        return
+    if not isinstance(result_card, dict):
+        return
+    t = result_card.get("type")
+    if t not in ("section_updated", "section_regenerated"):
+        return
+    try:
+        update_brd_session_stage(session["id"], "REFINING")
+    except Exception as e:
+        logger.warning(f"[BRD write] DRAFTED -> REFINING failed on {session.get('id')}: {e}")
+
+
+@router.post("/save-section")
+def brd_save_section(
+    body: BRDSaveSectionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """User typed/pasted section content into the editor and hit Save.
+    Bypasses the LLM entirely (orchestrator's handle_save_section pushes
+    the old content onto previous_versions, marks status=user_edited,
+    writes under If-Match etag).
+
+    Returns the section_updated card directly; the frontend already
+    knows how to render it from the chat-card pipeline.
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    result = _invoke_brd_lambda({
+        "action": "save_section",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "project_id": session.get("project_id"),
+        "section_number": body.section_number,
+        "content": body.content,
+    })
+
+    _maybe_promote_to_refining(session, result)
+    return result
+
+
+@router.post("/revert-section")
+def brd_revert_section(
+    body: BRDRevertSectionRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Pop the most-recent entry off the section's previous_versions
+    stack and make it the current content. Used by the Revert button on
+    the section diff view.
+
+    Same DRAFTED -> REFINING promotion as save-section: a successful
+    revert IS a modification to the BRD, so the session moves into the
+    refining stage if it wasn't already.
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    result = _invoke_brd_lambda({
+        "action": "revert_section",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "project_id": session.get("project_id"),
+        "section_number": body.section_number,
+    })
+
+    _maybe_promote_to_refining(session, result)
+    return result
