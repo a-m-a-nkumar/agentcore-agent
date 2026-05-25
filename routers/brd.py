@@ -56,7 +56,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 import boto3
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from db_helper import (
@@ -64,6 +64,8 @@ from db_helper import (
     get_brd_session,
     get_project,
     get_project_sessions,
+    increment_message_count,
+    update_brd_session_stage,
 )
 
 # Reuse the projects-router auth dependency (DB user row keyed by "id").
@@ -471,3 +473,162 @@ def get_loaded_facts(
         count=len(facts),
         use_long_term_context=True,
     )
+
+
+# ============================================
+# POST /turn — the workhorse. Frontend chat-box submits land here as
+# multipart form data so the same endpoint handles plain text turns and
+# single-file attachments. The orchestrator Lambda does the heavy lifting
+# (intent routing -> handler -> card response). This router does:
+#
+#   1. Auth (session ownership) + UploadFile -> extracted_text.
+#   2. Persist source file to S3 best-effort (so the user has a stable
+#      reference if generation later wants to re-fetch).
+#   3. Build the Lambda payload (`action: "turn"` + stage + last-card
+#      context for the intent router's disambiguation rules).
+#   4. Invoke orchestrator synchronously.
+#   5. Normalise the response to `{cards: [...]}` (Lambda may return
+#      either a single card or a cards-list envelope from the multi-file
+#      bypass path).
+#   6. Apply the canonical stage transition based on `next_stage_hint`
+#      (orchestrator computes the hint; router writes the DB).
+#   7. Increment message_count.
+# ============================================
+
+def _extract_uploaded_text(raw: bytes, filename: str) -> str:
+    """Best-effort text extraction. Reuses app.extract_text when
+    available -- it handles PDF / DOCX / TXT. Returns "" on failure
+    so the orchestrator's ingest handler still gets a doc payload
+    (with empty extracted_text -> "no extractable text" doc_ingested
+    card)."""
+    try:
+        from app import extract_text  # late import; app may not be loaded in tests
+    except Exception:
+        return ""
+    try:
+        return extract_text(raw, filename) or ""
+    except Exception as e:
+        logger.warning(f"[BRD /turn] extract_text failed for {filename}: {e}")
+        return ""
+
+
+def _persist_source_file(
+    session_id: str, filename: str, raw: bytes, content_type: Optional[str],
+) -> Optional[str]:
+    """Save the uploaded file to S3 under sessions/{sid}/sources/. Best
+    effort -- failure logs and returns None; the chat turn proceeds
+    using just the extracted text. Mirrors routers/sad.py:329-335."""
+    try:
+        from services.s3_service import s3_put_object
+        key = f"sessions/{session_id}/sources/{filename}"
+        s3_put_object(key=key, body=raw,
+                      content_type=content_type or "application/octet-stream")
+        return key
+    except Exception as e:
+        logger.warning(f"[BRD /turn] persist source file {filename} failed: {e}")
+        return None
+
+
+def _apply_stage_hint(session: Dict[str, Any], next_stage_hint: Optional[str]) -> None:
+    """Translate the orchestrator's stage hint into a DB write. Idempotent
+    when hint is None or matches current stage. Failures log -- the chat
+    turn already succeeded; stage drift is repairable via the FastAPI
+    session-fixup path during Phase 6 cleanup."""
+    if not next_stage_hint:
+        return
+    current = session.get("stage")
+    if current == next_stage_hint:
+        return
+    try:
+        update_brd_session_stage(session["id"], next_stage_hint)
+    except Exception as e:
+        logger.warning(
+            f"[BRD /turn] stage update {current!r} -> {next_stage_hint!r} "
+            f"on {session.get('id')} failed (non-fatal): {e}"
+        )
+
+
+def _bump_message_count(session_id: str) -> None:
+    """Best-effort message-count increment. Drives the project list
+    sidebar's "N messages" affordance; a missed bump just understates
+    the count, not a correctness bug."""
+    try:
+        increment_message_count(session_id)
+    except Exception as e:
+        logger.warning(f"[BRD /turn] message_count increment failed: {e}")
+
+
+@router.post("/turn")
+async def brd_turn(
+    session_id: str               = Form(...),
+    message: str                  = Form(""),
+    project_id: Optional[str]     = Form(None),
+    viewing_section: Optional[int] = Form(None),
+    last_card_type: Optional[str] = Form(None),
+    last_proposed_section: Optional[int] = Form(None),
+    file: Optional[UploadFile]    = File(None),
+    current_user: dict            = Depends(get_current_user),
+):
+    """One chat-box turn. Forwards to the orchestrator Lambda's `turn`
+    action and returns `{cards: [...]}` (always a list, even for the
+    common one-card response, so the frontend never has to branch).
+
+    Stage transitions are derived from the orchestrator's
+    `next_stage_hint` -- the Lambda computes the hint (it knows what
+    intent classified), the router writes the DB (it owns the session
+    row).
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(session_id, user_id)
+
+    # --- Single file upload (multi-file via Confluence URL is wired in
+    #     a later commit -- file= takes priority over any future
+    #     files= field) -------------------------------------------------
+    file_payload: Optional[Dict[str, Any]] = None
+    if file is not None:
+        raw = await file.read()
+        text = _extract_uploaded_text(raw, file.filename or "uploaded")
+        s3_key = _persist_source_file(
+            session_id, file.filename or "uploaded", raw, file.content_type
+        )
+        file_payload = {
+            "filename": file.filename or "uploaded",
+            "extracted_text": text,
+        }
+        if s3_key:
+            file_payload["s3_key"] = s3_key
+
+    # --- Lambda payload --------------------------------------------------
+    payload = {
+        "action": "turn",
+        "session_id": session_id,
+        "project_id": project_id or session.get("project_id"),
+        "user_id": user_id,
+        "message": message,
+        "viewing_section": viewing_section,
+        "last_card_type": last_card_type,
+        "last_proposed_section": last_proposed_section,
+        "stage": session.get("stage", "NEW"),
+        "file": file_payload,
+    }
+    lambda_result = _invoke_brd_lambda(payload)
+
+    # --- Normalise to {cards: [...]} ------------------------------------
+    # Orchestrator returns either a single card dict OR
+    # {cards: [...], intent: ..., next_stage_hint: ...} (the latter
+    # comes from handle_turn / multi-file bypass).
+    if isinstance(lambda_result, dict) and isinstance(lambda_result.get("cards"), list):
+        cards = lambda_result["cards"]
+        next_stage_hint = lambda_result.get("next_stage_hint")
+    elif isinstance(lambda_result, dict):
+        cards = [lambda_result]
+        next_stage_hint = None  # single-card path doesn't carry the hint
+    else:
+        cards = []
+        next_stage_hint = None
+
+    # --- Apply stage transition + bump count ----------------------------
+    _apply_stage_hint(session, next_stage_hint)
+    _bump_message_count(session_id)
+
+    return {"cards": cards}
