@@ -531,16 +531,258 @@ def _next_stage_hint(intent: str, current_stage: str) -> Optional[str]:
 # Each returns ONE card dict.
 # ============================================
 
-def _do_ask_general(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_ask_general lands in Phase 2 commit 4")
+def _do_ask_general(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Capabilities / greetings / small talk. One short LLM call with
+    a stable capabilities prompt. Doesn't touch S3 or long-term
+    memory — pure text response.
+
+    Why an LLM call instead of canned templates: users phrase greetings
+    a thousand different ways, and a fixed template feels robotic. A
+    400-token cap + T=0.3 gives natural variety while staying cheap.
+    """
+    from llm_gateway import chat_completion
+
+    message = (event or {}).get("message", "")
+    user_id = (event or {}).get("user_id")
+
+    system_prompt = (
+        "You are the BRD assistant. The user sent a greeting / small talk / "
+        "capabilities question that does not require any BRD content. "
+        "Respond in 1-3 short sentences, warmly but concisely. Your "
+        "capabilities are: gather requirements with follow-up questions, "
+        "generate BRDs from chat or uploaded transcripts, edit / regenerate "
+        "sections, audit quality, suggest improvements, and answer questions "
+        "about an existing BRD. Mention only the capabilities the user actually "
+        "asked about — don't dump the full list unless they explicitly ask "
+        "'what can you do'."
+    )
+
+    try:
+        text = chat_completion(
+            messages=[{"role": "user", "content": message}],
+            system_prompt=system_prompt,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.3,
+            max_tokens=400,
+            user_id=user_id,
+            token_source="lambda_brd_orchestrator:ask_general",
+        )
+    except Exception as e:
+        logger.warning(f"[BRD] _do_ask_general LLM call failed: {e}")
+        text = (
+            "Hi! I help you draft BRDs — I can gather requirements, generate "
+            "drafts, and edit / audit existing sections. What would you like "
+            "to do?"
+        )
+
+    return card("text", text=text)
 
 
-def _do_ask_question(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_ask_question lands in Phase 2 commit 4")
+def _do_show_section(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """View a section verbatim (or the full TOC when target_section is
+    None / 'list all'). No LLM call — pure S3 read.
+
+    Resolution order for the section:
+      1. router.target_section (int) — exact number, preferred.
+      2. router.target_title (str) — fuzzy-match against current titles.
+      3. Neither — return the full TOC (every section, content omitted).
+    """
+    from services.brd_orchestrator_utils import brd_structure_key, s3_get_json_with_etag
+
+    brd_id = session.get("brd_id")
+    if not brd_id:
+        return card(
+            "error",
+            code="no_brd",
+            message="There is no BRD draft to show yet.",
+            retryable=False,
+        )
+
+    try:
+        structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        logger.error(f"[BRD] _do_show_section S3 read failed for {brd_id}: {e}")
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card(
+            "error",
+            code="malformed_brd",
+            message="BRD structure on S3 is malformed or empty.",
+            retryable=False,
+        )
+
+    sections: List[Dict[str, Any]] = structure["sections"]
+    target_number = router.get("target_section")
+    target_title = (router.get("target_title") or "").strip()
+
+    # 1. Number match
+    if target_number is not None:
+        for s in sections:
+            if s.get("number") == target_number:
+                return _build_section_view_card(s)
+        return card(
+            "error",
+            code="section_not_found",
+            message=f"Section #{target_number} not found in this BRD.",
+            retryable=False,
+        )
+
+    # 2. Title fuzzy match (case-insensitive substring as a cheap
+    #    proxy for RapidFuzz; the FastAPI router does the strict
+    #    fuzzy match before invoking, this is the fallback).
+    if target_title:
+        needle = target_title.lower()
+        matches = [s for s in sections if needle in (s.get("title") or "").lower()]
+        if len(matches) == 1:
+            return _build_section_view_card(matches[0])
+        if len(matches) > 1:
+            return card(
+                "clarification",
+                candidates=[
+                    {"number": s.get("number"), "title": s.get("title")}
+                    for s in matches
+                ],
+                original_intent="SHOW_SECTION",
+            )
+
+    # 3. No target — return TOC.
+    return card(
+        "section_view",
+        section_number=None,
+        title="Table of contents",
+        is_toc=True,
+        toc=[
+            {"number": s.get("number"), "title": s.get("title") or "(untitled)"}
+            for s in sections
+        ],
+    )
 
 
-def _do_show_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_show_section lands in Phase 2 commit 4")
+def _build_section_view_card(section: Dict[str, Any]) -> Dict[str, Any]:
+    """Shape one section dict into a section_view card. Strips the
+    previous_versions stack from the wire shape — it's only used by
+    the revert handler, never shown to the user."""
+    return card(
+        "section_view",
+        section_number=section.get("number"),
+        title=section.get("title"),
+        content_json=section.get("content") or [],
+        last_updated_ts=section.get("last_updated_ts"),
+        status=section.get("status"),
+    )
+
+
+def _do_ask_question(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Q&A grounded in the existing BRD. One LLM call with the brd_qa
+    prompt; the user-content block carries the matching sections plus
+    optional long-term facts when the session opted-in.
+    """
+    from services.brd_orchestrator_utils import (
+        brd_structure_key,
+        extract_json,
+        get_long_term_facts,
+        s3_get_json_with_etag,
+    )
+    from prompts.brd_qa_prompts import QA_SYSTEM_PROMPT, build_qa_prompt
+    from llm_gateway import chat_completion
+
+    user_id = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+    question = (event or {}).get("message", "")
+    brd_id = session.get("brd_id")
+
+    if not brd_id:
+        return card(
+            "text",
+            text="There's no BRD draft to query yet. Want to start gathering requirements?",
+            kind="warning",
+        )
+
+    # Load the structure to ground the answer.
+    try:
+        structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        logger.error(f"[BRD] _do_ask_question S3 read failed: {e}")
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card(
+            "text",
+            text="The BRD draft is empty or malformed. Try regenerating it.",
+            kind="warning",
+        )
+
+    # Heuristic relevant-section pick. router may have set a target;
+    # if not, send every section (cheap because each is small JSON).
+    relevant_sections: List[Dict[str, Any]] = []
+    target_number = router.get("target_section")
+    if target_number is not None:
+        for s in structure["sections"]:
+            if s.get("number") == target_number:
+                relevant_sections = [s]
+                break
+    if not relevant_sections:
+        relevant_sections = list(structure["sections"])
+
+    # Long-term facts ONLY when this session opted in (Resolved Q#5).
+    known_facts: List[str] = []
+    if session.get("use_long_term_context", True):
+        known_facts = get_long_term_facts(
+            user_id=user_id,
+            project_id=project_id,
+            query=question,
+        )
+
+    user_content = build_qa_prompt(
+        question=question,
+        relevant_sections=relevant_sections,
+        known_facts=known_facts,
+    )
+
+    try:
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=QA_SYSTEM_PROMPT,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.3,
+            max_tokens=BRD_QA_MAX_TOKENS,
+            user_id=user_id,
+            token_source="lambda_brd_orchestrator:qa",
+        )
+        parsed = extract_json(raw)
+    except Exception as e:
+        logger.warning(f"[BRD] _do_ask_question LLM/parse failed: {e}")
+        return card(
+            "text",
+            text=(
+                "Sorry, I couldn't answer that one — the model returned an "
+                "unexpected response. Try rephrasing or asking about a "
+                "specific section."
+            ),
+            kind="warning",
+        )
+
+    answer = parsed.get("answer") or ""
+    citations = parsed.get("citations") or []
+    # Front-end uses the first citation's section_number to render the
+    # "go to §N" chip; bare text is fine if no citations came back.
+    cited_section = None
+    if citations and isinstance(citations[0], dict):
+        cited_section = citations[0].get("section_number")
+
+    return card(
+        "text",
+        text=answer,
+        cited_section=cited_section,
+        citations=citations,
+    )
 
 
 def _do_suggest(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
