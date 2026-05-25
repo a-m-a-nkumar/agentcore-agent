@@ -224,12 +224,377 @@ def handle_ping(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_turn(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Unified chat-box entry: run intent router, dispatch to a per-
-    intent handler, persist USER+ASSISTANT events to AgentCore Memory.
+    """Unified chat-box entry. Pipeline:
 
-    Body filled in by a subsequent Phase 2 commit.
+      1. Defense-in-depth: re-verify session ownership in the Lambda
+         (FastAPI already checked, but a future bug there must not
+         leak data here).
+      2. If stage == GENERATING: return generation_in_progress card
+         WITHOUT running the router. The user can chat with other
+         sessions but this one is occupied.
+      3. If files attached (multi-file): bypass router, loop ingest.
+      4. Persist USER event to AgentCore Memory under per-user actor.
+      5. Load BRD structure (if exists) for section grounding.
+      6. Call intent router (LLM + prompts/brd_intent_router).
+      7. Stage-gate the returned intent — downgrade to safe fallback
+         if the router picked something not valid at current stage.
+      8. Dispatch to INTENT_TO_HANDLER_MAP[intent].
+      9. Persist ASSISTANT event with a one-line card summary.
+     10. Return {"cards": [result_card]} envelope the FastAPI router
+         unwraps into its own response.
     """
-    raise NotImplementedError("handle_turn lands in a later Phase 2 commit")
+    from services.brd_orchestrator_utils import (
+        ConcurrentEditError,  # noqa: F401 (re-export for handler imports)
+        brd_structure_key,
+        extract_json,
+        per_user_actor,  # noqa: F401
+        read_memory_history,
+        s3_get_json_with_etag,
+        verify_session_owned,
+        write_memory_event,
+    )
+    from prompts.brd_intent_router import (
+        BRD_INTENTS,
+        INTENT_VALID_STAGES,
+        build_router_prompt,
+        get_router_system_prompt,
+    )
+
+    # ── 1. Extract inputs ────────────────────────────────────────────
+    session_id = (event or {}).get("session_id")
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id")
+    message    = (event or {}).get("message", "")
+    stage      = (event or {}).get("stage", "NEW")
+    file_payload  = (event or {}).get("file")
+    files_payload = (event or {}).get("files") or []
+    last_card_type        = (event or {}).get("last_card_type")
+    last_proposed_section = (event or {}).get("last_proposed_section")
+    currently_viewing_section = (event or {}).get("viewing_section")
+
+    if not session_id or not user_id:
+        return card(
+            "error",
+            code="bad_request",
+            message="session_id and user_id are required",
+            retryable=False,
+        )
+
+    # ── 2. Session ownership re-verify (mitigation #1) ───────────────
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=f"session {session_id} not found", retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="you don't own this session", retryable=False)
+
+    # ── 3. GENERATING short-circuit ──────────────────────────────────
+    if stage == "GENERATING":
+        prior_stage = session.get("prior_stage") or "GATHERING"
+        return card(
+            "generation_in_progress",
+            since_ts=session.get("generation_started_at"),
+            brd_id=session.get("brd_id"),
+            prior_stage=prior_stage,
+        )
+
+    # ── 4. Multi-file bypass — skip router, loop ingest ──────────────
+    if files_payload:
+        return _handle_multi_file_ingest(event, session)
+
+    # ── 5. Persist USER event ────────────────────────────────────────
+    write_memory_event(session_id, user_id, "USER", message)
+
+    # ── 6. Load BRD structure for section grounding ──────────────────
+    brd_id = session.get("brd_id")
+    brd_exists = False
+    available_sections: List[Dict[str, Any]] = []
+    if brd_id:
+        try:
+            structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+        except Exception as e:
+            logger.warning(f"[BRD] couldn't load brd_structure for {brd_id}: {e}")
+            structure = None
+        if structure and isinstance(structure.get("sections"), list):
+            brd_exists = True
+            available_sections = [
+                {"number": s.get("number"), "title": s.get("title") or "(untitled)"}
+                for s in structure["sections"]
+                if isinstance(s, dict) and s.get("number") is not None
+            ]
+
+    # ── 7. Call the intent router ────────────────────────────────────
+    router_payload = _call_intent_router(
+        user_message=message,
+        stage=stage,
+        brd_exists=brd_exists,
+        available_sections=available_sections,
+        currently_viewing_section=currently_viewing_section,
+        file_attached=bool(file_payload),
+        template_attached=bool((event or {}).get("template")),
+        transcript_attached=bool((event or {}).get("transcript")),
+        last_assistant_card_type=last_card_type,
+        last_assistant_proposed_section=last_proposed_section,
+        user_id=user_id,
+    )
+    intent = router_payload.get("intent", "")
+    if intent not in BRD_INTENTS:
+        logger.warning(f"[BRD] router returned unknown intent {intent!r}; falling back to ADD_INFO")
+        intent = "ADD_INFO" if brd_exists else "GATHER_REQUIREMENTS"
+        router_payload["intent"] = intent
+        router_payload["confidence"] = 0.0
+
+    # ── 8. Stage-gate the intent — downgrade if invalid for stage ────
+    valid_stages = INTENT_VALID_STAGES.get(intent, frozenset())
+    if stage not in valid_stages:
+        downgraded = "GATHER_REQUIREMENTS" if not brd_exists else "ASK_GENERAL"
+        logger.info(
+            f"[BRD] router intent {intent!r} not valid in stage {stage!r}; "
+            f"downgrading to {downgraded!r}"
+        )
+        intent = downgraded
+        router_payload["intent"] = downgraded
+        router_payload["downgraded_from"] = router_payload.get("intent")
+
+    # ── 9. Dispatch to intent handler ────────────────────────────────
+    handler = INTENT_TO_HANDLER_MAP.get(intent)
+    if handler is None:
+        return card(
+            "error",
+            code="no_handler",
+            message=f"no handler registered for intent {intent!r}",
+            retryable=False,
+        )
+
+    try:
+        result_card = handler(event, session, router_payload)
+    except NotImplementedError as e:
+        # Allow staged handler rollout: handler stubs return a
+        # placeholder text card rather than 501 so the user sees
+        # something coherent during dual-ship.
+        logger.warning(f"[BRD] handler for {intent} not implemented: {e}")
+        result_card = card(
+            "text",
+            text=f"(Coming soon) The {intent} handler is still under construction.",
+            kind="warning",
+        )
+
+    # ── 10. Persist ASSISTANT event + return cards envelope ──────────
+    summary = _summarize_card_for_memory(result_card)
+    write_memory_event(session_id, user_id, "ASSISTANT", summary)
+
+    return {
+        "cards": [result_card],
+        "intent": intent,
+        "next_stage_hint": _next_stage_hint(intent, stage),
+    }
+
+
+# ============================================
+# handle_turn support — router invocation, multi-file path,
+# card-summary-for-memory, stage hint inference.
+# ============================================
+
+def _call_intent_router(
+    *,
+    user_message: str,
+    stage: str,
+    brd_exists: bool,
+    available_sections: List[Dict[str, Any]],
+    currently_viewing_section: Optional[int],
+    file_attached: bool,
+    template_attached: bool,
+    transcript_attached: bool,
+    last_assistant_card_type: Optional[str],
+    last_assistant_proposed_section: Optional[int],
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """One LLM call to the configured router model. Returns the
+    parsed JSON payload (intent + target_section + ...). On any
+    failure (LLM error, JSON parse error) we fall back to a safe
+    ADD_INFO / GATHER_REQUIREMENTS classification — never crash the
+    user's turn over a router hiccup.
+    """
+    from services.brd_orchestrator_utils import extract_json
+    from prompts.brd_intent_router import (
+        build_router_prompt,
+        get_router_system_prompt,
+    )
+
+    user_content = build_router_prompt(
+        user_message=user_message,
+        stage=stage,
+        brd_exists=brd_exists,
+        available_sections=available_sections,
+        currently_viewing_section=currently_viewing_section,
+        file_attached=file_attached,
+        template_attached=template_attached,
+        transcript_attached=transcript_attached,
+        last_assistant_card_type=last_assistant_card_type,
+        last_assistant_proposed_section=last_assistant_proposed_section,
+    )
+
+    try:
+        # Lazy import to keep cold-start light for ping etc.
+        from llm_gateway import chat_completion
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=get_router_system_prompt(),
+            model=BRD_ROUTER_MODEL,
+            temperature=BRD_ROUTER_TEMPERATURE,
+            max_tokens=BRD_ROUTER_MAX_TOKENS,
+            user_id=user_id,
+            token_source="lambda_brd_orchestrator:router",
+        )
+        return extract_json(raw)
+    except Exception as e:
+        logger.warning(f"[BRD] router call failed: {e}; falling back to safety default")
+        return {
+            "intent": "ADD_INFO" if brd_exists else "GATHER_REQUIREMENTS",
+            "target_section": None,
+            "target_title": "",
+            "fact": user_message[:500],
+            "edit_instruction": "",
+            "regen_proposed": False,
+            "confidence": 0.0,
+            "router_error": str(e),
+        }
+
+
+def _handle_multi_file_ingest(event: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
+    """Bypass the router for multi-file uploads. Mirrors
+    lambda_sad_orchestrator.py:778-801. Each file is processed by
+    _do_ingest_doc; only the last gets auto_regen=true to avoid
+    N regeneration cascades. Body fills in commit 10."""
+    raise NotImplementedError(
+        "multi-file ingest bypass lands with _do_ingest_doc in Phase 2 commit 10"
+    )
+
+
+def _summarize_card_for_memory(c: Dict[str, Any]) -> str:
+    """One-line human-readable summary of a card for the ASSISTANT
+    memory event. Mirrors lambda_sad_orchestrator.text_summary_for_memory."""
+    t = c.get("type", "text")
+    p = c.get("payload", {}) or {}
+    if t == "text":
+        return (p.get("text") or "")[:500]
+    if t == "fact_saved":
+        return f"[fact saved] {(p.get('text') or '')[:200]}"
+    if t == "doc_ingested":
+        return f"[doc ingested] {p.get('filename', '?')}"
+    if t == "section_view":
+        return f"[shown section {p.get('section_number', '?')}]"
+    if t == "section_updated":
+        return f"[section {p.get('section_number', '?')} updated]"
+    if t == "section_regenerated":
+        return f"[section {p.get('section_number', '?')} regenerated]"
+    if t == "audit":
+        return f"[audit completed: {len(p.get('badges', []))} sections]"
+    if t == "suggestions":
+        return f"[{len(p.get('items', []))} suggestions returned]"
+    if t == "generation_starting":
+        return "[generation starting]"
+    if t == "brd_generated":
+        return f"[BRD generated: {p.get('section_count', '?')} sections]"
+    if t == "generation_failed":
+        return f"[generation failed: {p.get('code', '?')}]"
+    if t == "concurrent_edit":
+        return f"[concurrent edit on section {p.get('section_number', '?')} — reload prompted]"
+    if t == "clarification":
+        return "[clarification requested]"
+    return f"[{t}]"
+
+
+def _next_stage_hint(intent: str, current_stage: str) -> Optional[str]:
+    """Tell the FastAPI router whether this turn should bump the
+    session stage. None means "leave stage alone"; the actual flip
+    happens in routers/brd.py (Phase 3) since the Lambda doesn't
+    touch RDS."""
+    if intent in ("GENERATE_FROM_DOCS", "GENERATE_FROM_HISTORY"):
+        return "GENERATING"
+    if intent == "ADD_INFO" and current_stage in ("NEW",):
+        return "GATHERING"
+    if intent == "GATHER_REQUIREMENTS" and current_stage in ("NEW",):
+        return "GATHERING"
+    if intent in ("EDIT_SECTION", "REGENERATE_SECTION", "AUDIT") and current_stage == "DRAFTED":
+        return "REFINING"
+    return None
+
+
+# ============================================
+# Intent handler stubs (INNER dispatch level)
+# Filled in across Phase 2 commits 4-10. Each takes:
+#   event          — the original Lambda event dict
+#   session        — verified analyst_sessions row
+#   router_payload — {intent, target_section, target_title, fact,
+#                     edit_instruction, regen_proposed, confidence}
+# Each returns ONE card dict.
+# ============================================
+
+def _do_ask_general(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_ask_general lands in Phase 2 commit 4")
+
+
+def _do_ask_question(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_ask_question lands in Phase 2 commit 4")
+
+
+def _do_show_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_show_section lands in Phase 2 commit 4")
+
+
+def _do_suggest(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_suggest lands in Phase 2 commit 7")
+
+
+def _do_add_info(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_add_info lands in Phase 2 commit 8")
+
+
+def _do_edit_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_edit_section lands in Phase 2 commit 5")
+
+
+def _do_gather(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_gather lands in Phase 2 commit 8")
+
+
+def _do_generate_from_docs(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_generate_from_docs lands in Phase 2 commit 9")
+
+
+def _do_generate_from_history(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_generate_from_history lands in Phase 2 commit 9")
+
+
+def _do_audit(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_audit lands in Phase 2 commit 6")
+
+
+def _do_regenerate_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_regenerate_section lands in Phase 2 commit 7")
+
+
+def _do_ingest_doc(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
+    raise NotImplementedError("_do_ingest_doc lands in Phase 2 commit 10")
+
+
+# Map router-classified intent → handler. tests/test_dispatch_coverage
+# asserts every BRD_INTENT has an entry here.
+INTENT_TO_HANDLER_MAP: Dict[str, Callable[..., Dict[str, Any]]] = {
+    "ASK_GENERAL":           _do_ask_general,
+    "ASK_QUESTION":          _do_ask_question,
+    "SHOW_SECTION":          _do_show_section,
+    "SUGGEST":               _do_suggest,
+    "ADD_INFO":              _do_add_info,
+    "EDIT_SECTION":          _do_edit_section,
+    "GATHER_REQUIREMENTS":   _do_gather,
+    "GENERATE_FROM_DOCS":    _do_generate_from_docs,
+    "GENERATE_FROM_HISTORY": _do_generate_from_history,
+    "AUDIT":                 _do_audit,
+    "REGENERATE_SECTION":    _do_regenerate_section,
+    "INGEST_DOC":            _do_ingest_doc,
+}
 
 
 def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
