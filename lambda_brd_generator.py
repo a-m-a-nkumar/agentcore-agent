@@ -2,7 +2,8 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, Dict, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 # Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
@@ -21,6 +22,275 @@ BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
 MAX_TOKENS = int(os.environ["BEDROCK_MAX_TOKENS"])
 TEMPERATURE = float(os.environ["BEDROCK_TEMPERATURE"])
+
+# Parallel section generation tunables (mirror SAD's pattern). Env-tunable
+# so prod and dev can bound gateway concurrency independently. Per-section
+# token budget is tighter than the monolithic path's BEDROCK_MAX_TOKENS
+# because each call only produces one section's content.
+BRD_SECTION_PARALLELISM    = int(os.getenv("BRD_SECTION_PARALLELISM", "5"))
+BRD_SECTION_MAX_TOKENS     = int(os.getenv("BRD_SECTION_MAX_TOKENS", "4000"))
+BRD_SECTION_TEMPERATURE    = float(os.getenv("BRD_SECTION_TEMPERATURE", "0.3"))
+
+
+# Deluxe BRD template section list — kept in lock-step with
+# prompts/requirements_gathering_prompts.py "BRD COVERAGE REFERENCE".
+# Stays a module-level constant so the parallel path doesn't need to
+# re-derive titles from the template text on every invocation.
+BRD_SECTION_TITLES: List[Tuple[int, str]] = [
+    (1,  "Document Overview"),
+    (2,  "Purpose"),
+    (3,  "Background / Context"),
+    (4,  "Stakeholders"),
+    (5,  "Scope"),
+    (6,  "Business Objectives & ROI"),
+    (7,  "Functional Requirements"),
+    (8,  "Non-Functional Requirements"),
+    (9,  "User Stories / Use Cases"),
+    (10, "Assumptions"),
+    (11, "Constraints"),
+    (12, "Acceptance Criteria / KPIs"),
+    (13, "Timeline / Milestones"),
+    (14, "Risks and Dependencies"),
+    (15, "Approval & Review"),
+    (16, "Glossary & Appendix"),
+]
+
+# ============================================================================
+# Parallel section generation — opt-in path (event["parallel"] == True).
+# Mirrors lambda_sad_orchestrator.py:1526 ThreadPoolExecutor pattern.
+#
+# Drops the monolithic single-LLM call (cap ~8K output tokens, ~90s) in
+# favour of 16 per-section workers (~4K tokens each, max_workers=
+# BRD_SECTION_PARALLELISM, ~30-40s wall clock). The trade-off is that
+# each worker only sees its own section's slice of the template — for the
+# Deluxe BRD template that's fine because each section is self-contained,
+# and the full transcript still feeds every worker so cross-section
+# coherence comes from shared input grounding rather than serial output.
+#
+# Output shape matches what brd_structure.json readers expect:
+#   {"sections": [{"number": N, "title": "...", "content": [<blocks>],
+#                  "status": "llm_generated", "last_updated_ts": "..."}]}
+# ============================================================================
+
+_PARALLEL_SECTION_SYSTEM_PROMPT = """\
+You generate ONE section of a Business Requirements Document (BRD)
+written against the Deluxe template.
+
+Inputs you receive:
+  - Section number + title (FIXED — do not change them).
+  - The relevant slice of the BRD template (what this section should
+    cover, per Deluxe's standard structure).
+  - The full source transcript / conversation that justifies the BRD.
+
+Output ONLY a JSON object with these keys:
+
+  {
+    "title":   "<section title verbatim>",
+    "content": [<content blocks>]
+  }
+
+Content block schema (use these types only):
+  paragraph    {"type": "paragraph",    "text": "..."}
+  heading      {"type": "heading", "level": 2-4, "text": "..."}
+  bullet_list  {"type": "bullet_list",  "items": ["...", ...]}
+  ordered_list {"type": "ordered_list", "items": ["...", ...]}
+  table        {"type": "table", "headers": [...], "rows": [[...], ...]}
+
+Rules:
+  - Ground every concrete statement in the transcript. Do not invent
+    facts. If the transcript doesn't address something this section
+    should cover, write "(to be confirmed)" rather than fabricating.
+  - Keep the title field EXACTLY as provided. The orchestrator's
+    structure validation rejects titles that drift.
+  - 3-8 content blocks per section is typical. A single placeholder
+    paragraph is acceptable when the transcript is silent on a topic.
+  - Prefer tables for stakeholder / risk / NFR / acceptance-criteria
+    sections; bullet lists for assumptions / constraints; paragraphs
+    for purpose / background / scope.
+"""
+
+
+def _build_section_prompt(
+    *,
+    section_number: int,
+    section_title: str,
+    template_text: str,
+    transcript_text: str,
+) -> str:
+    """Compose the per-section user-content block. Sends the FULL
+    transcript (capped) and a truncated template excerpt so each
+    worker has enough context to ground its output without exceeding
+    per-call token budget."""
+    # Cap template at 4K chars per section call — the section worker
+    # mostly needs to know the template's general shape, not every
+    # other section's verbiage. Full transcript stays so claims are
+    # grounded.
+    template_excerpt = (template_text or "")[:4000]
+    transcript_excerpt = (transcript_text or "")[:20000]
+    if len(template_text or "") > 4000:
+        template_excerpt += "\n... (template truncated for per-section call)"
+    if len(transcript_text or "") > 20000:
+        transcript_excerpt += "\n... (transcript truncated)"
+
+    return (
+        f"Generate Section {section_number}: {section_title}\n\n"
+        f"Deluxe BRD template (general shape — for reference only):\n"
+        f"```\n{template_excerpt}\n```\n\n"
+        f"Source transcript (ground every claim in this):\n"
+        f"```\n{transcript_excerpt}\n```\n\n"
+        f"Return JSON: {{\"title\": \"{section_title}\", \"content\": [<blocks>]}}"
+    )
+
+
+def _generate_one_section(
+    *,
+    section_number: int,
+    section_title: str,
+    template_text: str,
+    transcript_text: str,
+    user_id: Optional[str],
+) -> Tuple[int, Dict[str, Any]]:
+    """Generate one section via one LLM call. Returns
+    (section_number, section_dict).
+
+    One retry on parse failure with an explicit "JSON only" suffix,
+    then a sentinel placeholder so the parallel loop never explodes
+    the whole generation over one bad section."""
+    prompt = _build_section_prompt(
+        section_number=section_number,
+        section_title=section_title,
+        template_text=template_text,
+        transcript_text=transcript_text,
+    )
+
+    retry_suffix = (
+        "\n\nIMPORTANT — your previous response could not be parsed. Reply "
+        "with ONLY a single JSON object, no prose before or after, no "
+        'markdown fences. The object MUST have keys "title" and '
+        '"content" (array of blocks).\n'
+    )
+
+    last_raw = ""
+    last_err: Optional[Exception] = None
+    for attempt in (1, 2):
+        try:
+            raw = chat_completion(
+                messages=[{
+                    "role": "user",
+                    "content": prompt + (retry_suffix if attempt == 2 else ""),
+                }],
+                temperature=BRD_SECTION_TEMPERATURE,
+                max_tokens=BRD_SECTION_MAX_TOKENS,
+                user_id=user_id,
+                token_source=f"lambda_brd_generator:section{section_number}",
+            )
+            last_raw = raw
+            parsed = _extract_section_json(raw)
+            content = parsed.get("content") if isinstance(parsed, dict) else None
+            if not isinstance(content, list):
+                raise ValueError("section worker returned content that is not a list")
+            return section_number, {
+                "number": section_number,
+                "title": section_title,
+                "content": content,
+                "status": "llm_generated",
+            }
+        except Exception as e:
+            last_err = e
+            logger.warning(
+                f"[BRD-gen] section {section_number} attempt {attempt} parse failed: {e} "
+                f"raw[:300]={(last_raw or '')[:300]!r}"
+            )
+
+    logger.error(
+        f"[BRD-gen] section {section_number} unrecoverable: {last_err}; "
+        f"emitting placeholder so the BRD shape stays intact."
+    )
+    return section_number, {
+        "number": section_number,
+        "title": section_title,
+        "content": [{
+            "type": "paragraph",
+            "text": f"(Generation failed for this section: {last_err}. "
+                    f"Click Regenerate to retry.)",
+        }],
+        "status": "generation_failed",
+    }
+
+
+def _extract_section_json(text: str) -> Any:
+    """Best-effort JSON parse — handles markdown-fenced and prose-
+    wrapped responses the same way services.brd_orchestrator_utils
+    does, kept local so this Lambda has no dependency on the
+    orchestrator's module."""
+    import re
+    if not text:
+        raise json.JSONDecodeError("empty response", "", 0)
+    s = text.strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    m = re.search(r"\{.*\}", s, re.DOTALL)
+    if m:
+        return json.loads(m.group(0))
+    raise json.JSONDecodeError("no JSON object found in section output", s[:200], 0)
+
+
+def _generate_brd_parallel(
+    *,
+    template_text: str,
+    transcript_text: str,
+    user_id: Optional[str],
+) -> Dict[str, Any]:
+    """Fan out one LLM call per section via ThreadPoolExecutor.
+
+    max_workers bounded by BRD_SECTION_PARALLELISM (default 5) so the
+    DLX gateway isn't hit with 16 concurrent requests. Returns a
+    brd_structure dict ready to write to brds/{brd_id}/brd_structure.json.
+    """
+    results: Dict[int, Dict[str, Any]] = {}
+    start_ts = int(__import__("time").time())
+
+    with ThreadPoolExecutor(max_workers=BRD_SECTION_PARALLELISM) as ex:
+        futures = [
+            ex.submit(
+                _generate_one_section,
+                section_number=n,
+                section_title=title,
+                template_text=template_text,
+                transcript_text=transcript_text,
+                user_id=user_id,
+            )
+            for n, title in BRD_SECTION_TITLES
+        ]
+        for fut in as_completed(futures):
+            try:
+                n, section_dict = fut.result()
+                results[n] = section_dict
+            except Exception as e:
+                # Belt-and-braces: _generate_one_section already
+                # catches its own LLM failures and returns a sentinel.
+                # This catches anything truly exceptional (e.g. future
+                # cancellation).
+                logger.error(f"[BRD-gen] section worker exploded: {e}")
+
+    # Assemble in canonical section-number order even though futures
+    # complete out-of-order.
+    sections = [results[n] for n, _ in BRD_SECTION_TITLES if n in results]
+    elapsed = int(__import__("time").time()) - start_ts
+    logger.info(
+        f"[BRD-gen] parallel generation complete: {len(sections)}/{len(BRD_SECTION_TITLES)} "
+        f"sections, max_workers={BRD_SECTION_PARALLELISM}, elapsed={elapsed}s"
+    )
+    return {"sections": sections}
+
 
 def _coerce_event(event: Any) -> Dict[str, Any]:
     if isinstance(event, dict):
@@ -280,21 +550,138 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None, user_id: Optional[str] 
     return brd_text
 
 
+def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
+    """Entry point for the parallel section generation path.
+
+    Expected event shape:
+      {"parallel": True, "brd_id": "...", "user_id": "...",
+       "template": "..." (or template_s3_*),
+       "transcript": "..." (or transcript_s3_*)}
+
+    Writes brd_structure.json directly and returns a slim
+    {brd_id, status, section_count} envelope so the orchestrator's
+    next stage can pick up the result without parsing 50KB of BRD
+    text. (The BRD text artifact is regenerable from the structure
+    if/when needed.)
+    """
+    brd_id  = evt.get("brd_id") or str(uuid.uuid4())
+    user_id = evt.get("user_id")
+
+    # Pull template + transcript -- supports BOTH inline-text and
+    # S3-key payload shapes to match the existing monolithic flow's
+    # input contract.
+    template_text   = evt.get("template")   or evt.get("template_text")
+    transcript_text = evt.get("transcript") or evt.get("transcript_text")
+
+    template_s3_bucket   = evt.get("template_s3_bucket")
+    template_s3_key      = evt.get("template_s3_key")
+    transcript_s3_bucket = evt.get("transcript_s3_bucket")
+    transcript_s3_key    = evt.get("transcript_s3_key")
+
+    if not template_text and template_s3_bucket and template_s3_key:
+        try:
+            s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+            obj = s3.get_object(Bucket=template_s3_bucket, Key=template_s3_key)
+            data = obj["Body"].read()
+            template_text = _extract_text_from_docx(data) if template_s3_key.endswith(".docx") \
+                else data.decode("utf-8", errors="replace")
+        except Exception as e:
+            logger.error(f"[BRD-gen parallel] template S3 fetch failed: {e}")
+            return _parallel_error_response(brd_id, f"template fetch failed: {e}")
+
+    if not transcript_text and transcript_s3_bucket and transcript_s3_key:
+        try:
+            s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+            obj = s3.get_object(Bucket=transcript_s3_bucket, Key=transcript_s3_key)
+            data = obj["Body"].read()
+            transcript_text = _extract_text_from_docx(data) if transcript_s3_key.endswith(".docx") \
+                else data.decode("utf-8", errors="replace")
+        except Exception as e:
+            logger.error(f"[BRD-gen parallel] transcript S3 fetch failed: {e}")
+            return _parallel_error_response(brd_id, f"transcript fetch failed: {e}")
+
+    if not template_text or not transcript_text:
+        return _parallel_error_response(brd_id, "template and transcript are required")
+
+    # Fan out.
+    structure = _generate_brd_parallel(
+        template_text=template_text,
+        transcript_text=transcript_text,
+        user_id=user_id,
+    )
+
+    # Write the canonical structure key. The legacy single-call path
+    # writes BRD_{id}.txt + a derived brd_structure.json; here we
+    # write only brd_structure.json because the structure IS the
+    # primary artifact in the parallel path.
+    structure_key = f"brds/{brd_id}/brd_structure.json"
+    try:
+        s3_put_object(
+            key=structure_key,
+            body=json.dumps(structure, indent=2, ensure_ascii=False),
+            content_type="application/json",
+        )
+    except Exception as e:
+        logger.error(f"[BRD-gen parallel] S3 write failed: {e}")
+        return _parallel_error_response(brd_id, f"S3 write failed: {e}")
+
+    failed_count = sum(
+        1 for s in structure.get("sections", [])
+        if s.get("status") == "generation_failed"
+    )
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "brd_id":            brd_id,
+            "status":            "success" if failed_count == 0 else "partial",
+            "section_count":     len(structure.get("sections", [])),
+            "failed_sections":   failed_count,
+            "s3_key":            structure_key,
+            "mode":              "parallel",
+        }),
+    }
+
+
+def _parallel_error_response(brd_id: str, message: str) -> Dict[str, Any]:
+    """Uniform error envelope for the parallel path. Same statusCode
+    shape the orchestrator expects from any other action handler."""
+    return {
+        "statusCode": 500,
+        "body": json.dumps({
+            "brd_id": brd_id,
+            "status": "error",
+            "error":  message,
+            "mode":   "parallel",
+        }),
+    }
+
+
 def lambda_handler(event, context):
     """
     Lambda handler for BRD generation.
-    
+
     This function is called by:
     1. Bedrock Agent (Agent Mode) - expects Bedrock Agent response format
     2. AgentCore Gateway (Direct Mode) - expects simple JSON with 'brd' field
-    
+    3. lambda_brd_orchestrator with event["parallel"]=True -- routes to
+       the parallel section-generation path defined above (~30-40s
+       vs. ~90s monolithic).
+
     CRITICAL: Always returns a valid response, even on errors.
     """
     logger.info("=== BRD Generator Lambda Started ===")
     logger.info(f"Received event type: {type(event)}")
     logger.info(f"Received event: {json.dumps(event, default=str)[:1000]}")
-    
+
     evt = _coerce_event(event)
+
+    # Parallel section-generation opt-in. The orchestrator's
+    # _start_generation sets event["parallel"]=True from Phase 2
+    # commit 9 onward; legacy callers (Bedrock Agent invocations,
+    # direct test invokes) fall through to the monolithic path below
+    # so this is a strictly additive change.
+    if isinstance(evt, dict) and evt.get("parallel") is True:
+        return _handle_parallel(evt)
 
     # Log the FULL event structure for debugging (no truncation)
     logger.info("=" * 80)

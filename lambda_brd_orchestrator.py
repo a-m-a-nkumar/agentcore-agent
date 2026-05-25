@@ -1362,8 +1362,14 @@ def _do_generate_from_docs(
             "template_s3_key":    (event or {}).get("template_s3_key"),
             "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
             "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
+            # Phase 2 commit 11 opt-in: lambda_brd_generator's parallel
+            # path. 30-40s vs ~90s monolithic; safe to default on
+            # because the parallel path is strictly additive (legacy
+            # callers without this flag still hit the monolithic
+            # codepath).
+            "parallel": True,
         },
-        expected_seconds=45,
+        expected_seconds=40,
         source="docs",
     )
 
@@ -1907,8 +1913,9 @@ def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
             "template_s3_key":      (event or {}).get("template_s3_key"),
             "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
             "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
+            "parallel": True,  # Phase 2 commit 11 opt-in
         },
-        expected_seconds=45,
+        expected_seconds=40,
         source="docs",
     )
 
