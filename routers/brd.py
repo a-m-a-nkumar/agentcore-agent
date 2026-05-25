@@ -704,6 +704,130 @@ def brd_save_section(
 
 
 # ============================================
+# Read endpoints — direct S3 / AgentCore Memory access. No Lambda
+# invoke because reads don't need orchestration: the same data path
+# the orchestrator uses (services.brd_orchestrator_utils) reads work
+# fine from a FastAPI process. Saves a Lambda cold-start hop and
+# ~200ms of latency on every page paint.
+# ============================================
+
+def _read_brd_structure(brd_id: str) -> Dict[str, Any]:
+    """Best-effort fetch of brds/{brd_id}/brd_structure.json. Raises
+    404 when missing -- the chat UI surfaces this as "no BRD drafted
+    yet" rather than a stack trace.
+    """
+    from services.brd_orchestrator_utils import brd_structure_key, s3_get_json_with_etag
+    try:
+        structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        logger.warning(f"[BRD read] structure fetch failed for {brd_id}: {e}")
+        raise HTTPException(status_code=502, detail=f"S3 read failed: {e}")
+    if not structure:
+        raise HTTPException(
+            status_code=404,
+            detail="BRD has not been generated for this session yet",
+        )
+    return structure
+
+
+@router.get("/{session_id}/history")
+def get_history(
+    session_id: str,
+    max_messages: int = 50,
+    current_user: dict = Depends(get_current_user),
+):
+    """Dump merged short-term chat history for a session.
+
+    Uses the dual-actor read pattern (per-user actor + legacy
+    'analyst-session') so historical chats from sessions older than
+    the migration remain visible. Bounded by max_messages so the
+    response doesn't balloon on very-long sessions; default 50 is
+    enough for a chat panel's initial paint with infinite-scroll up.
+    """
+    _ensure_session_owned(session_id, current_user["id"])
+    from services.brd_orchestrator_utils import read_memory_history
+    try:
+        messages = read_memory_history(
+            session_id=session_id,
+            user_id=current_user["id"],
+            max_messages=max(1, min(max_messages, 200)),
+        )
+    except Exception as e:
+        logger.error(f"[BRD history] read failed: {e}")
+        raise HTTPException(status_code=502, detail=f"memory read failed: {e}")
+    return {"messages": messages, "count": len(messages)}
+
+
+@router.get("/{session_id}/sections")
+def get_sections(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """First-paint endpoint -- returns one entry per section with
+    metadata only (no content_json) so the frontend can render the
+    table-of-contents sidebar quickly. The individual section endpoint
+    below fetches the full content_json when the user navigates in.
+    """
+    session = _ensure_session_owned(session_id, current_user["id"])
+    brd_id = session.get("brd_id")
+    if not brd_id:
+        raise HTTPException(
+            status_code=404,
+            detail="BRD has not been generated for this session yet",
+        )
+    structure = _read_brd_structure(brd_id)
+    return {
+        "brd_id": brd_id,
+        "stage": session.get("stage"),
+        "sections": [
+            {
+                "number": s.get("number"),
+                "title": s.get("title"),
+                "status": s.get("status"),
+                "audit": s.get("audit"),
+                "last_updated_ts": s.get("last_updated_ts"),
+                "previous_versions_count": len(s.get("previous_versions") or []),
+            }
+            for s in (structure.get("sections") or [])
+            if s.get("number") is not None
+        ],
+    }
+
+
+@router.get("/{session_id}/section/{n}")
+def get_section(
+    session_id: str,
+    n: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Single-section refresh -- returns the full content_json for
+    rendering in the section pane. Strips previous_versions from the
+    wire shape (it's used by the orchestrator's revert path, never
+    shown to the user directly).
+    """
+    session = _ensure_session_owned(session_id, current_user["id"])
+    brd_id = session.get("brd_id")
+    if not brd_id:
+        raise HTTPException(
+            status_code=404,
+            detail="BRD has not been generated for this session yet",
+        )
+    structure = _read_brd_structure(brd_id)
+    for s in structure.get("sections") or []:
+        if s.get("number") == n:
+            return {
+                "number": s.get("number"),
+                "title": s.get("title"),
+                "content": s.get("content") or [],
+                "status": s.get("status"),
+                "audit": s.get("audit"),
+                "last_updated_ts": s.get("last_updated_ts"),
+                "previous_versions_count": len(s.get("previous_versions") or []),
+            }
+    raise HTTPException(status_code=404, detail=f"Section {n} not found")
+
+
+# ============================================
 # Generation endpoints — kicked off from the chat UI (via /turn) AND
 # from explicit "Generate" buttons. Both paths funnel through the
 # orchestrator's _start_generation body (async-invoke worker Lambda,
