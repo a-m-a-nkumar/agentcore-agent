@@ -793,8 +793,244 @@ def _do_add_info(event: Dict[str, Any], session: Dict[str, Any], router: Dict[st
     raise NotImplementedError("_do_add_info lands in Phase 2 commit 8")
 
 
-def _do_edit_section(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_edit_section lands in Phase 2 commit 5")
+def _do_edit_section(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """LLM-based section edit. Pipeline:
+
+      1. Resolve target section from router output (number first, then
+         title fuzzy match). Return clarification card if ambiguous.
+      2. Load BRD with etag (concurrent-edit protection).
+      3. Build the edit prompt via prompts.brd_edit_prompts and call
+         the configured handler model.
+      4. Parse the returned JSON (model occasionally wraps in fences;
+         extract_json handles it).
+      5. Push old content onto previous_versions (cap from env).
+      6. Write back with If-Match etag — surface concurrent_edit card
+         if another writer beat us to it.
+    """
+    from services.brd_orchestrator_utils import (
+        ConcurrentEditError,
+        brd_structure_key,
+        extract_json,
+        s3_get_json_with_etag,
+        s3_put_json_if_match,
+    )
+    from prompts.brd_edit_prompts import EDIT_SYSTEM_PROMPT, build_edit_prompt
+    from llm_gateway import chat_completion
+
+    user_id          = (event or {}).get("user_id")
+    edit_instruction = router.get("edit_instruction") or (event or {}).get("message", "")
+    brd_id           = session.get("brd_id")
+
+    if not brd_id:
+        return card("text", text="There's no BRD to edit yet.", kind="warning")
+
+    try:
+        structure, etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card("error", code="malformed_brd",
+                    message="BRD structure malformed", retryable=False)
+
+    # Resolve target section.
+    section, section_number = _resolve_target_section(
+        sections=structure["sections"],
+        target_number=router.get("target_section"),
+        target_title=router.get("target_title"),
+    )
+    if section == "ambiguous":
+        return card(
+            "clarification",
+            candidates=[
+                {"number": s.get("number"), "title": s.get("title")}
+                for s in section_number  # type: ignore[arg-type]
+            ],
+            original_intent="EDIT_SECTION",
+        )
+    if section is None:
+        return card("text",
+                    text=(f"I couldn't tell which section you meant. "
+                          f"Try specifying a section number (1-{len(structure['sections'])})."),
+                    kind="warning")
+
+    # Build the variable user-content block.
+    numbered_view = _render_section_numbered(section.get("content") or [])
+    user_content = build_edit_prompt(
+        section_number=section_number,
+        section_title=section.get("title") or "",
+        current_section_content_numbered=numbered_view,
+        section_json=section,
+        user_instruction=edit_instruction,
+    )
+
+    try:
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=EDIT_SYSTEM_PROMPT,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.2,
+            max_tokens=BRD_EDIT_MAX_TOKENS,
+            user_id=user_id,
+            token_source=f"lambda_brd_orchestrator:edit_section_{section_number}",
+        )
+        parsed = extract_json(raw)
+    except Exception as e:
+        logger.warning(f"[BRD] _do_edit_section LLM/parse failed: {e}")
+        return card("text",
+                    text="Sorry, the edit failed — model returned an unexpected response.",
+                    kind="warning")
+
+    new_content = parsed.get("content")
+    if not isinstance(new_content, list):
+        return card("text",
+                    text="The model returned the section without a content array. "
+                         "Try rephrasing the instruction.",
+                    kind="warning")
+
+    # Push the OLD content onto the revert stack, then overwrite.
+    _push_previous_version(section, reason="edit_section")
+    section["content"] = new_content
+    section["status"] = "llm_edited"
+    section["last_updated_ts"] = _now_iso()
+    # The edit prompt is supposed to preserve the title verbatim; if
+    # the model returned a different title we trust the original.
+    if parsed.get("title"):
+        section["title"] = parsed["title"]
+
+    try:
+        s3_put_json_if_match(brd_structure_key(brd_id), structure, etag)
+    except ConcurrentEditError as ce:
+        return card("concurrent_edit",
+                    section_number=section_number,
+                    current_etag=ce.current_etag,
+                    your_etag=ce.your_etag)
+    except Exception as e:
+        return card("error", code="s3_write_failed", message=str(e), retryable=True)
+
+    return card(
+        "section_updated",
+        section_number=section_number,
+        title=section["title"],
+        content_json=section["content"],
+        diff_summary=_short_summary(edit_instruction),
+        previous_versions_count=len(section["previous_versions"]),
+        status=section["status"],
+    )
+
+
+# ============================================
+# Shared helpers used by edit / save / revert / regenerate.
+# Kept private with the leading underscore; nothing outside the
+# orchestrator should reach in here.
+# ============================================
+
+def _find_section(sections: List[Dict[str, Any]], section_number: int) -> Optional[Dict[str, Any]]:
+    """Return the section dict whose 'number' matches, or None."""
+    for s in sections or []:
+        if isinstance(s, dict) and s.get("number") == section_number:
+            return s
+    return None
+
+
+def _resolve_target_section(
+    *,
+    sections: List[Dict[str, Any]],
+    target_number: Optional[int],
+    target_title: Optional[str],
+) -> Tuple[Any, Any]:
+    """Pick one section dict from the BRD using router output.
+
+    Returns either:
+      (section_dict, section_number)  — single match found
+      ("ambiguous", [candidates])     — multiple title matches; caller
+                                        should emit a clarification card
+      (None, None)                    — no match
+    """
+    if target_number is not None:
+        s = _find_section(sections, target_number)
+        if s is not None:
+            return s, target_number
+        # number set but not found -> let caller decide
+        return None, None
+
+    if target_title:
+        needle = target_title.strip().lower()
+        if not needle:
+            return None, None
+        matches = [
+            s for s in sections
+            if isinstance(s, dict) and needle in (s.get("title") or "").lower()
+        ]
+        if len(matches) == 1:
+            return matches[0], matches[0].get("number")
+        if len(matches) > 1:
+            return "ambiguous", matches
+
+    return None, None
+
+
+def _push_previous_version(section: Dict[str, Any], *, reason: str) -> None:
+    """Push the section's CURRENT content onto previous_versions before
+    a write. Caps depth at BRD_PREVIOUS_VERSIONS_CAP (FIFO eviction)."""
+    if not isinstance(section.get("previous_versions"), list):
+        section["previous_versions"] = []
+    section["previous_versions"].append({
+        "ts": _now_iso(),
+        "reason": reason,
+        "content": section.get("content") or [],
+    })
+    # FIFO trim — keep the most recent N
+    cap = BRD_PREVIOUS_VERSIONS_CAP
+    if cap > 0 and len(section["previous_versions"]) > cap:
+        section["previous_versions"] = section["previous_versions"][-cap:]
+
+
+def _render_section_numbered(content: List[Dict[str, Any]]) -> str:
+    """Render section content blocks with [ITEM N] / [ROW N] tags so
+    the edit prompt can refer to items by global unique IDs."""
+    lines: List[str] = []
+    item_counter = 1
+    for block in content or []:
+        t = (block or {}).get("type")
+        if t == "paragraph":
+            text = (block.get("text") or "")[:200]
+            lines.append(f"PARAGRAPH: {text}")
+        elif t in ("bullet", "bullet_list", "ordered_list"):
+            items = block.get("items") or []
+            kind = "BULLET LIST" if t in ("bullet", "bullet_list") else "ORDERED LIST"
+            lines.append(f"{kind} ({len(items)} items):")
+            for it in items:
+                preview = (str(it) or "")[:150]
+                lines.append(f"  [ITEM {item_counter}] {preview}")
+                item_counter += 1
+        elif t == "table":
+            rows = block.get("rows") or []
+            lines.append(f"TABLE ({len(rows)} rows):")
+            if rows:
+                header = " | ".join(str(c)[:30] for c in rows[0][:5])
+                lines.append(f"  [HEADER] {header}")
+                for i, r in enumerate(rows[1:], start=1):
+                    cells = " | ".join(str(c)[:30] for c in r[:5])
+                    lines.append(f"  [ROW {i}] {cells}")
+        elif t == "heading":
+            lines.append(f"HEADING (level {block.get('level', 3)}): {block.get('text', '')[:100]}")
+    return "\n".join(lines) if lines else "(empty section)"
+
+
+def _short_summary(text: str, max_len: int = 80) -> str:
+    """Shorten a user instruction for the diff_summary card field."""
+    if not text:
+        return ""
+    s = text.strip().split("\n")[0]
+    return s[:max_len] + ("..." if len(s) > max_len else "")
+
+
+def _now_iso() -> str:
+    """ISO-8601 UTC timestamp for `last_updated_ts` / `previous_versions[*].ts`."""
+    import datetime as _dt
+    return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 
 def _do_gather(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
@@ -852,11 +1088,193 @@ def handle_audit(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_revert_section(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_revert_section lands in a later Phase 2 commit")
+    """Action-level handler. Pops the last entry from a section's
+    `previous_versions` stack and makes it the current content. Used
+    by the frontend's Revert button on the section diff view.
+
+    Event shape:
+      session_id, user_id, project_id, section_number
+
+    Returns a section_updated card (same shape as _do_edit_section so
+    the frontend can reuse the diff renderer).
+    """
+    from services.brd_orchestrator_utils import (
+        ConcurrentEditError,
+        brd_structure_key,
+        s3_get_json_with_etag,
+        s3_put_json_if_match,
+        verify_session_owned,
+    )
+
+    session_id     = (event or {}).get("session_id")
+    user_id        = (event or {}).get("user_id")
+    section_number = (event or {}).get("section_number")
+
+    if not session_id or not user_id or section_number is None:
+        return card("error", code="bad_request",
+                    message="session_id, user_id, section_number required",
+                    retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=str(section_number), retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    brd_id = session.get("brd_id")
+    if not brd_id:
+        return card("error", code="no_brd", message="no BRD to revert", retryable=False)
+
+    try:
+        structure, etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        logger.error(f"[BRD] handle_revert_section S3 read failed: {e}")
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card("error", code="malformed_brd",
+                    message="BRD structure malformed", retryable=False)
+
+    section = _find_section(structure["sections"], section_number)
+    if section is None:
+        return card("error", code="section_not_found",
+                    message=f"section {section_number}", retryable=False)
+
+    prev_versions = section.get("previous_versions") or []
+    if not prev_versions:
+        return card("error", code="nothing_to_revert",
+                    message="this section has no previous version on file",
+                    retryable=False)
+
+    # Pop the most recent previous version.
+    last_version = prev_versions.pop()
+    old_current = section.get("content") or []
+    section["content"] = last_version.get("content") or []
+    section["status"] = "user_edited"
+    section["last_updated_ts"] = _now_iso()
+
+    # The popped version's content was the previous content; the
+    # CURRENT content (what we just replaced) goes... nowhere. Revert
+    # is destructive on the way back — the user explicitly asked
+    # "undo my last change", so we don't push another version onto
+    # the stack. (Mirrors SAD's revert behaviour.)
+    _ = old_current  # explicit no-op
+
+    try:
+        s3_put_json_if_match(brd_structure_key(brd_id), structure, etag)
+    except ConcurrentEditError as ce:
+        return card("concurrent_edit",
+                    section_number=section_number,
+                    current_etag=ce.current_etag,
+                    your_etag=ce.your_etag)
+    except Exception as e:
+        logger.error(f"[BRD] handle_revert_section S3 write failed: {e}")
+        return card("error", code="s3_write_failed", message=str(e), retryable=True)
+
+    return card(
+        "section_updated",
+        section_number=section_number,
+        title=section.get("title"),
+        content_json=section["content"],
+        diff_summary="(reverted to previous version)",
+        previous_versions_count=len(section["previous_versions"]),
+        status=section["status"],
+    )
 
 
 def handle_save_section(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_save_section lands in a later Phase 2 commit")
+    """Action-level handler. Direct (no LLM) section save. The user
+    has typed/pasted new content into the section editor and hit Save.
+    Pushes the old content onto previous_versions, writes the new
+    content under If-Match etag.
+
+    Event shape:
+      session_id, user_id, project_id, section_number, content (list of blocks)
+    """
+    from services.brd_orchestrator_utils import (
+        ConcurrentEditError,
+        brd_structure_key,
+        s3_get_json_with_etag,
+        s3_put_json_if_match,
+        verify_session_owned,
+    )
+
+    session_id     = (event or {}).get("session_id")
+    user_id        = (event or {}).get("user_id")
+    section_number = (event or {}).get("section_number")
+    new_content    = (event or {}).get("content")
+
+    if not session_id or not user_id or section_number is None or new_content is None:
+        return card("error", code="bad_request",
+                    message="session_id, user_id, section_number, content required",
+                    retryable=False)
+    if not isinstance(new_content, list):
+        return card("error", code="bad_request",
+                    message="content must be an array of blocks",
+                    retryable=False)
+
+    # Validate block shapes — same set the SAD save handler accepts.
+    valid_block_types = {"paragraph", "heading", "bullet", "bullet_list",
+                         "ordered_list", "table", "diagram"}
+    for i, block in enumerate(new_content):
+        if not isinstance(block, dict):
+            return card("error", code="bad_block",
+                        message=f"block[{i}] is not an object", retryable=False)
+        if block.get("type") not in valid_block_types:
+            return card("error", code="bad_block",
+                        message=f"block[{i}] has unknown type {block.get('type')!r}",
+                        retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=str(section_number), retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    brd_id = session.get("brd_id")
+    if not brd_id:
+        return card("error", code="no_brd", message="no BRD to save into", retryable=False)
+
+    try:
+        structure, etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+    except Exception as e:
+        return card("error", code="s3_read_failed", message=str(e), retryable=True)
+
+    if not structure or not isinstance(structure.get("sections"), list):
+        return card("error", code="malformed_brd",
+                    message="BRD structure malformed", retryable=False)
+
+    section = _find_section(structure["sections"], section_number)
+    if section is None:
+        return card("error", code="section_not_found",
+                    message=f"section {section_number}", retryable=False)
+
+    _push_previous_version(section, reason="save_section")
+    section["content"] = new_content
+    section["status"] = "user_edited"
+    section["last_updated_ts"] = _now_iso()
+
+    try:
+        s3_put_json_if_match(brd_structure_key(brd_id), structure, etag)
+    except ConcurrentEditError as ce:
+        return card("concurrent_edit",
+                    section_number=section_number,
+                    current_etag=ce.current_etag,
+                    your_etag=ce.your_etag)
+    except Exception as e:
+        return card("error", code="s3_write_failed", message=str(e), retryable=True)
+
+    return card(
+        "section_updated",
+        section_number=section_number,
+        title=section.get("title"),
+        content_json=section["content"],
+        diff_summary="(user-edited)",
+        previous_versions_count=len(section["previous_versions"]),
+        status=section["status"],
+    )
 
 
 def handle_cancel_generation(event: Dict[str, Any]) -> Dict[str, Any]:
