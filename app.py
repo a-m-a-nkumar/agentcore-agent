@@ -361,7 +361,7 @@ async def get_current_user(request: Request) -> dict:
     }
 
 def render_brd_json_to_text(brd_data: dict) -> str:
-    """Render structured BRD JSON into readable plain text (matches lambda_brd_chat.py format).
+    """Render structured BRD JSON into readable plain text.
     Skips # In Scope and # Out of Scope as separate sections - they are subsections of Scope."""
     # Check if BRD uses sections format (newer format)
     if "sections" in brd_data:
@@ -1678,7 +1678,7 @@ async def download_brd(
                         brd_json = json.loads(json_text)
                         print(f"[DOWNLOAD] ✅ Found BRD JSON structure, rendering to text...")
                         
-                        # Render BRD JSON to text (simplified version of lambda_brd_chat.py render_brd_to_text)
+                        # Render BRD JSON to text (see render_brd_json_to_text above).
                         brd_text = render_brd_json_to_text(brd_json)
                         
                         # Also save the text file for future downloads
