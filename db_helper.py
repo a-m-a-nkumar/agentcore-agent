@@ -646,37 +646,80 @@ def get_project_brd_session(project_id: str) -> Optional[Dict[str, Any]]:
 # ============================================
 # SESSION MANAGEMENT
 # ============================================
+#
+# BRD session stage enum (mirrors _DESIGN_SESSION_STAGES below for SAD).
+# Set on analyst_sessions.stage via migrations/add_analyst_sessions_stage.py.
+#
+#   NEW         — session created, no chat yet
+#   GATHERING   — Mary is asking follow-ups; chat accumulating
+#   GENERATING  — generation in flight (long-poll guard; /turn returns
+#                 generation_in_progress card and skips the router)
+#   DRAFTED     — BRD JSON exists, no edits yet
+#   REFINING    — BRD exists AND at least one edit/regenerate/audit landed
+#
+# Kept separate from _DESIGN_SESSION_STAGES so SAD and BRD evolve
+# independently; the table name (analyst_sessions vs design_sessions)
+# already partitions them at the DB layer.
+
+BRD_SESSION_STAGES = frozenset({
+    "NEW", "GATHERING", "GENERATING", "DRAFTED", "REFINING",
+})
+
+
+def validate_brd_session_stage(stage: str) -> str:
+    """Raise ValueError if `stage` is not a recognised BRD session stage.
+    Returns the stage unchanged on success so callers can chain it."""
+    if stage not in BRD_SESSION_STAGES:
+        raise ValueError(
+            f"Invalid BRD session stage: {stage!r}. "
+            f"Must be one of: {sorted(BRD_SESSION_STAGES)}"
+        )
+    return stage
+
 
 def create_session(
     session_id: str,
     project_id: str,
     user_id: str,
-    title: str = "New Chat"
+    title: str = "New Chat",
+    stage: str = "NEW",
+    use_long_term_context: bool = True,
 ) -> Dict[str, Any]:
     """
-    Create a new analyst session
-    
+    Create a new analyst session.
+
     Args:
         session_id: Session ID (min 33 chars for AgentCore)
         project_id: Project ID
         user_id: User ID
         title: Session title
-        
+        stage: BRD session stage. Defaults to "NEW". Validated against
+            BRD_SESSION_STAGES. Old callers that don't pass this keep the
+            DB default behaviour ("NEW").
+        use_long_term_context: When True (default), the unified BRD
+            orchestrator retrieves long-term semantic facts from
+            AgentCore Memory and seeds prompts with project context.
+            When False, the session starts fresh — no retrieval; writes
+            still feed long-term memory for future sessions.
+
     Returns:
-        Session record as dictionary
+        Session record as dictionary.
     """
+    validate_brd_session_stage(stage)
+
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                INSERT INTO analyst_sessions (id, project_id, user_id, title)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO analyst_sessions
+                    (id, project_id, user_id, title, stage, use_long_term_context)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING *
-            """, (session_id, project_id, user_id, title))
-            
+            """, (session_id, project_id, user_id, title, stage, use_long_term_context))
+
             session = dict(cursor.fetchone())
             conn.commit()
-            
+
             # Convert timestamps to milliseconds
             session['created_at'] = int(session['created_at'].timestamp() * 1000)
             session['last_updated'] = int(session['last_updated'].timestamp() * 1000)
@@ -687,6 +730,69 @@ def create_session(
         conn.rollback()
         logger.error(f"Error creating session: {e}")
         raise
+    finally:
+        release_db_connection(conn)
+
+
+def update_brd_session_stage(session_id: str, stage: str) -> None:
+    """Update the BRD session stage for `session_id`. Validates against
+    BRD_SESSION_STAGES. Also bumps last_updated. Idempotent — writing the
+    same stage twice is a no-op as far as the caller is concerned."""
+    validate_brd_session_stage(stage)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE analyst_sessions
+                   SET stage = %s,
+                       last_updated = NOW()
+                 WHERE id = %s
+                """,
+                (stage, session_id),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                logger.warning(f"update_brd_session_stage: no row matched id={session_id}")
+            else:
+                logger.info(f"Session {session_id} stage -> {stage}")
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating BRD session stage: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_brd_session(session_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single BRD session row by id. Returns None if not found or
+    soft-deleted. Includes stage and use_long_term_context."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT id, project_id, user_id, title, brd_id,
+                       stage, use_long_term_context,
+                       message_count, created_at, last_updated, is_deleted
+                  FROM analyst_sessions
+                 WHERE id = %s
+                   AND is_deleted = FALSE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            session = dict(row)
+            session['created_at']   = int(session['created_at'].timestamp() * 1000)
+            session['last_updated'] = int(session['last_updated'].timestamp() * 1000)
+            # Normalize UUID-typed columns to strings for JSON safety.
+            for k in ("id", "project_id"):
+                if session.get(k) is not None:
+                    session[k] = str(session[k])
+            return session
     finally:
         release_db_connection(conn)
 
