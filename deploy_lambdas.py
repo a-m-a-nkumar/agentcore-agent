@@ -42,12 +42,14 @@ def _aws_common_args():
     return args
 
 # Lambda definitions: name -> {function_name, handler_file, needs_prompts}
+#
+# Note: the legacy brd-chat + brd-retriever Lambdas were removed from
+# this map in Phase 5. The AWS Lambda functions still exist but are no
+# longer maintained from source -- the unified orchestrator
+# (lambda_brd_orchestrator.py) supersedes them. AWS-side
+# decommissioning happens once the legacy /api/analyst-* endpoints
+# stop calling them.
 LAMBDAS = {
-    "brd-chat": {
-        "function_name": "sdlc-dev-brd-chat",
-        "handler_file": "lambda_brd_chat.py",
-        "needs_prompts": False,
-    },
     "brd-from-history": {
         "function_name": "sdlc-dev-brd-from-history",
         "handler_file": "lambda_brd_from_history.py",
