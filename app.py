@@ -39,6 +39,7 @@ from routers.test_internal import router as test_internal_router
 from routers.design import router as design_router
 from routers.design_sessions import router as design_sessions_router
 from routers.sad import router as sad_router
+from routers.brd import router as brd_router
 from routers.harness import router as harness_router
 from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
@@ -131,6 +132,11 @@ app.include_router(test_internal_router)
 app.include_router(design_router)
 app.include_router(design_sessions_router)
 app.include_router(sad_router)
+# Unified BRD agent router (features/aman). Gated by BRD_USE_UNIFIED_AGENT
+# in subsequent shim code -- registering the router itself is harmless
+# because every endpoint requires auth + a session lookup that only
+# succeeds for users opted into the unified path.
+app.include_router(brd_router)
 app.include_router(harness_router)
 app.include_router(pipeline_generator_router)
 app.include_router(terraform_generator_router)
