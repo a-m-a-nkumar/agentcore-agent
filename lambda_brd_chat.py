@@ -912,120 +912,12 @@ def _render_section_content_with_numbering(section: Dict) -> str:
     return "\n".join(lines) if lines else "(no content)"
 
 
-def get_brd_update_prompt(user_instruction: str, conversation_history: List[Dict], section_list: str, section_number: int, section_title: str, current_section_content_numbered: str, section_json: Optional[Dict] = None) -> str:
-    """Construct the prompt for updating a BRD section. section_json is the section dict to edit (included so Claude sees the actual table/content)."""
-    
-    # Clean title
-    section_title_clean = re.sub(r'^\d+\.\s*', '', section_title).strip()
-    
-    # Embed actual section JSON so Claude has the table/content to edit (fixes "I don't see the table")
-    full_section_json_block = ""
-    if section_json is not None:
-        full_section_json_block = json.dumps(section_json, indent=2)
-    else:
-        full_section_json_block = "(section data not provided)"
-    
-    prompt = f"""You are a documentation assistant. You MUST update BRD section #{section_number} based on the user's instruction.
-
-<critical_instruction>
-You MUST interpret the user's instruction LITERALLY and PRECISELY. 
-Your goal is to modify ONLY the specific items requested and PRESERVE everything else exactly as is.
-
-CRITICAL RULE - UNIQUE ITEM NUMBERING:
-The <current_section_content_numbered> section uses GLOBAL unique identifiers:
-- [ITEM N] for bullet points (unique across ALL lists in this section)
-- [ROW N] for table rows
-
-ALWAYS use these unique identifiers to locate items.
-Example: If you see [ITEM 1]...[ITEM 5] in List A, and [ITEM 6]...[ITEM 8] in List B.
-"Delete 1st item of List B" means DELETE [ITEM 6].
-
-CRITICAL RULE - CONTENT IDENTIFICATION PRIORITY:
-When the instruction identifies items by their content (e.g., "remove Enterprise Clients", "change Role of Sarah"), 
-you MUST match that specific content.
-
-STALE REFERENCE HANDLING (Double Deletion Prevention):
-If the instruction mentions specific item names or content (e.g., "remove Enterprise Clients"), 
-but those specific items do NOT appear in the numbered view below:
-1. STOP. Do NOT apply the operation to different items even if they are at the same position.
-2. Assume the action has already been taken (stale instruction).
-3. Return the section UNCHANGED or with only valid updates applied.
-
-QUANTITY SAFEGUARD:
-If the instruction specifies a quantity (e.g. "remove 2 rows"), you MUST NOT remove more than that quantity.
-If removing "last 2 rows" would result in removing 4 rows (e.g. because of ambiguity or previous deletions), STOP and remove only the last 2 VISIBLE rows.
-
-ONLY use positional references (e.g., "remove last 2 rows") if the instruction is purely positional 
-AND DOES NOT mention specific content that is missing.
-</critical_instruction>
-
-<examples>
-CORRECT literal interpretation:
-- "remove 4th point" = remove [ITEM 4].
-- "delete the last 2 rows" = delete the last 2 data rows ([ROW N]).
-- "Move 3rd item to second list" = Take [ITEM 3], remove from List A, add to List B.
-
-CORRECT handling of stale references (PREVENT DOUBLE DELETION):
-- Instruction: "Remove last 2 rows (Enterprise Clients and Legal Team)"
-- Numbered view shows: [ROW 1] Sarah, [ROW 2] Michael, ... [ROW 6] Robert
-- "Enterprise Clients" is MISSING.
-- ACTION: DO NOTHING. The target items are already gone. Do NOT remove Emma and Robert.
-
-WRONG handling (DATA LOSS):
-- Instruction: "Remove last 2 rows (Enterprise Clients and Legal Team)"
-- Numbered view shows: [ROW 1] Sarah ... [ROW 6] Robert
-- WRONG Action: Removing Emma and Robert because they are now the "last 2". 
-- CONSEQUENCE: Accidental data loss of valid rows.
-</examples>
-
-<section_context>
-You are updating Section #{section_number} titled "{section_title_clean}".
-Make edits ONLY in this section.
-</section_context>
-
-<current_section_content_numbered>
-{current_section_content_numbered}
-</current_section_content_numbered>
-
-<full_section_json>
-THIS IS THE STARTING POINT. EDIT THIS JSON:
-{full_section_json_block}
-</full_section_json>
-
-<user_instruction>
-{user_instruction}
-</user_instruction>
-
-<task>
-1. READ the numbered content view above - Use [ITEM N] and [ROW N] to identify targets.
-2. CHECK if the instruction names specific items. VERIFY if they exist.
-3. IF missing and specific -> STOP (Stale/Idempotent).
-4. IF present or purely positional -> APPLY change.
-5. Apply valid changes and COPY all other items EXACTLY as they are.
-6. Return the fully reconstructed section JSON.
-</task>
-
-<response_format>
-Respond ONLY with JSON in this exact structure:
-{{
-    "title": "{section_title_clean}",
-    "content": [
-        {{ "type": "paragraph", "text": "..." }},
-        {{ "type": "bullet", "items": ["item1","item2"] }},
-        {{ "type": "table", "rows": [["col1","col2"],["v1","v2"]] }}
-    ]
-}}
-</response_format>
-
-<verification_checklist>
-- [ ] I used [ITEM N] / [ROW N] to uniquely identify targets.
-- [ ] I matched specific content names if provided in the instruction.
-- [ ] I avoided deleting wrong items if the named targets were missing.
-- [ ] I preserved all other items exactly.
-- [ ] The title is exactly "{section_title_clean}".
-</verification_checklist>
-"""
-    return prompt
+# The full edit-prompt function lives in prompts/brd_edit_prompts.py so
+# the unified BRD orchestrator (features/aman) and this legacy chat
+# Lambda share a single source of truth. The re-export here keeps the
+# existing call at lambda_brd_chat.py:1637 working unchanged during the
+# dual-ship window.
+from prompts.brd_edit_prompts import get_brd_update_prompt  # noqa: F401
 
 
 def _parse_user_intent_with_llm(
