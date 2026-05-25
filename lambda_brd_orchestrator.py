@@ -463,12 +463,31 @@ def _call_intent_router(
 
 def _handle_multi_file_ingest(event: Dict[str, Any], session: Dict[str, Any]) -> Dict[str, Any]:
     """Bypass the router for multi-file uploads. Mirrors
-    lambda_sad_orchestrator.py:778-801. Each file is processed by
-    _do_ingest_doc; only the last gets auto_regen=true to avoid
-    N regeneration cascades. Body fills in commit 10."""
-    raise NotImplementedError(
-        "multi-file ingest bypass lands with _do_ingest_doc in Phase 2 commit 10"
-    )
+    lambda_sad_orchestrator.py:778-801.
+
+    Each file is processed by _ingest_one_doc; only the LAST gets
+    auto_regen=true so the frontend triggers a single regeneration
+    pass over the union of affected sections, instead of N
+    regenerations cascading on top of each other. (Confirmed safer
+    in SAD production; the multi-file path is the dominant ingest
+    pattern when users paste several Confluence URLs at once.)
+
+    Returns {"cards": [doc_ingested, doc_ingested, ...]}. handle_turn
+    detects the cards-list shape and short-circuits the usual single-
+    card return.
+    """
+    files = (event or {}).get("files") or []
+    cards: List[Dict[str, Any]] = []
+    last_idx = len(files) - 1
+    for i, file_payload in enumerate(files):
+        c = _ingest_one_doc(
+            event=event,
+            session=session,
+            file_payload=file_payload,
+            auto_regen=(i == last_idx),
+        )
+        cards.append(c)
+    return {"cards": cards, "intent": "INGEST_DOC", "next_stage_hint": _next_stage_hint("INGEST_DOC", (event or {}).get("stage", "NEW"))}
 
 
 def _summarize_card_for_memory(c: Dict[str, Any]) -> str:
@@ -1663,8 +1682,177 @@ def _build_regenerate_prompt(
     )
 
 
-def _do_ingest_doc(event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("_do_ingest_doc lands in Phase 2 commit 10")
+def _do_ingest_doc(
+    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
+) -> Dict[str, Any]:
+    """User attached a doc mid-conversation. Two LLM calls:
+
+      1. Relevance classifier (T=0.0, ~200 tokens) -- which BRD
+         sections does this doc inform?
+      2. Fact extraction       (T=0.3, ~800 tokens) -- pull
+         stakeholders / NFRs / constraints / integrations /
+         assumptions / open-questions and persist as a single
+         memory event so the long-term SEMANTIC strategy folds them
+         into the project's fact namespace.
+
+    Returns a doc_ingested card. When auto_regen kwarg is true
+    (used by the multi-file bypass path for ONLY the last file in a
+    batch), the frontend automatically dispatches a regenerate of
+    the affected sections.
+    """
+    file_payload = (event or {}).get("file") or {}
+    return _ingest_one_doc(
+        event=event,
+        session=session,
+        file_payload=file_payload,
+        auto_regen=False,
+    )
+
+
+def _ingest_one_doc(
+    *,
+    event: Dict[str, Any],
+    session: Dict[str, Any],
+    file_payload: Dict[str, Any],
+    auto_regen: bool,
+) -> Dict[str, Any]:
+    """Shared body for both single-file (intent) and multi-file
+    (router-bypass) doc ingest.
+
+    Returns a doc_ingested card on success, or an error card if the
+    payload is unusable.
+    """
+    from prompts.brd_doc_relevance_prompts import (
+        DOC_RELEVANCE_SYSTEM_PROMPT,
+        DOC_FACTS_SYSTEM_PROMPT,
+        build_doc_relevance_prompt,
+        build_doc_facts_prompt,
+    )
+    from services.brd_orchestrator_utils import (
+        brd_structure_key,
+        extract_json,
+        s3_get_json_with_etag,
+        write_memory_event,
+    )
+    from llm_gateway import chat_completion
+
+    user_id    = (event or {}).get("user_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
+    filename   = (file_payload or {}).get("filename") or "(unnamed)"
+    doc_text   = ((file_payload or {}).get("extracted_text") or "").strip()
+
+    if not doc_text:
+        return card(
+            "doc_ingested",
+            fact_id=f"doc-{uuid.uuid4().hex[:8]}",
+            filename=filename,
+            suggested_sections=[],
+            summary="(no extractable text in this document)",
+            auto_regen=False,
+        )
+
+    # Load current sections (if any) so the relevance classifier can
+    # score against them. If there's no BRD yet, suggested_sections
+    # will simply be empty and the frontend treats this as
+    # "fact accumulated, no section pinning yet".
+    available_sections: List[Dict[str, Any]] = []
+    brd_id = session.get("brd_id")
+    if brd_id:
+        try:
+            structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+            if structure and isinstance(structure.get("sections"), list):
+                available_sections = [
+                    {"number": s.get("number"), "title": s.get("title") or "(untitled)"}
+                    for s in structure["sections"]
+                    if s.get("number") is not None
+                ]
+        except Exception as e:
+            logger.warning(f"[BRD] ingest: structure load failed (non-fatal): {e}")
+
+    # 1) Relevance classifier ------------------------------------------------
+    suggested_sections: List[int] = []
+    summary = ""
+    if available_sections:
+        try:
+            rel_prompt = build_doc_relevance_prompt(
+                filename=filename, doc_text=doc_text, available_sections=available_sections,
+            )
+            raw = chat_completion(
+                messages=[{"role": "user", "content": rel_prompt}],
+                system_prompt=DOC_RELEVANCE_SYSTEM_PROMPT,
+                model=BRD_HANDLER_MODEL,
+                temperature=0.0,
+                max_tokens=200,
+                user_id=user_id,
+                token_source="lambda_brd_orchestrator:doc_relevance",
+            )
+            parsed = extract_json(raw)
+            if isinstance(parsed, dict):
+                raw_sections = parsed.get("suggested_sections") or []
+                summary = parsed.get("summary") or ""
+                for n in raw_sections:
+                    try:
+                        n_int = int(n)
+                        if any(s["number"] == n_int for s in available_sections) and n_int not in suggested_sections:
+                            suggested_sections.append(n_int)
+                    except (TypeError, ValueError):
+                        continue
+                suggested_sections = suggested_sections[:5]
+        except Exception as e:
+            logger.warning(f"[BRD] ingest relevance classify failed (non-fatal): {e}")
+
+    # 2) Fact extraction -----------------------------------------------------
+    facts_extracted = 0
+    try:
+        fact_prompt = build_doc_facts_prompt(filename=filename, doc_text=doc_text)
+        raw_facts = chat_completion(
+            messages=[{"role": "user", "content": fact_prompt}],
+            system_prompt=DOC_FACTS_SYSTEM_PROMPT,
+            model=BRD_HANDLER_MODEL,
+            temperature=0.3,
+            max_tokens=800,
+            user_id=user_id,
+            token_source="lambda_brd_orchestrator:doc_facts",
+        )
+        parsed_facts = extract_json(raw_facts)
+        if isinstance(parsed_facts, dict):
+            facts_extracted = sum(
+                len(v) if isinstance(v, list) else 0
+                for v in parsed_facts.values()
+            )
+            # Write a single ingest event into memory so the SEMANTIC
+            # strategy picks it up. Payload is the structured JSON
+            # the strategy's override prompt is trained against.
+            if session_id and user_id and facts_extracted:
+                write_memory_event(
+                    session_id=session_id,
+                    user_id=user_id,
+                    role="OTHER",
+                    content=(
+                        f"[INGESTED DOC: {filename}] "
+                        f"{json.dumps(parsed_facts, ensure_ascii=False)}"
+                    ),
+                )
+    except Exception as e:
+        logger.warning(f"[BRD] ingest fact extraction failed (non-fatal): {e}")
+
+    if not summary:
+        summary = (
+            f"Ingested {filename}: {facts_extracted} facts extracted, "
+            f"{len(suggested_sections)} section(s) affected."
+            if facts_extracted else
+            f"Ingested {filename}: no structured facts extracted."
+        )
+
+    return card(
+        "doc_ingested",
+        fact_id=f"doc-{uuid.uuid4().hex[:8]}",
+        filename=filename,
+        suggested_sections=suggested_sections,
+        summary=summary,
+        facts_extracted=facts_extracted,
+        auto_regen=auto_regen and bool(suggested_sections),
+    )
 
 
 # Map router-classified intent → handler. tests/test_dispatch_coverage
@@ -2277,7 +2465,42 @@ def handle_cancel_generation(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_ingest_doc(event: Dict[str, Any]) -> Dict[str, Any]:
-    raise NotImplementedError("handle_ingest_doc lands in a later Phase 2 commit")
+    """Action-level entry for `POST /api/brd/ingest-doc`.
+
+    Verifies session, then delegates to _ingest_one_doc. Supports
+    BOTH a single-file payload (event["file"]) and a multi-file
+    payload (event["files"]) so the frontend can use this endpoint
+    interchangeably with the chat-attached flow.
+    """
+    from services.brd_orchestrator_utils import verify_session_owned
+
+    session_id = (event or {}).get("session_id")
+    user_id    = (event or {}).get("user_id")
+    if not session_id or not user_id:
+        return card("error", code="bad_request",
+                    message="session_id and user_id are required", retryable=False)
+
+    try:
+        session = verify_session_owned(session_id, user_id)
+    except LookupError:
+        return card("error", code="session_not_found", message=session_id, retryable=False)
+    except PermissionError:
+        return card("error", code="forbidden", message="not your session", retryable=False)
+
+    files = (event or {}).get("files") or []
+    if files:
+        return _handle_multi_file_ingest(event, session)
+
+    file_payload = (event or {}).get("file") or {}
+    if not file_payload:
+        return card("error", code="bad_request",
+                    message="either `file` or `files` is required", retryable=False)
+    return _ingest_one_doc(
+        event=event,
+        session=session,
+        file_payload=file_payload,
+        auto_regen=False,
+    )
 
 
 # ============================================
