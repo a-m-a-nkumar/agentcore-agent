@@ -57,9 +57,14 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from db_helper import get_brd_session
+from db_helper import (
+    create_session,
+    get_brd_session,
+    get_project,
+    get_project_sessions,
+)
 
 # Reuse the projects-router auth dependency (DB user row keyed by "id").
 from .projects import get_current_user
@@ -204,3 +209,265 @@ def warmup(current_user: dict = Depends(get_current_user)):
         except Exception as e:
             logger.warning(f"[BRD warmup] async invoke of {fn} failed (non-fatal): {e}")
     return WarmupResponse(accepted=True, targets=targets)
+
+
+# ============================================
+# Session lifecycle — POST /sessions + the two GETs that power the
+# session-creation modal's "Continue with project context" preview and
+# the persistent header badge's "what facts loaded" side panel.
+# Plan ref: hazy-gliding-hammock.md "Per-session context mode" section.
+# ============================================
+
+# How many facts to surface in the modal preview. Capped at 5 so the
+# modal stays scannable; the loaded-facts endpoint returns the full set.
+BRD_CONTEXT_PREVIEW_TOP_K = int(os.getenv("BRD_CONTEXT_PREVIEW_TOP_K", "5"))
+
+
+def _facts_namespace_user_project(user_id: str, project_id: str) -> str:
+    """Compose the per-(user, project) long-term namespace. Mirrors
+    services.brd_orchestrator_utils.facts_namespace -- repeated here so
+    the router has no import-time dependency on the orchestrator's
+    Lambda module (which has its own boto3 init cost on load)."""
+    template = os.getenv("BRD_FACTS_NAMESPACE_TEMPLATE",
+                         "user-{user_id}:project-{project_id}")
+    return template.format(user_id=user_id, project_id=project_id)
+
+
+def _load_long_term_facts_for_router(
+    user_id: str, project_id: str, query: str = "", top_k: int = 10,
+) -> List[str]:
+    """Best-effort fact retrieval used by /context-preview and
+    /loaded-facts. Wraps services.brd_orchestrator_utils.get_long_term_facts
+    so the router doesn't have to know the AgentCore Memory SDK shape.
+    Failures return [] so the UI degrades gracefully -- the
+    session-creation modal still works (just shows "no facts yet")
+    when the memory store is misconfigured or down.
+    """
+    try:
+        from services.brd_orchestrator_utils import get_long_term_facts
+        return get_long_term_facts(
+            user_id=user_id,
+            project_id=project_id,
+            query=query,
+            top_k=top_k,
+        )
+    except Exception as e:
+        logger.warning(f"[BRD facts] load failed for user={user_id} project={project_id}: {e}")
+        return []
+
+
+# --- Request / response models ---------------------------------------------
+
+class BRDSessionCreate(BaseModel):
+    project_id: str
+    title: Optional[str] = "New BRD session"
+    # Per-session toggle: True = retrieve long-term project context;
+    # False = start fresh (skip retrieval). Writes still feed long-term
+    # memory regardless. Plan Resolved Q#5.
+    use_long_term_context: bool = True
+    # Frontend MAY supply its own session_id to support optimistic UI;
+    # otherwise we mint one. Must be >= 33 chars when supplied (AgentCore
+    # Memory requirement).
+    session_id: Optional[str] = Field(default=None, min_length=33, max_length=128)
+
+
+class BRDSessionStarted(BaseModel):
+    """Mirrors the `session_started` card type in the plan's catalogue
+    so the frontend can render this response with the same code path
+    the chat surface uses for in-conversation card events."""
+    session_id: str
+    stage: str
+    use_long_term_context: bool
+    loaded_facts_count: int
+
+
+class BRDContextPreview(BaseModel):
+    """Mirrors `session_context_preview` card. Drives the modal's
+    "Continue" toggle disabled-state and the top-5 collapsible preview."""
+    available_facts_count: int
+    prior_sessions_count: int
+    top_facts: List[Dict[str, Any]]
+    has_any_context: bool
+
+
+class BRDLoadedFacts(BaseModel):
+    """Body shape for GET /sessions/{sid}/loaded-facts. Used by the
+    persistent header badge's side panel ("🧠 Using context from M
+    prior sessions (N facts) -> click for details").
+    """
+    facts: List[str]
+    count: int
+    use_long_term_context: bool
+
+
+# --- POST /sessions --------------------------------------------------------
+
+@router.post("/sessions", response_model=BRDSessionStarted, status_code=201)
+def create_brd_session(
+    body: BRDSessionCreate,
+    current_user: dict = Depends(get_current_user),
+) -> BRDSessionStarted:
+    """Create a new BRD session with the per-session context-mode
+    toggle. Returns the session_started shape the frontend renders as
+    the persistent header badge.
+
+    Verifies the user owns the project (defense in depth -- the project
+    auth check is the only reason we couldn't just take a project_id
+    and trust it).
+    """
+    user_id = current_user["id"]
+
+    project = get_project(body.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project["user_id"] != user_id:
+        raise HTTPException(status_code=403,
+                            detail="Not authorized to create session in this project")
+
+    # AgentCore Memory requires sessionId >= 33 chars; UUID4 hex is 32,
+    # so prefix with "brd-" to land at 36.
+    session_id = body.session_id or f"brd-{uuid.uuid4().hex}"
+
+    try:
+        session = create_session(
+            session_id=session_id,
+            project_id=body.project_id,
+            user_id=user_id,
+            title=body.title or "New BRD session",
+            stage="NEW",
+            use_long_term_context=body.use_long_term_context,
+        )
+    except Exception as e:
+        logger.error(f"[BRD create_session] failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create session: {e}")
+
+    # Count what WAS loaded for this session so the frontend can render
+    # the badge text without a second call. Only meaningful when the
+    # user opted in -- "Fresh" mode always shows 0.
+    loaded = []
+    if body.use_long_term_context:
+        loaded = _load_long_term_facts_for_router(
+            user_id=user_id, project_id=body.project_id, query="",
+            top_k=int(os.getenv("BRD_FACTS_TOP_K", "10")),
+        )
+
+    return BRDSessionStarted(
+        session_id=session["id"] if isinstance(session.get("id"), str) else str(session["id"]),
+        stage=session.get("stage", "NEW"),
+        use_long_term_context=bool(session.get("use_long_term_context", True)),
+        loaded_facts_count=len(loaded),
+    )
+
+
+# --- GET /projects/{project_id}/context-preview ----------------------------
+
+@router.get("/projects/{project_id}/context-preview", response_model=BRDContextPreview)
+def get_context_preview(
+    project_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> BRDContextPreview:
+    """Powers the session-creation modal preview. Returns enough
+    information for the modal to:
+
+      1. Show "{N} facts available from {M} prior sessions".
+      2. Display a collapsible top-5 facts list.
+      3. Auto-disable the "Continue" radio when has_any_context=False.
+
+    Per-project, per-user namespace. The auth dependency restricts to
+    sessions the current user owns.
+    """
+    user_id = current_user["id"]
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if project["user_id"] != user_id:
+        raise HTTPException(status_code=403,
+                            detail="Not authorized to view this project")
+
+    # Prior sessions count = how many analyst_sessions rows this user
+    # already has on the project. Includes the current "ongoing" set;
+    # the modal hint reads "M prior sessions" which matches.
+    try:
+        prior_sessions = get_project_sessions(project_id, user_id=user_id, include_deleted=False)
+        prior_sessions_count = len(prior_sessions)
+    except Exception as e:
+        logger.warning(f"[BRD context-preview] prior_sessions count failed: {e}")
+        prior_sessions_count = 0
+
+    # Top-K facts surfaced to the user verbatim. Empty query string -> the
+    # memory store returns most-recent / most-relevant generally.
+    top_facts_raw = _load_long_term_facts_for_router(
+        user_id=user_id, project_id=project_id, query="",
+        top_k=BRD_CONTEXT_PREVIEW_TOP_K,
+    )
+    top_facts = [{"category": _guess_fact_category(f), "text": f} for f in top_facts_raw]
+
+    # available_facts_count = total facts in the namespace, capped at
+    # what we retrieved. The memory store doesn't expose a cheap COUNT
+    # so we surface what we loaded; the frontend treats this as a
+    # lower bound ("at least N facts available"). When we hit the cap,
+    # the displayed copy can read "5+ facts" to communicate the cap.
+    available_facts_count = len(top_facts_raw)
+
+    return BRDContextPreview(
+        available_facts_count=available_facts_count,
+        prior_sessions_count=prior_sessions_count,
+        top_facts=top_facts,
+        has_any_context=available_facts_count > 0,
+    )
+
+
+def _guess_fact_category(formatted_fact: str) -> str:
+    """Map a formatted-fact line (as produced by
+    services.brd_orchestrator_utils._format_structured_fact) back to a
+    coarse category for the modal's category chip.
+
+    The formatted lines start with a prefix like "stakeholder:" /
+    "NFR/scale:" / "constraint/deadline:" — we just slice the prefix.
+    Best-effort; "other" is fine when the line doesn't match a known
+    prefix.
+    """
+    if not formatted_fact:
+        return "other"
+    head = formatted_fact.split(":", 1)[0].lower()
+    if head.startswith("stakeholder"):    return "stakeholder"
+    if head.startswith("nfr"):            return "non_functional_req"
+    if head.startswith("constraint"):     return "constraint"
+    if head.startswith("integration"):    return "integration"
+    if head.startswith("assumption"):     return "assumption"
+    if head.startswith("open question"):  return "open_question"
+    return "other"
+
+
+# --- GET /sessions/{session_id}/loaded-facts -------------------------------
+
+@router.get("/sessions/{session_id}/loaded-facts", response_model=BRDLoadedFacts)
+def get_loaded_facts(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+) -> BRDLoadedFacts:
+    """Powers the persistent header badge's side panel.
+
+    Returns the facts that ARE loaded for this session (i.e. the
+    superset the handlers see when they call get_long_term_facts).
+    When the session is in "Fresh" mode (use_long_term_context=False)
+    returns an empty list immediately -- no point burning a memory
+    retrieval call.
+    """
+    session = _ensure_session_owned(session_id, current_user["id"])
+
+    if not session.get("use_long_term_context", True):
+        return BRDLoadedFacts(facts=[], count=0, use_long_term_context=False)
+
+    facts = _load_long_term_facts_for_router(
+        user_id=session["user_id"],
+        project_id=session["project_id"],
+        query="",
+        top_k=int(os.getenv("BRD_FACTS_TOP_K", "10")),
+    )
+    return BRDLoadedFacts(
+        facts=facts,
+        count=len(facts),
+        use_long_term_context=True,
+    )
