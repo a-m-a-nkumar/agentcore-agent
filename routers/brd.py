@@ -703,6 +703,237 @@ def brd_save_section(
     return result
 
 
+# ============================================
+# Generation endpoints — kicked off from the chat UI (via /turn) AND
+# from explicit "Generate" buttons. Both paths funnel through the
+# orchestrator's _start_generation body (async-invoke worker Lambda,
+# return generation_starting immediately). This router additionally:
+#
+#   • Flips analyst_sessions.stage to GENERATING and records prior_stage
+#     so cancellation knows where to revert.
+#   • On generation_failed (worker invoke failed), reverts stage
+#     immediately so the user can retry without being stuck.
+#   • On cancel, sets stage back to prior_stage.
+# ============================================
+
+class BRDGenerateFromDocsRequest(BaseModel):
+    session_id: str
+    project_id: Optional[str] = None
+    # Inline text (for short inputs from the chat composer) OR S3 keys
+    # (preferred for any input > 1MB; matches the lambda_brd_generator
+    # input contract). At least one of each pair must be present;
+    # validation deferred to the Lambda.
+    template: Optional[str] = None
+    transcript: Optional[str] = None
+    template_s3_bucket: Optional[str] = None
+    template_s3_key: Optional[str] = None
+    transcript_s3_bucket: Optional[str] = None
+    transcript_s3_key: Optional[str] = None
+
+
+class BRDGenerateFromHistoryRequest(BaseModel):
+    session_id: str
+    project_id: Optional[str] = None
+
+
+class BRDCancelGenerationRequest(BaseModel):
+    session_id: str
+    brd_id: Optional[str] = None
+
+
+class BRDAuditRequest(BaseModel):
+    session_id: str
+    project_id: Optional[str] = None
+    # When set, only audit this section (cheap -- one LLM call).
+    # Otherwise the full per-section parallel audit runs.
+    section_number: Optional[int] = None
+
+
+class BRDIngestDocRequest(BaseModel):
+    session_id: str
+    project_id: Optional[str] = None
+    # Single-file shape OR multi-file shape — exactly one should be set.
+    # Validation done in the orchestrator handler (bad_request if both
+    # missing); router stays thin so a future Confluence-URL helper can
+    # populate `files` server-side without touching this endpoint.
+    file: Optional[Dict[str, Any]] = None
+    files: Optional[List[Dict[str, Any]]] = None
+
+
+def _enter_generating(session: Dict[str, Any]) -> None:
+    """Stamp stage=GENERATING + record prior_stage. Idempotent --
+    re-entering GENERATING from GENERATING is a no-op write so retry
+    storms are safe.
+
+    NOTE on prior_stage persistence: db_helper doesn't yet have a
+    prior_stage column on analyst_sessions; for now we just bump stage
+    and rely on the orchestrator's cancellation handler defaulting to
+    GATHERING on revert. Phase 6e adds the prior_stage column.
+    """
+    if session.get("stage") == "GENERATING":
+        return
+    try:
+        update_brd_session_stage(session["id"], "GENERATING")
+    except Exception as e:
+        logger.warning(f"[BRD gen] stage -> GENERATING failed on {session.get('id')}: {e}")
+
+
+def _revert_generation_stage(session: Dict[str, Any], fallback: str = "GATHERING") -> None:
+    """Roll the session back from GENERATING after a worker-invoke
+    failure or user cancel. Defaults to GATHERING because that's the
+    most-common pre-generation stage; the orchestrator's
+    stage_reverted_to field overrides this when present.
+    """
+    target = fallback or "GATHERING"
+    try:
+        update_brd_session_stage(session["id"], target)
+    except Exception as e:
+        logger.warning(
+            f"[BRD gen] stage revert to {target!r} on {session.get('id')} failed: {e}"
+        )
+
+
+def _generation_kickoff_response(
+    session: Dict[str, Any],
+    lambda_result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Common post-invoke handling: flip stage based on the card the
+    orchestrator returned. Returns the card verbatim so the frontend
+    renders generation_starting / generation_failed identically to
+    the chat-card pipeline.
+    """
+    if not isinstance(lambda_result, dict):
+        return lambda_result
+    card_type = lambda_result.get("type")
+    if card_type == "generation_starting":
+        _enter_generating(session)
+    elif card_type == "generation_failed":
+        revert_to = (lambda_result.get("payload") or {}).get("stage_reverted_to")
+        _revert_generation_stage(session, fallback=revert_to or "GATHERING")
+    return lambda_result
+
+
+@router.post("/generate-from-docs")
+def brd_generate_from_docs(
+    body: BRDGenerateFromDocsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Template + transcript -> full BRD. Orchestrator async-invokes
+    the lambda_brd_generator worker with parallel=true (Phase 2 commit
+    11) and returns generation_starting immediately.
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    payload = {
+        "action": "generate_from_docs",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "project_id": body.project_id or session.get("project_id"),
+        "template": body.template,
+        "transcript": body.transcript,
+        "template_s3_bucket": body.template_s3_bucket,
+        "template_s3_key": body.template_s3_key,
+        "transcript_s3_bucket": body.transcript_s3_bucket,
+        "transcript_s3_key": body.transcript_s3_key,
+    }
+    return _generation_kickoff_response(session, _invoke_brd_lambda(payload))
+
+
+@router.post("/generate-from-history")
+def brd_generate_from_history(
+    body: BRDGenerateFromHistoryRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """"Generate the BRD" with no docs attached -- worker reads chat
+    history from AgentCore Memory + the long-term facts buffer."""
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    payload = {
+        "action": "generate_from_history",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "project_id": body.project_id or session.get("project_id"),
+    }
+    return _generation_kickoff_response(session, _invoke_brd_lambda(payload))
+
+
+@router.post("/cancel-generation")
+def brd_cancel_generation(
+    body: BRDCancelGenerationRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """User clicked Cancel on an in-flight generation. Lambda
+    acknowledges + emits generation_cancelled; router reverts stage.
+
+    Cannot actually kill the in-flight worker (AWS Lambda has no
+    stop-execution API for async invokes) -- the orchestrator's
+    cancel handler relies on the worker's late-arriving result
+    being discarded by the brd_id check that's added in a later
+    Phase 3 commit (cancelled_brd_ids on the session row).
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    result = _invoke_brd_lambda({
+        "action": "cancel_generation",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "brd_id": body.brd_id,
+    })
+
+    if isinstance(result, dict) and result.get("type") == "generation_cancelled":
+        revert_to = (result.get("payload") or {}).get("stage_reverted_to")
+        _revert_generation_stage(session, fallback=revert_to or "GATHERING")
+    return result
+
+
+@router.post("/audit")
+def brd_audit(
+    body: BRDAuditRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Per-section quality audit. Section_number set -> single-section
+    cheap path (1 LLM call). Otherwise full parallel audit (16 LLM
+    calls fanned out via ThreadPoolExecutor in the Lambda)."""
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    result = _invoke_brd_lambda({
+        "action": "audit",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "project_id": body.project_id or session.get("project_id"),
+        "section_number": body.section_number,
+    })
+    # An audit IS a refinement action -- bump DRAFTED -> REFINING
+    # per the canonical state machine table.
+    _maybe_promote_to_refining(session, result)
+    return result
+
+
+@router.post("/ingest-doc")
+def brd_ingest_doc(
+    body: BRDIngestDocRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Ingest one or more docs as fact source. Single-file -> two LLM
+    calls (relevance classifier + fact extraction). Multi-file -> loop
+    each through the same body, only the last gets auto_regen=true."""
+    user_id = current_user["id"]
+    session = _ensure_session_owned(body.session_id, user_id)
+
+    return _invoke_brd_lambda({
+        "action": "ingest_doc",
+        "session_id": body.session_id,
+        "user_id": user_id,
+        "project_id": body.project_id or session.get("project_id"),
+        "file": body.file,
+        "files": body.files,
+    })
+
+
 @router.post("/revert-section")
 def brd_revert_section(
     body: BRDRevertSectionRequest,
