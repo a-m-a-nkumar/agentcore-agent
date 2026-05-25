@@ -172,12 +172,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     request_id = (event or {}).get("request_id") or str(uuid.uuid4())[:8]
     logger.info(f"[BRD] action={action} request_id={request_id}")
 
-    handler = INTENT_HANDLER_MAP.get(action)
+    handler = ACTION_HANDLER_MAP.get(action)
     if handler is None:
         return _error_response(
             400,
             f"unknown action: {action!r}",
-            allowed=sorted(INTENT_HANDLER_MAP.keys()),
+            allowed=sorted(ACTION_HANDLER_MAP.keys()),
         )
 
     try:
@@ -261,14 +261,14 @@ def handle_ingest_doc(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ============================================
-# Dispatch table — exported so tests/test_dispatch_coverage.py can
-# assert every BRD_INTENT has a handler once handle_turn is wired up.
-# Action keys here are Lambda actions (the dispatch level); the intent
-# enum lives in prompts/brd_intent_router.py and maps to handlers
-# INSIDE handle_turn.
+# Action-level dispatch — Lambda `event["action"]` → handler. This is
+# the OUTER routing level. The INNER router (intent classifier output
+# -> per-intent handler) lives inside handle_turn as INTENT_TO_HANDLER_MAP
+# and is built in a later Phase 2 commit; tests/test_dispatch_coverage.py
+# asserts the INNER map covers every BRD_INTENT once handle_turn lands.
 # ============================================
 
-INTENT_HANDLER_MAP: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
+ACTION_HANDLER_MAP: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "ping":                  handle_ping,
     "turn":                  handle_turn,
     "generate_from_docs":    handle_generate_from_docs,

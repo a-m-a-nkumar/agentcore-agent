@@ -20,18 +20,25 @@ import pytest
 
 
 def _try_import_orchestrator():
-    """Attempt to import the orchestrator's dispatch table. Returns
-    (module, intent_handler_map, valid_card_types) on success or
-    (None, None, None) if the orchestrator isn't built yet."""
+    """Attempt to import the orchestrator's INNER intent dispatch table.
+
+    There are two routing levels in the orchestrator:
+      - ACTION_HANDLER_MAP: Lambda `event["action"]` -> handler. Outer.
+      - INTENT_TO_HANDLER_MAP: router-classified intent -> handler.
+        Inner; lives inside handle_turn. This is the level the
+        coverage test asserts against, since BRD_INTENTS are
+        intent-level not action-level.
+
+    Returns (module, intent_to_handler_map, valid_card_types). Any of
+    those may be None if the orchestrator hasn't shipped that piece yet.
+    """
     try:
         import lambda_brd_orchestrator as orch  # type: ignore[import-not-found]
     except ImportError:
         return None, None, None
 
-    intent_map = getattr(orch, "INTENT_HANDLER_MAP", None)
+    intent_map = getattr(orch, "INTENT_TO_HANDLER_MAP", None)
     card_types = getattr(orch, "VALID_CARD_TYPES", None)
-    if intent_map is None or card_types is None:
-        return orch, None, None
     return orch, intent_map, card_types
 
 
@@ -89,17 +96,35 @@ _ORCH, _HANDLERS, _CARDS = _try_import_orchestrator()
 
 
 @pytest.mark.skipif(
-    _ORCH is None, reason="lambda_brd_orchestrator not built yet (Phase 2 work)"
+    _ORCH is None or _HANDLERS is None,
+    reason="lambda_brd_orchestrator.INTENT_TO_HANDLER_MAP not built yet (handle_turn lands in a later Phase 2 commit)",
 )
 def test_every_intent_has_a_handler() -> None:
     from prompts.brd_intent_router import BRD_INTENTS
 
-    assert _HANDLERS is not None, (
-        "Orchestrator module imports but exposes no INTENT_HANDLER_MAP. "
-        "Phase 2 task: define INTENT_HANDLER_MAP: dict[str, callable]."
-    )
+    assert _HANDLERS is not None, "INTENT_TO_HANDLER_MAP missing"
     missing = [i for i in BRD_INTENTS if i not in _HANDLERS]
-    assert not missing, f"Orchestrator dispatch missing handlers for: {missing}"
+    assert not missing, f"Orchestrator INTENT_TO_HANDLER_MAP missing handlers for: {missing}"
+
+
+def test_orchestrator_action_map_is_well_formed() -> None:
+    """Outer action map check — always runs once the scaffold lands."""
+    if _ORCH is None:
+        pytest.skip("orchestrator module not built yet")
+    actions = getattr(_ORCH, "ACTION_HANDLER_MAP", None)
+    assert isinstance(actions, dict), "ACTION_HANDLER_MAP missing or wrong type"
+    expected_actions = {
+        "ping", "turn", "generate_from_docs", "generate_from_history",
+        "audit", "revert_section", "save_section", "cancel_generation",
+        "ingest_doc",
+    }
+    missing = expected_actions - set(actions.keys())
+    extra = set(actions.keys()) - expected_actions
+    assert not missing, f"ACTION_HANDLER_MAP missing actions: {sorted(missing)}"
+    assert not extra, (
+        f"ACTION_HANDLER_MAP has unexpected actions: {sorted(extra)}. "
+        f"Update expected_actions in this test if intentional."
+    )
 
 
 @pytest.mark.skipif(
