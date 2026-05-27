@@ -300,7 +300,18 @@ def read_memory_history(
             continue
 
         for ev in resp.get("events", []) or []:
-            ts = int(ev.get("eventTimestamp") or 0)
+            # boto3 returns eventTimestamp as datetime.datetime (NOT an int).
+            # Convert to epoch ms for stable cross-actor ordering.
+            raw_ts = ev.get("eventTimestamp")
+            if raw_ts is None:
+                ts = 0
+            elif hasattr(raw_ts, "timestamp"):
+                ts = int(raw_ts.timestamp() * 1000)
+            else:
+                try:
+                    ts = int(raw_ts)
+                except (TypeError, ValueError):
+                    ts = 0
             for item in ev.get("payload", []) or []:
                 conv = item.get("conversational")
                 if not conv:
@@ -339,15 +350,29 @@ def get_long_term_facts(
     if not user_id or not project_id:
         return []
 
+    # boto3 enforces searchQuery min length 1. Callers (e.g. the
+    # context-preview endpoint that prefetches facts before a session
+    # exists) sometimes pass query="" — in that case there's no semantic
+    # signal to search on, so just return [] without burning an API call.
+    safe_query = (query or "").strip()
+    if not safe_query:
+        return []
+
     namespace = facts_namespace(user_id, project_id)
     k = top_k or BRD_FACTS_TOP_K
 
+    # boto3 bedrock-agentcore parameter shape: searchCriteria (structured
+    # object containing the actual searchQuery) + maxResults. Older drafts
+    # of this code used `searchQuery=query, topK=k` which the current SDK
+    # rejects with ParamValidationError — surfaced as a noisy warning AND
+    # silently returned [] every call, so long-term memory enrichment was
+    # quietly disabled in production.
     try:
         resp = _memory().retrieve_memory_records(
             memoryId=AGENTCORE_MEMORY_ID,
             namespace=namespace,
-            searchQuery=query or "",
-            topK=k,
+            searchCriteria={"searchQuery": safe_query},
+            maxResults=k,
         )
     except Exception as e:
         logger.warning(
@@ -410,21 +435,42 @@ def _format_structured_fact(obj: Dict[str, Any]) -> List[str]:
 # Session ownership re-verification (defense in depth)
 # ============================================================================
 
-def verify_session_owned(session_id: str, user_id: str) -> Dict[str, Any]:
+def verify_session_owned(
+    session_id: str,
+    user_id: str,
+    *,
+    session_from_event: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Lambda-side re-verification that this user owns this session.
 
-    FastAPI's _ensure_session_owned does the primary check before
-    invoking the Lambda. This re-check protects against future bugs
-    where a route ships without the FastAPI check. The Lambda becomes
-    its own enforcement layer instead of trusting the caller.
+    Two modes:
+      1. **Trusted-payload mode** (preferred): the FastAPI router fetches
+         the session row, validates ownership, and passes the row to the
+         Lambda in `event["session"]`. The Lambda re-checks the user_id
+         match as a sanity assertion. No DB connection needed — keeps the
+         Lambda out of the VPC, eliminates cold-start ENI penalty.
+
+      2. **DB-fallback mode**: when no session is on the event (legacy
+         payload, audit invocation, etc.), import db_helper and read the
+         row directly. Requires the Lambda to be attached to the VPC and
+         have RDS reachability.
 
     Returns the session dict on success. Raises PermissionError if the
-    session exists but is owned by a different user. Raises
-    LookupError if the session doesn't exist.
-
-    Note: importing db_helper lazily keeps cold-start light for paths
-    that don't need this check (like ping).
+    session exists but is owned by a different user. Raises LookupError
+    if the session doesn't exist.
     """
+    if session_from_event is not None:
+        # Trusted-payload mode. The FastAPI router did the auth; we just
+        # double-check the user_id matches so a future router bug can't
+        # silently let a wrong-user payload through.
+        if session_from_event.get("user_id") != user_id:
+            raise PermissionError(
+                f"session payload owned by {session_from_event.get('user_id')!r}, "
+                f"not {user_id!r}"
+            )
+        return session_from_event
+
+    # Fallback: read from DB. Requires VPC reachability.
     from db_helper import get_brd_session  # lazy import
 
     sess = get_brd_session(session_id)

@@ -106,6 +106,18 @@ BRD_PREVIOUS_VERSIONS_CAP        = int(os.getenv("BRD_PREVIOUS_VERSIONS_CAP", "5
 # Parallel section generation budget.
 BRD_SECTION_PARALLELISM          = int(os.getenv("BRD_SECTION_PARALLELISM", "5"))
 
+# Phase 6 feature flag — controls whether generation Lambdas take the
+# prime-then-fan-out parallel path with prompt caching. Default ON since
+# the path has been verified end-to-end (gateway cache pass-through
+# confirmed; smoke test shows cache_read=2815 tokens per section).
+# Flip to "false" to roll back to the monolithic path without
+# redeploying the workers.
+def _flag(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "true" if default else "false")
+    return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+BRD_USE_PARALLEL_GENERATION      = _flag("BRD_USE_PARALLEL_GENERATION", True)
+
 # Worker Lambda names (kept Lambdas — orchestrator invokes them for
 # the heavy generation paths).
 BRD_GENERATOR_LAMBDA             = os.getenv("BRD_GENERATOR_LAMBDA",   "sdlc-dev-brd-generator")
@@ -281,8 +293,15 @@ def handle_turn(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     # ── 2. Session ownership re-verify (mitigation #1) ───────────────
+    # FastAPI fetches the session row before invoking us and embeds it
+    # under event["session"]. We re-check the user_id match without
+    # touching the DB — keeps the Lambda out of the VPC.
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=f"session {session_id} not found", retryable=False)
     except PermissionError:
@@ -1362,14 +1381,12 @@ def _do_generate_from_docs(
             "template_s3_key":    (event or {}).get("template_s3_key"),
             "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
             "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
-            # Phase 2 commit 11 opt-in: lambda_brd_generator's parallel
-            # path. 30-40s vs ~90s monolithic; safe to default on
-            # because the parallel path is strictly additive (legacy
-            # callers without this flag still hit the monolithic
-            # codepath).
-            "parallel": True,
+            # Phase 6: prime-then-fan-out with prompt caching. Env flag
+            # BRD_USE_PARALLEL_GENERATION gates the parallel path so
+            # operators can roll back without redeploying the worker.
+            "parallel": BRD_USE_PARALLEL_GENERATION,
         },
-        expected_seconds=40,
+        expected_seconds=40 if BRD_USE_PARALLEL_GENERATION else 90,
         source="docs",
     )
 
@@ -1394,8 +1411,11 @@ def _do_generate_from_history(
             # history; pass it explicitly so the worker doesn't have to
             # know about the orchestrator's dual-actor read pattern.
             "session_id": (event or {}).get("session_id") or session.get("session_id"),
+            # Phase 6 feature flag — same gate as the docs path so both
+            # generation entry points flip together.
+            "parallel": BRD_USE_PARALLEL_GENERATION,
         },
-        expected_seconds=60,
+        expected_seconds=45 if BRD_USE_PARALLEL_GENERATION else 60,
         source="history",
     )
 
@@ -1896,7 +1916,11 @@ def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
                     message="session_id and user_id are required", retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=session_id, retryable=False)
     except PermissionError:
@@ -1913,9 +1937,10 @@ def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
             "template_s3_key":      (event or {}).get("template_s3_key"),
             "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
             "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
-            "parallel": True,  # Phase 2 commit 11 opt-in
+            # Phase 6: env-gated parallel path (prime-then-fan-out + caching).
+            "parallel": BRD_USE_PARALLEL_GENERATION,
         },
-        expected_seconds=40,
+        expected_seconds=40 if BRD_USE_PARALLEL_GENERATION else 90,
         source="docs",
     )
 
@@ -1933,7 +1958,11 @@ def handle_generate_from_history(event: Dict[str, Any]) -> Dict[str, Any]:
                     message="session_id and user_id are required", retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=session_id, retryable=False)
     except PermissionError:
@@ -1945,8 +1974,13 @@ def handle_generate_from_history(event: Dict[str, Any]) -> Dict[str, Any]:
         worker_lambda=BRD_FROM_HISTORY_LAMBDA,
         worker_payload_extras={
             "session_id": session_id,
+            # Phase 6: env-gated parallel path (prime-then-fan-out + caching).
+            # Without this the worker takes the legacy monolithic path AND
+            # reads memory under the wrong actor — leaves the user staring
+            # at a spinner forever.
+            "parallel": BRD_USE_PARALLEL_GENERATION,
         },
-        expected_seconds=60,
+        expected_seconds=45 if BRD_USE_PARALLEL_GENERATION else 60,
         source="history",
     )
 
@@ -1970,7 +2004,11 @@ def handle_audit(event: Dict[str, Any]) -> Dict[str, Any]:
                     retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=session_id, retryable=False)
     except PermissionError:
@@ -2274,7 +2312,11 @@ def handle_revert_section(event: Dict[str, Any]) -> Dict[str, Any]:
                     retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=str(section_number), retryable=False)
     except PermissionError:
@@ -2385,7 +2427,11 @@ def handle_save_section(event: Dict[str, Any]) -> Dict[str, Any]:
                         retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=str(section_number), retryable=False)
     except PermissionError:
@@ -2458,7 +2504,11 @@ def handle_cancel_generation(event: Dict[str, Any]) -> Dict[str, Any]:
                     message="session_id and user_id are required", retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=session_id, retryable=False)
     except PermissionError:
@@ -2488,7 +2538,11 @@ def handle_ingest_doc(event: Dict[str, Any]) -> Dict[str, Any]:
                     message="session_id and user_id are required", retryable=False)
 
     try:
-        session = verify_session_owned(session_id, user_id)
+        session = verify_session_owned(
+            session_id,
+            user_id,
+            session_from_event=(event or {}).get("session"),
+        )
     except LookupError:
         return card("error", code="session_not_found", message=session_id, retryable=False)
     except PermissionError:

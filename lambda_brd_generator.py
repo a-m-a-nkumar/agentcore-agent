@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
@@ -8,6 +9,18 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 # Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
 from environment import chat_completion, s3_put_object
+
+# Phase 6 imports — cacheable per-section prompts. The single source of
+# truth for the 16-section structure lives in brd_section_definitions.
+from prompts.brd_section_definitions import (
+    BRD_SECTIONS,
+    SECTION_FORMATS,
+    section_title as _section_title,
+)
+from prompts.brd_section_prompts import (
+    build_cached_system_blocks,
+    build_section_user_message,
+)
 
 # Import prompt templates from separate module
 from prompts.brd_generator_prompts import get_full_brd_generation_prompt, PromptConfig
@@ -72,224 +85,534 @@ BRD_SECTION_TITLES: List[Tuple[int, str]] = [
 #                  "status": "llm_generated", "last_updated_ts": "..."}]}
 # ============================================================================
 
-_PARALLEL_SECTION_SYSTEM_PROMPT = """\
-You generate ONE section of a Business Requirements Document (BRD)
-written against the Deluxe template.
-
-Inputs you receive:
-  - Section number + title (FIXED — do not change them).
-  - The relevant slice of the BRD template (what this section should
-    cover, per Deluxe's standard structure).
-  - The full source transcript / conversation that justifies the BRD.
-
-Output ONLY a JSON object with these keys:
-
-  {
-    "title":   "<section title verbatim>",
-    "content": [<content blocks>]
-  }
-
-Content block schema (use these types only):
-  paragraph    {"type": "paragraph",    "text": "..."}
-  heading      {"type": "heading", "level": 2-4, "text": "..."}
-  bullet_list  {"type": "bullet_list",  "items": ["...", ...]}
-  ordered_list {"type": "ordered_list", "items": ["...", ...]}
-  table        {"type": "table", "headers": [...], "rows": [[...], ...]}
-
-Rules:
-  - Ground every concrete statement in the transcript. Do not invent
-    facts. If the transcript doesn't address something this section
-    should cover, write "(to be confirmed)" rather than fabricating.
-  - Keep the title field EXACTLY as provided. The orchestrator's
-    structure validation rejects titles that drift.
-  - 3-8 content blocks per section is typical. A single placeholder
-    paragraph is acceptable when the transcript is silent on a topic.
-  - Prefer tables for stakeholder / risk / NFR / acceptance-criteria
-    sections; bullet lists for assumptions / constraints; paragraphs
-    for purpose / background / scope.
-"""
-
-
-def _build_section_prompt(
-    *,
-    section_number: int,
-    section_title: str,
-    template_text: str,
-    transcript_text: str,
-) -> str:
-    """Compose the per-section user-content block. Sends the FULL
-    transcript (capped) and a truncated template excerpt so each
-    worker has enough context to ground its output without exceeding
-    per-call token budget."""
-    # Cap template at 4K chars per section call — the section worker
-    # mostly needs to know the template's general shape, not every
-    # other section's verbiage. Full transcript stays so claims are
-    # grounded.
-    template_excerpt = (template_text or "")[:4000]
-    transcript_excerpt = (transcript_text or "")[:20000]
-    if len(template_text or "") > 4000:
-        template_excerpt += "\n... (template truncated for per-section call)"
-    if len(transcript_text or "") > 20000:
-        transcript_excerpt += "\n... (transcript truncated)"
-
-    return (
-        f"Generate Section {section_number}: {section_title}\n\n"
-        f"Deluxe BRD template (general shape — for reference only):\n"
-        f"```\n{template_excerpt}\n```\n\n"
-        f"Source transcript (ground every claim in this):\n"
-        f"```\n{transcript_excerpt}\n```\n\n"
-        f"Return JSON: {{\"title\": \"{section_title}\", \"content\": [<blocks>]}}"
-    )
-
-
 def _generate_one_section(
     *,
     section_number: int,
-    section_title: str,
-    template_text: str,
-    transcript_text: str,
+    system_blocks: List[Dict[str, Any]],
     user_id: Optional[str],
+    brd_id: str,
+    gen_start_ts: float,
 ) -> Tuple[int, Dict[str, Any]]:
-    """Generate one section via one LLM call. Returns
-    (section_number, section_dict).
+    """Phase 6 section worker — cached-prefix flow.
 
-    One retry on parse failure with an explicit "JSON only" suffix,
-    then a sentinel placeholder so the parallel loop never explodes
-    the whole generation over one bad section."""
-    prompt = _build_section_prompt(
-        section_number=section_number,
-        section_title=section_title,
-        template_text=template_text,
-        transcript_text=transcript_text,
+    Builds the SHORT per-section user message via SECTION_PROMPT_BUILDERS,
+    fires one chat_completion using the pre-built cached system blocks,
+    validates the result against SECTION_FORMATS, and writes
+    brds/{brd_id}/sections/{n}.partial.json on success (the SSE endpoint
+    polls this prefix to surface per-section progress to the user).
+
+    Returns (section_number, section_dict). The section_dict carries a
+    `_usage` field (stripped before final brd_structure.json) so the
+    fan-out caller can aggregate token totals and cost. One retry on
+    parse/format failure with an explicit "JSON-only, no markdown"
+    prefill; after two failures returns status="generation_failed".
+
+    gen_start_ts: wall-clock timestamp the generation started. Used so
+    per-section log lines carry a "+Ns" offset proving parallelism in
+    CloudWatch.
+    """
+    title = _section_title(section_number)
+    user_msg = build_section_user_message(section_number)
+
+    # Log start of this section relative to generation start. CloudWatch
+    # shows multiple workers logging START within ~100ms of each other
+    # when fan-out is working; serial execution would show ~5-10s gaps.
+    section_start = time.time()
+    logger.info(
+        f"[BRD-gen] §{section_number:>2} START @ +{section_start - gen_start_ts:0.2f}s "
+        f"(parallel worker)"
     )
 
     retry_suffix = (
-        "\n\nIMPORTANT — your previous response could not be parsed. Reply "
-        "with ONLY a single JSON object, no prose before or after, no "
-        'markdown fences. The object MUST have keys "title" and '
-        '"content" (array of blocks).\n'
+        "\n\nIMPORTANT — your previous response could not be parsed or "
+        "did not match the required block schema. Reply with ONLY a JSON "
+        "array of content blocks. No prose before or after. No markdown "
+        "fences (no ```json … ```). The first character of your response "
+        "must be `[`.\n"
     )
 
     last_raw = ""
     last_err: Optional[Exception] = None
+    last_usage: Dict[str, int] = {}
     for attempt in (1, 2):
         try:
-            raw = chat_completion(
+            res = chat_completion(
                 messages=[{
                     "role": "user",
-                    "content": prompt + (retry_suffix if attempt == 2 else ""),
+                    "content": user_msg + (retry_suffix if attempt == 2 else ""),
                 }],
+                system_prompt=system_blocks,
                 temperature=BRD_SECTION_TEMPERATURE,
                 max_tokens=BRD_SECTION_MAX_TOKENS,
+                return_metadata=True,
                 user_id=user_id,
                 token_source=f"lambda_brd_generator:section{section_number}",
             )
-            last_raw = raw
-            parsed = _extract_section_json(raw)
-            content = parsed.get("content") if isinstance(parsed, dict) else None
-            if not isinstance(content, list):
-                raise ValueError("section worker returned content that is not a list")
-            return section_number, {
+            raw = res["content"] if isinstance(res, dict) else res
+            last_raw = raw or ""
+            usage = (res.get("usage") if isinstance(res, dict) else None) or {}
+            last_usage = {
+                "prompt":      int(usage.get("prompt_tokens", 0) or 0),
+                "completion":  int(usage.get("completion_tokens", 0) or 0),
+                "cache_write": int(usage.get("cache_creation_input_tokens", 0) or 0),
+                "cache_read":  int(usage.get("cache_read_input_tokens", 0) or 0),
+            }
+            content = _extract_section_blocks(last_raw)
+            _validate_section_against_format(section_number, content)
+
+            section_end = time.time()
+            logger.info(
+                f"[BRD-gen] §{section_number:>2} DONE  @ +{section_end - gen_start_ts:0.2f}s "
+                f"(took {section_end - section_start:0.2f}s, attempt {attempt}) "
+                f"tokens prompt={last_usage['prompt']} completion={last_usage['completion']} "
+                f"cache_write={last_usage['cache_write']} cache_read={last_usage['cache_read']}"
+            )
+
+            section_dict = {
                 "number": section_number,
-                "title": section_title,
+                "title": title,
                 "content": content,
                 "status": "llm_generated",
+                "last_updated_ts": int(time.time()),
+                "previous_versions": [],
+                "_usage": last_usage,        # stripped before final write
+                "_duration_s": round(section_end - section_start, 2),
             }
+            _write_section_partial(brd_id, section_number, section_dict)
+            return section_number, section_dict
         except Exception as e:
             last_err = e
             logger.warning(
-                f"[BRD-gen] section {section_number} attempt {attempt} parse failed: {e} "
+                f"[BRD-gen] §{section_number} attempt {attempt} failed: {e} "
                 f"raw[:300]={(last_raw or '')[:300]!r}"
             )
 
+    section_end = time.time()
     logger.error(
-        f"[BRD-gen] section {section_number} unrecoverable: {last_err}; "
-        f"emitting placeholder so the BRD shape stays intact."
+        f"[BRD-gen] §{section_number:>2} FAIL  @ +{section_end - gen_start_ts:0.2f}s "
+        f"after 2 attempts: {last_err}"
     )
-    return section_number, {
+    failed = {
         "number": section_number,
-        "title": section_title,
+        "title": title,
         "content": [{
             "type": "paragraph",
-            "text": f"(Generation failed for this section: {last_err}. "
-                    f"Click Regenerate to retry.)",
+            "text": f"[Generation failed for this section: {last_err}. "
+                    f"Click Regenerate to retry.]",
         }],
         "status": "generation_failed",
+        "last_updated_ts": int(time.time()),
+        "previous_versions": [],
+        "error": str(last_err),
+        "_usage": last_usage,
+        "_duration_s": round(section_end - section_start, 2),
     }
+    # Write the failed partial too so the SSE endpoint can surface it
+    # — the final-assembly step decides whether to abort the whole BRD.
+    _write_section_partial(brd_id, section_number, failed)
+    return section_number, failed
 
 
-def _extract_section_json(text: str) -> Any:
-    """Best-effort JSON parse — handles markdown-fenced and prose-
-    wrapped responses the same way services.brd_orchestrator_utils
-    does, kept local so this Lambda has no dependency on the
-    orchestrator's module."""
+def _extract_section_blocks(text: str) -> List[Dict[str, Any]]:
+    """Pull a JSON array of content blocks out of an LLM response.
+
+    Sonnet tends to wrap output in ```json …``` fences even when told
+    not to. Handle that path before falling back to a permissive search.
+    Returns the parsed list; raises ValueError if no array can be parsed.
+    """
     import re
     if not text:
-        raise json.JSONDecodeError("empty response", "", 0)
+        raise ValueError("empty section response")
     s = text.strip()
-    try:
+    # 1. Plain JSON array.
+    if s.startswith("["):
         return json.loads(s)
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, re.DOTALL)
+    # 2. Fenced ```json … ``` or ``` … ```.
+    m = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", s, re.DOTALL)
     if m:
-        try:
-            return json.loads(m.group(1))
-        except json.JSONDecodeError:
-            pass
-    m = re.search(r"\{.*\}", s, re.DOTALL)
+        return json.loads(m.group(1))
+    # 3. First [...] in the text.
+    m = re.search(r"\[.*\]", s, re.DOTALL)
     if m:
         return json.loads(m.group(0))
-    raise json.JSONDecodeError("no JSON object found in section output", s[:200], 0)
+    raise ValueError(f"no JSON array found in section response (first 200 chars: {s[:200]!r})")
+
+
+def _validate_section_against_format(section_number: int, content: List[Dict[str, Any]]) -> None:
+    """Assert the section's content blocks match SECTION_FORMATS[n].
+
+    Raises ValueError on mismatch with a precise diagnostic. The worker
+    treats this like any other parse failure — one retry, then bail.
+    """
+    if not isinstance(content, list) or not content:
+        raise ValueError("content must be a non-empty list of blocks")
+    spec = SECTION_FORMATS.get(section_number)
+    if not spec:
+        raise ValueError(f"no SECTION_FORMATS entry for §{section_number}")
+    kind = spec.get("type")
+
+    def _block_types() -> List[str]:
+        return [b.get("type") for b in content if isinstance(b, dict)]
+
+    types = _block_types()
+
+    if kind == "table":
+        tables = [b for b in content if isinstance(b, dict) and b.get("type") == "table"]
+        if len(tables) != 1:
+            raise ValueError(f"§{section_number} expects exactly one table block; got types={types}")
+        tbl = tables[0]
+        expected_headers = spec.get("headers") or []
+        actual_headers = tbl.get("headers") or []
+        if actual_headers != expected_headers:
+            raise ValueError(
+                f"§{section_number} table headers mismatch: "
+                f"expected {expected_headers}, got {actual_headers}"
+            )
+        rows = tbl.get("rows") or []
+        if not isinstance(rows, list) or not rows:
+            raise ValueError(f"§{section_number} table must have at least one row")
+        n_cols = len(expected_headers)
+        for i, r in enumerate(rows):
+            if not isinstance(r, list) or len(r) != n_cols:
+                raise ValueError(
+                    f"§{section_number} table row {i} has {len(r) if isinstance(r, list) else 'N/A'} "
+                    f"cells; expected {n_cols}"
+                )
+
+    elif kind == "prose":
+        paras = [b for b in content if isinstance(b, dict) and b.get("type") == "paragraph"]
+        if not paras:
+            raise ValueError(f"§{section_number} (prose) requires at least one paragraph; got types={types}")
+        # Reject embedded tables/bullets to keep the prose shape clean.
+        for b in content:
+            if isinstance(b, dict) and b.get("type") in ("table", "bullet_list"):
+                raise ValueError(f"§{section_number} (prose) must not contain {b['type']} blocks")
+
+    elif kind == "bullet_list":
+        bullets = [b for b in content if isinstance(b, dict) and b.get("type") == "bullet_list"]
+        if len(bullets) != 1:
+            raise ValueError(f"§{section_number} expects exactly one bullet_list; got types={types}")
+        items = bullets[0].get("items") or []
+        if not isinstance(items, list) or not items:
+            raise ValueError(f"§{section_number} bullet_list must have at least one item")
+
+    elif kind == "subsection_bullets":
+        subs = spec.get("subsections") or []
+        # Expect at least one heading + one bullet_list per subsection.
+        headings = [b for b in content if isinstance(b, dict) and b.get("type") == "heading"]
+        bullets = [b for b in content if isinstance(b, dict) and b.get("type") == "bullet_list"]
+        if len(headings) < len(subs) or len(bullets) < len(subs):
+            raise ValueError(
+                f"§{section_number} expects {len(subs)} heading/bullet_list pairs; "
+                f"got {len(headings)} headings and {len(bullets)} bullet_lists"
+            )
+
+    elif kind == "glossary":
+        bullets = [b for b in content if isinstance(b, dict) and b.get("type") == "bullet_list"]
+        if len(bullets) != 1:
+            raise ValueError(f"§{section_number} glossary expects one bullet_list; got types={types}")
+
+    else:
+        raise ValueError(f"§{section_number}: unknown spec type {kind!r}")
+
+
+def _write_section_partial(brd_id: str, section_number: int, section_dict: Dict[str, Any]) -> None:
+    """Write brds/{brd_id}/sections/{n}.partial.json. Failures are
+    logged but non-fatal — the SSE channel will just miss this update."""
+    key = f"brds/{brd_id}/sections/{section_number}.partial.json"
+    try:
+        s3_put_object(
+            key=key,
+            body=json.dumps(section_dict, indent=2, ensure_ascii=False),
+            content_type="application/json",
+        )
+    except Exception as e:
+        logger.warning(f"[BRD-gen] failed to write {key}: {e}")
+
+
+def _write_generation_status(
+    brd_id: str,
+    status: str,
+    sections_complete: Optional[List[int]] = None,
+    error_message: Optional[str] = None,
+    missing_sections: Optional[List[int]] = None,
+    session_id: Optional[str] = None,
+) -> None:
+    """Write brds/{brd_id}/_generation_status.json — the SSE endpoint's
+    terminal-state signal. `status` is one of: running, complete, failed.
+    """
+    body = {
+        "brd_id": brd_id,
+        "session_id": session_id,
+        "status": status,
+        "sections_complete": sections_complete or [],
+        "updated_at": int(time.time()),
+    }
+    if error_message:
+        body["error_message"] = error_message
+    if missing_sections:
+        body["missing_sections"] = missing_sections
+    try:
+        s3_put_object(
+            key=f"brds/{brd_id}/_generation_status.json",
+            body=json.dumps(body, indent=2),
+            content_type="application/json",
+        )
+    except Exception as e:
+        logger.warning(f"[BRD-gen] failed to write _generation_status.json: {e}")
+
+
+def _prime_cache(system_blocks: List[Dict[str, Any]], user_id: Optional[str]) -> Dict[str, int]:
+    """Fire one tiny chat_completion to populate Anthropic's cache with
+    the shared system blocks. Returns the usage dict (prompt/completion/
+    cache_write/cache_read tokens) so the caller can aggregate cost.
+
+    Anthropic's caching: for concurrent requests, a cache entry only
+    becomes available AFTER the first response begins. If we fan out 16
+    section calls in parallel without priming first, ALL 16 are cache
+    writes (1.25× cost). Priming gives us 1 write + 15 reads (~0.1×).
+
+    Best-effort: any failure is logged and we proceed without caching.
+    Generation still works; we just pay full input cost on every call.
+    """
+    try:
+        res = chat_completion(
+            messages=[{"role": "user", "content": "Acknowledge: prime."}],
+            system_prompt=system_blocks,
+            temperature=0.0,
+            max_tokens=8,
+            return_metadata=True,
+            user_id=user_id,
+            token_source="lambda_brd_generator:prime",
+        )
+        usage = (res or {}).get("usage", {}) if isinstance(res, dict) else {}
+        u = {
+            "prompt":      int(usage.get("prompt_tokens", 0) or 0),
+            "completion":  int(usage.get("completion_tokens", 0) or 0),
+            "cache_write": int(usage.get("cache_creation_input_tokens", 0) or 0),
+            "cache_read":  int(usage.get("cache_read_input_tokens", 0) or 0),
+        }
+        if u["cache_write"]:
+            logger.info(
+                f"[BRD-gen] PRIME wrote {u['cache_write']} tokens to cache "
+                f"(prompt={u['prompt']} completion={u['completion']})"
+            )
+        else:
+            logger.warning(
+                f"[BRD-gen] PRIME returned usage but cache_write=0 — caching "
+                f"may not be active. prompt={u['prompt']}; if 0 the gateway is "
+                f"dropping the system block. Check llm_gateway pass-through."
+            )
+        return u
+    except Exception as e:
+        logger.warning(f"[BRD-gen] PRIME failed (continuing without cache): {e}")
+        return {"prompt": 0, "completion": 0, "cache_write": 0, "cache_read": 0}
+
+
+def _estimate_cost_usd(
+    prompt_tokens: int,
+    completion_tokens: int,
+    cache_write_tokens: int,
+    cache_read_tokens: int,
+) -> float:
+    """Per-call cost estimate using Anthropic Sonnet 4.5 published rates.
+
+    Rates (per 1M tokens):
+      base input        $3.00
+      cache write       $3.75  (input × 1.25)
+      cache read        $0.30  (input × 0.10)
+      output            $15.00
+
+    `prompt_tokens` from the API INCLUDES the cache_write and cache_read
+    portions; the "regular" (uncached) input is the remainder.
+    """
+    regular_input = max(0, prompt_tokens - cache_write_tokens - cache_read_tokens)
+    return round(
+        (regular_input      * 3.00 / 1_000_000)
+        + (cache_write_tokens * 3.75 / 1_000_000)
+        + (cache_read_tokens  * 0.30 / 1_000_000)
+        + (completion_tokens  * 15.00 / 1_000_000),
+        5,
+    )
+
+
+def _build_context_bundle(
+    *,
+    template_text: str,
+    transcript_text: str,
+) -> Dict[str, Any]:
+    """Assemble the context bundle that goes into the cached system
+    prefix. Same shape used by both docs-path and history-path so the
+    section workers don't need to branch on origin."""
+    return {
+        "transcript": transcript_text,
+        "template_text": template_text,
+        "style_constraints": (
+            "Formal, professional tone. No first-person ('we'/'I'). "
+            "Use tight, structured language — no padding. Reference other "
+            "sections by number ('§4') not by content."
+        ),
+    }
 
 
 def _generate_brd_parallel(
     *,
+    brd_id: str,
+    session_id: Optional[str],
     template_text: str,
     transcript_text: str,
     user_id: Optional[str],
 ) -> Dict[str, Any]:
-    """Fan out one LLM call per section via ThreadPoolExecutor.
+    """Phase 6 parallel generation: prime cache → fan out 16 → assemble.
 
-    max_workers bounded by BRD_SECTION_PARALLELISM (default 5) so the
-    DLX gateway isn't hit with 16 concurrent requests. Returns a
-    brd_structure dict ready to write to brds/{brd_id}/brd_structure.json.
+    Sequence:
+      1. Build cacheable system blocks from the shared context bundle.
+      2. PRIME: fire one chat_completion to populate Anthropic's cache.
+         Without priming, 16 parallel calls all become cache writes
+         (1.25× cost). With priming, 1 write + 15 reads (~0.1× each).
+      3. Fan out 16 section workers via ThreadPoolExecutor bounded by
+         BRD_SECTION_PARALLELISM. Each worker validates its own output
+         against SECTION_FORMATS and writes brds/{brd_id}/sections/{n}.partial.json
+         on completion (the SSE endpoint polls this prefix).
+      4. Assemble in canonical section-number order.
+
+    Returns a brd_structure dict ready to write to brd_structure.json.
     """
-    results: Dict[int, Dict[str, Any]] = {}
-    start_ts = int(__import__("time").time())
+    start_ts = time.time()
 
+    logger.info(
+        f"[BRD-gen] ════ START parallel generation brd_id={brd_id} "
+        f"session={session_id} max_workers={BRD_SECTION_PARALLELISM} ════"
+    )
+
+    # Mark generation as started so the SSE endpoint can confirm in-flight.
+    _write_generation_status(brd_id, "running", sections_complete=[], session_id=session_id)
+
+    # Build cached system blocks ONCE; every section worker reuses them.
+    context_bundle = _build_context_bundle(
+        template_text=template_text,
+        transcript_text=transcript_text,
+    )
+    system_blocks = build_cached_system_blocks(context_bundle)
+    logger.info(
+        f"[BRD-gen] cached prefix size: {len(system_blocks[0]['text'])} chars "
+        f"(~{len(system_blocks[0]['text']) // 4} tokens estimated)"
+    )
+
+    # PRIME the cache before fan-out (Anthropic docs are explicit: cache
+    # entries become readable only after the first response begins).
+    prime_usage = _prime_cache(system_blocks, user_id)
+
+    # Fan out 16 section workers.
+    fanout_started = time.time()
+    logger.info(
+        f"[BRD-gen] >>> fan-out begins at +{fanout_started - start_ts:0.2f}s "
+        f"({len(BRD_SECTIONS)} workers, max_workers={BRD_SECTION_PARALLELISM})"
+    )
+    results: Dict[int, Dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=BRD_SECTION_PARALLELISM) as ex:
         futures = [
             ex.submit(
                 _generate_one_section,
                 section_number=n,
-                section_title=title,
-                template_text=template_text,
-                transcript_text=transcript_text,
+                system_blocks=system_blocks,
                 user_id=user_id,
+                brd_id=brd_id,
+                gen_start_ts=start_ts,
             )
-            for n, title in BRD_SECTION_TITLES
+            for n, _title, _slug in BRD_SECTIONS
         ]
         for fut in as_completed(futures):
             try:
                 n, section_dict = fut.result()
                 results[n] = section_dict
+                # Push a running-status update so the SSE endpoint sees
+                # cumulative progress without having to LIST the prefix.
+                _write_generation_status(
+                    brd_id,
+                    "running",
+                    sections_complete=sorted(results.keys()),
+                    session_id=session_id,
+                )
             except Exception as e:
-                # Belt-and-braces: _generate_one_section already
-                # catches its own LLM failures and returns a sentinel.
-                # This catches anything truly exceptional (e.g. future
-                # cancellation).
-                logger.error(f"[BRD-gen] section worker exploded: {e}")
+                logger.error(f"[BRD-gen] section worker raised: {e}")
 
-    # Assemble in canonical section-number order even though futures
-    # complete out-of-order.
-    sections = [results[n] for n, _ in BRD_SECTION_TITLES if n in results]
-    elapsed = int(__import__("time").time()) - start_ts
-    logger.info(
-        f"[BRD-gen] parallel generation complete: {len(sections)}/{len(BRD_SECTION_TITLES)} "
-        f"sections, max_workers={BRD_SECTION_PARALLELISM}, elapsed={elapsed}s"
+    # Assemble in canonical order even though futures completed out of order.
+    sections = [results[n] for n, _t, _s in BRD_SECTIONS if n in results]
+    missing  = [n for n, _t, _s in BRD_SECTIONS if n not in results]
+    failed   = [s["number"] for s in sections if s.get("status") == "generation_failed"]
+    elapsed  = round(time.time() - start_ts, 2)
+
+    # ── Aggregate token usage across prime + all section calls ────────
+    agg = {"prompt": prime_usage["prompt"], "completion": prime_usage["completion"],
+           "cache_write": prime_usage["cache_write"], "cache_read": prime_usage["cache_read"]}
+    section_durations: List[float] = []
+    for s in sections:
+        u = s.get("_usage") or {}
+        agg["prompt"]      += int(u.get("prompt", 0))
+        agg["completion"]  += int(u.get("completion", 0))
+        agg["cache_write"] += int(u.get("cache_write", 0))
+        agg["cache_read"]  += int(u.get("cache_read", 0))
+        if s.get("_duration_s") is not None:
+            section_durations.append(float(s["_duration_s"]))
+
+    cost = _estimate_cost_usd(
+        prompt_tokens=agg["prompt"],
+        completion_tokens=agg["completion"],
+        cache_write_tokens=agg["cache_write"],
+        cache_read_tokens=agg["cache_read"],
     )
-    return {"sections": sections}
+    # Parallelism evidence: if the sum of section durations >> wall time
+    # of fan-out, workers ran in parallel. Serial would show sum ≈ wall.
+    sum_section_seconds = round(sum(section_durations), 2) if section_durations else 0.0
+    fanout_wall = round(time.time() - fanout_started, 2)
+    parallelism_factor = (
+        round(sum_section_seconds / fanout_wall, 2)
+        if fanout_wall > 0 else 0.0
+    )
+    cache_hit_ratio = (
+        round(agg["cache_read"] / max(1, agg["cache_read"] + agg["cache_write"]), 3)
+    )
+
+    logger.info(
+        f"[BRD-gen] ════ END parallel generation brd_id={brd_id} elapsed={elapsed}s ════"
+    )
+    logger.info(
+        f"[BRD-gen] TOKEN SUMMARY  prompt={agg['prompt']} completion={agg['completion']} "
+        f"cache_write={agg['cache_write']} cache_read={agg['cache_read']}"
+    )
+    logger.info(
+        f"[BRD-gen] COST ESTIMATE  ${cost:.5f} per generation "
+        f"(cache_hit_ratio={cache_hit_ratio} — higher is cheaper)"
+    )
+    logger.info(
+        f"[BRD-gen] PARALLELISM    sum_section_seconds={sum_section_seconds}s "
+        f"fanout_wall={fanout_wall}s factor={parallelism_factor}× "
+        f"(>1.0 means workers overlapped; ~{BRD_SECTION_PARALLELISM} is ideal)"
+    )
+    logger.info(
+        f"[BRD-gen] RESULT         {len(sections)}/{len(BRD_SECTIONS)} sections; "
+        f"failed={failed}; missing={missing}"
+    )
+
+    # Strip debug fields from the canonical section payloads before
+    # returning — _usage and _duration_s are LOG-ONLY, never written to
+    # brd_structure.json.
+    for s in sections:
+        s.pop("_usage", None)
+        s.pop("_duration_s", None)
+
+    return {
+        "brd_id": brd_id,
+        "sections": sections,
+        "missing": missing,
+        "failed": failed,
+        "duration_seconds": elapsed,
+        "_token_summary": agg,        # routed to the handler's log line
+        "_cost_usd": cost,
+        "_parallelism_factor": parallelism_factor,
+        "_cache_hit_ratio": cache_hit_ratio,
+    }
 
 
 def _coerce_event(event: Any) -> Dict[str, Any]:
@@ -551,25 +874,31 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None, user_id: Optional[str] 
 
 
 def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
-    """Entry point for the parallel section generation path.
+    """Phase 6 entry point: prime-then-fan-out section generation.
 
     Expected event shape:
-      {"parallel": True, "brd_id": "...", "user_id": "...",
+      {"parallel": True, "brd_id": "...", "session_id": "...",
+       "user_id": "...",
        "template": "..." (or template_s3_*),
        "transcript": "..." (or transcript_s3_*)}
 
-    Writes brd_structure.json directly and returns a slim
-    {brd_id, status, section_count} envelope so the orchestrator's
-    next stage can pick up the result without parsing 50KB of BRD
-    text. (The BRD text artifact is regenerable from the structure
-    if/when needed.)
-    """
-    brd_id  = evt.get("brd_id") or str(uuid.uuid4())
-    user_id = evt.get("user_id")
+    The session_id is optional but recommended — when present, the
+    final-assembly step records it on _generation_status.json so the
+    SSE endpoint can confirm it's looking at the right execution.
 
-    # Pull template + transcript -- supports BOTH inline-text and
-    # S3-key payload shapes to match the existing monolithic flow's
-    # input contract.
+    Writes:
+      - brds/{brd_id}/sections/{n}.partial.json (per section, as each completes)
+      - brds/{brd_id}/brd_structure.json        (final assembly)
+      - brds/{brd_id}/_generation_status.json   (live status heartbeat)
+
+    Returns a slim {brd_id, status, section_count} envelope.
+    """
+    brd_id     = evt.get("brd_id") or str(uuid.uuid4())
+    session_id = evt.get("session_id")
+    user_id    = evt.get("user_id")
+
+    # Pull template + transcript — supports both inline-text and
+    # S3-key payload shapes (matches the existing monolithic input contract).
     template_text   = evt.get("template")   or evt.get("template_text")
     transcript_text = evt.get("transcript") or evt.get("transcript_text")
 
@@ -587,7 +916,33 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
                 else data.decode("utf-8", errors="replace")
         except Exception as e:
             logger.error(f"[BRD-gen parallel] template S3 fetch failed: {e}")
-            return _parallel_error_response(brd_id, f"template fetch failed: {e}")
+            return _parallel_error_response(brd_id, f"template fetch failed: {e}", session_id)
+
+    # Auto-fetch the canonical Deluxe template from S3 when the caller
+    # didn't pass one. The template is FIXED (s3://.../templates/
+    # Deluxe_BRD_Template.docx) — users never upload it. The from-history
+    # worker has always done this fetch; the from-docs path historically
+    # required the caller to supply it, which broke when the unified
+    # frontend stopped collecting a separate template file.
+    if not template_text:
+        try:
+            default_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+            default_key    = os.getenv("BRD_TEMPLATE_S3_KEY", "templates/Deluxe_BRD_Template.docx")
+            logger.info(
+                f"[BRD-gen parallel] no template in event — fetching canonical "
+                f"Deluxe template from s3://{default_bucket}/{default_key}"
+            )
+            s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+            obj = s3.get_object(Bucket=default_bucket, Key=default_key)
+            data = obj["Body"].read()
+            template_text = _extract_text_from_docx(data) if default_key.endswith(".docx") \
+                else data.decode("utf-8", errors="replace")
+            logger.info(f"[BRD-gen parallel] Deluxe template fetched: {len(template_text)} chars")
+        except Exception as e:
+            logger.error(f"[BRD-gen parallel] canonical template S3 fetch failed: {e}")
+            return _parallel_error_response(
+                brd_id, f"could not load Deluxe template from S3: {e}", session_id,
+            )
 
     if not transcript_text and transcript_s3_bucket and transcript_s3_key:
         try:
@@ -598,60 +953,114 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
                 else data.decode("utf-8", errors="replace")
         except Exception as e:
             logger.error(f"[BRD-gen parallel] transcript S3 fetch failed: {e}")
-            return _parallel_error_response(brd_id, f"transcript fetch failed: {e}")
+            return _parallel_error_response(brd_id, f"transcript fetch failed: {e}", session_id)
 
-    if not template_text or not transcript_text:
-        return _parallel_error_response(brd_id, "template and transcript are required")
+    if not transcript_text:
+        return _parallel_error_response(
+            brd_id,
+            "transcript is required (the template is auto-fetched from S3; "
+            "the transcript must be supplied by the caller)",
+            session_id,
+        )
 
-    # Fan out.
-    structure = _generate_brd_parallel(
-        template_text=template_text,
-        transcript_text=transcript_text,
-        user_id=user_id,
-    )
+    # Fan out. _generate_brd_parallel writes status=running and section
+    # partials; we own the terminal status write below.
+    try:
+        structure = _generate_brd_parallel(
+            brd_id=brd_id,
+            session_id=session_id,
+            template_text=template_text,
+            transcript_text=transcript_text,
+            user_id=user_id,
+        )
+    except Exception as e:
+        logger.exception("[BRD-gen parallel] generation raised")
+        _write_generation_status(
+            brd_id, "failed", error_message=str(e), session_id=session_id,
+        )
+        return _parallel_error_response(brd_id, f"generation failed: {e}", session_id)
 
-    # Write the canonical structure key. The legacy single-call path
-    # writes BRD_{id}.txt + a derived brd_structure.json; here we
-    # write only brd_structure.json because the structure IS the
-    # primary artifact in the parallel path.
+    missing = structure.get("missing", [])
+    failed  = structure.get("failed", [])
+    sections = structure.get("sections", [])
+
+    # Decide success/partial/failed. A BRD with any missing or failed
+    # section is marked partial — the user can regenerate problem
+    # sections individually rather than abandoning the whole document.
+    if missing:
+        terminal_status = "failed"
+        error_msg = f"Sections missing from output: {missing}"
+    elif failed:
+        terminal_status = "partial"
+        error_msg = f"Sections failed validation: {failed}"
+    else:
+        terminal_status = "complete"
+        error_msg = None
+
+    # Write the canonical brd_structure.json regardless — even partial
+    # output is more useful to the user than nothing, and the per-
+    # section "status=generation_failed" markers let the frontend show
+    # an error chip on the affected sections only.
+    structure_payload = {
+        "brd_id": brd_id,
+        "session_id": session_id,
+        "sections": sections,
+        "generated_at": int(time.time()),
+        "duration_seconds": structure.get("duration_seconds"),
+        "mode": "parallel",
+    }
     structure_key = f"brds/{brd_id}/brd_structure.json"
     try:
         s3_put_object(
             key=structure_key,
-            body=json.dumps(structure, indent=2, ensure_ascii=False),
+            body=json.dumps(structure_payload, indent=2, ensure_ascii=False),
             content_type="application/json",
         )
     except Exception as e:
-        logger.error(f"[BRD-gen parallel] S3 write failed: {e}")
-        return _parallel_error_response(brd_id, f"S3 write failed: {e}")
+        logger.error(f"[BRD-gen parallel] brd_structure.json write failed: {e}")
+        _write_generation_status(
+            brd_id, "failed", error_message=f"S3 write failed: {e}",
+            sections_complete=[s["number"] for s in sections], session_id=session_id,
+        )
+        return _parallel_error_response(brd_id, f"S3 write failed: {e}", session_id)
 
-    failed_count = sum(
-        1 for s in structure.get("sections", [])
-        if s.get("status") == "generation_failed"
+    # Final status write — the SSE endpoint reads this for terminal-state.
+    _write_generation_status(
+        brd_id,
+        terminal_status,
+        sections_complete=[s["number"] for s in sections if s.get("status") == "llm_generated"],
+        missing_sections=(missing + failed) or None,
+        error_message=error_msg,
+        session_id=session_id,
     )
+
     return {
         "statusCode": 200,
         "body": json.dumps({
             "brd_id":            brd_id,
-            "status":            "success" if failed_count == 0 else "partial",
-            "section_count":     len(structure.get("sections", [])),
-            "failed_sections":   failed_count,
+            "session_id":        session_id,
+            "status":            terminal_status,
+            "section_count":     len(sections),
+            "failed_sections":   failed,
+            "missing_sections":  missing,
             "s3_key":            structure_key,
+            "duration_seconds":  structure.get("duration_seconds"),
             "mode":              "parallel",
         }),
     }
 
 
-def _parallel_error_response(brd_id: str, message: str) -> Dict[str, Any]:
+def _parallel_error_response(brd_id: str, message: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     """Uniform error envelope for the parallel path. Same statusCode
     shape the orchestrator expects from any other action handler."""
     return {
         "statusCode": 500,
         "body": json.dumps({
-            "brd_id": brd_id,
-            "status": "error",
-            "error":  message,
-            "mode":   "parallel",
+            "brd_id":     brd_id,
+            "session_id": session_id,
+            "status":     "error",
+            "error":      message,
+            "mode":       "parallel",
         }),
     }
 

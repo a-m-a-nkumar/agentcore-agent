@@ -53,7 +53,7 @@ import json
 import logging
 import os
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -66,6 +66,7 @@ from db_helper import (
     get_project,
     get_project_sessions,
     increment_message_count,
+    update_brd_session_on_completion,
     update_brd_session_stage,
 )
 
@@ -134,6 +135,31 @@ def _ensure_session_owned(session_id: str, user_id: str) -> Dict[str, Any]:
     return s
 
 
+def _serialize_session_for_event(session: Dict[str, Any]) -> Dict[str, Any]:
+    """Render a session row into JSON-safe primitives so it can ride
+    along on the Lambda payload. The Lambda only needs a handful of
+    fields for ownership re-check + stage logic — embedding the whole
+    row would bloat the payload + leak fields the Lambda has no business
+    seeing (e.g. raw timestamps).
+    """
+    return {
+        "session_id": session.get("session_id") or session.get("id"),
+        "id":         session.get("id") or session.get("session_id"),
+        "user_id":    session.get("user_id"),
+        "project_id": session.get("project_id"),
+        "stage":      session.get("stage"),
+        "brd_id":     session.get("brd_id"),
+        "use_long_term_context": session.get("use_long_term_context", True),
+        "prior_stage": session.get("prior_stage"),
+        "generation_started_at": (
+            session["generation_started_at"].isoformat()
+            if session.get("generation_started_at") is not None
+            and hasattr(session["generation_started_at"], "isoformat")
+            else session.get("generation_started_at")
+        ),
+    }
+
+
 def _invoke_brd_lambda(
     payload: Dict[str, Any],
     *,
@@ -166,8 +192,34 @@ def _invoke_brd_lambda(
     try:
         outer = json.loads(body_bytes)
         if isinstance(outer, dict) and "body" in outer and isinstance(outer["body"], str):
-            return json.loads(outer["body"])
+            inner = json.loads(outer["body"])
+            # Orchestrator's lambda_handler returns {statusCode, body} where
+            # body holds either a handler result (200) OR an error envelope
+            # ({"error": "..."}) when the handler crashed. The error envelope
+            # has no type/payload so the frontend's card renderer chokes on
+            # it. Convert non-200 returns into a properly-shaped error card
+            # the renderer knows how to display.
+            status = outer.get("statusCode", 200)
+            if status != 200 and isinstance(inner, dict) and "error" in inner:
+                logger.error(
+                    f"[BRD] orchestrator returned status={status} error={inner.get('error')!r}"
+                )
+                return {
+                    "cards": [
+                        {
+                            "type": "error",
+                            "payload": {
+                                "code": f"orchestrator_{status}",
+                                "message": str(inner.get("error", "unknown error")),
+                                "retryable": status >= 500,
+                            },
+                        }
+                    ]
+                }
+            return inner
         return outer
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"BRD Lambda response parse error: {e}")
 
@@ -600,6 +652,10 @@ async def brd_turn(
             file_payload["s3_key"] = s3_key
 
     # --- Lambda payload --------------------------------------------------
+    # The session row is embedded so the Lambda can re-verify ownership
+    # without re-querying the DB (Lambda runs outside the RDS VPC). The
+    # row is the same one _ensure_session_owned already fetched + checked
+    # above, so this is just defense-in-depth, not a duplicate query.
     payload = {
         "action": "turn",
         "session_id": session_id,
@@ -611,6 +667,7 @@ async def brd_turn(
         "last_proposed_section": last_proposed_section,
         "stage": session.get("stage", "NEW"),
         "file": file_payload,
+        "session": _serialize_session_for_event(session),
     }
     lambda_result = _invoke_brd_lambda(payload)
 
@@ -698,6 +755,7 @@ def brd_save_section(
         "project_id": session.get("project_id"),
         "section_number": body.section_number,
         "content": body.content,
+        "session": _serialize_session_for_event(session),
     })
 
     _maybe_promote_to_refining(session, result)
@@ -938,29 +996,119 @@ def _generation_kickoff_response(
     return lambda_result
 
 
+def _offload_large_text_to_s3(
+    text: str,
+    *,
+    purpose: str,        # "transcript" | "template"
+    session_id: str,
+    user_id: str,
+) -> Optional[Tuple[str, str]]:
+    """If `text` is too big to inline in a Lambda Event-type payload
+    (1 MB hard cap), upload it to S3 and return (bucket, key).
+    Otherwise return None and the caller keeps using the inline form.
+
+    Why this is needed:
+      The orchestrator async-invokes the worker Lambda with
+      InvocationType=Event. Event invocations have a 1 MB request-body
+      limit. A user uploading a 3 MB transcript breaks the chain at
+      RequestEntityTooLargeException with no path to recovery — fix is
+      to spill anything >256 KB to S3 and pass the key instead, since
+      the worker already accepts transcript_s3_bucket / transcript_s3_key.
+
+    Threshold: 256 KB inline. The full Event payload also carries the
+    `session` dict + handful of small fields, so leave headroom below
+    the 1 MB cap.
+    """
+    INLINE_MAX_BYTES = 256 * 1024
+    body_bytes = (text or "").encode("utf-8")
+    if len(body_bytes) <= INLINE_MAX_BYTES:
+        return None  # small enough — keep inline
+
+    bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+    key = f"brd_inputs/{user_id}/{session_id}/{purpose}-{uuid.uuid4().hex[:8]}.txt"
+    s3 = boto3.client("s3", region_name=AWS_REGION)
+    try:
+        s3.put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=body_bytes,
+            ContentType="text/plain; charset=utf-8",
+            ServerSideEncryption="aws:kms",
+            SSEKMSKeyId=os.getenv(
+                "KMS_KEY_ARN",
+                "arn:aws:kms:us-east-1:590184044598:key/mrk-29bf4d8d90604305976882df6c91149e",
+            ),
+        )
+    except Exception as e:
+        # Fall back to a plain put (no KMS) — KMS may not be configured
+        # in every environment. The bucket still has SSE-S3 default.
+        logger.warning(f"[BRD] S3 KMS put failed for {key}: {e}; retrying without KMS")
+        s3.put_object(
+            Bucket=bucket, Key=key, Body=body_bytes,
+            ContentType="text/plain; charset=utf-8",
+        )
+    logger.info(
+        f"[BRD] offloaded {purpose} ({len(body_bytes)} bytes) to s3://{bucket}/{key}"
+    )
+    return bucket, key
+
+
 @router.post("/generate-from-docs")
 def brd_generate_from_docs(
     body: BRDGenerateFromDocsRequest,
     current_user: dict = Depends(get_current_user),
 ):
     """Template + transcript -> full BRD. Orchestrator async-invokes
-    the lambda_brd_generator worker with parallel=true (Phase 2 commit
-    11) and returns generation_starting immediately.
+    the lambda_brd_generator worker with parallel=true (Phase 6) and
+    returns generation_starting immediately.
+
+    Large transcripts (>256 KB) are uploaded to S3 first so the Lambda
+    Event-type payload stays under the 1 MB hard cap. The worker reads
+    from S3 when transcript_s3_bucket / transcript_s3_key are set.
     """
     user_id = current_user["id"]
     session = _ensure_session_owned(body.session_id, user_id)
+
+    # If the caller inlined a large transcript/template, spill to S3
+    # before forwarding to the orchestrator. Lambda Event-type invokes
+    # cap at 1 MB; we need to stay below that with headroom for the
+    # session dict + envelope.
+    transcript_text = body.transcript
+    transcript_s3_bucket = body.transcript_s3_bucket
+    transcript_s3_key    = body.transcript_s3_key
+    if transcript_text and not transcript_s3_key:
+        spill = _offload_large_text_to_s3(
+            transcript_text, purpose="transcript",
+            session_id=body.session_id, user_id=user_id,
+        )
+        if spill is not None:
+            transcript_s3_bucket, transcript_s3_key = spill
+            transcript_text = None  # drop inline so payload stays small
+
+    template_text = body.template
+    template_s3_bucket = body.template_s3_bucket
+    template_s3_key    = body.template_s3_key
+    if template_text and not template_s3_key:
+        spill = _offload_large_text_to_s3(
+            template_text, purpose="template",
+            session_id=body.session_id, user_id=user_id,
+        )
+        if spill is not None:
+            template_s3_bucket, template_s3_key = spill
+            template_text = None
 
     payload = {
         "action": "generate_from_docs",
         "session_id": body.session_id,
         "user_id": user_id,
         "project_id": body.project_id or session.get("project_id"),
-        "template": body.template,
-        "transcript": body.transcript,
-        "template_s3_bucket": body.template_s3_bucket,
-        "template_s3_key": body.template_s3_key,
-        "transcript_s3_bucket": body.transcript_s3_bucket,
-        "transcript_s3_key": body.transcript_s3_key,
+        "template": template_text,
+        "transcript": transcript_text,
+        "template_s3_bucket": template_s3_bucket,
+        "template_s3_key": template_s3_key,
+        "transcript_s3_bucket": transcript_s3_bucket,
+        "transcript_s3_key": transcript_s3_key,
+        "session": _serialize_session_for_event(session),
     }
     return _generation_kickoff_response(session, _invoke_brd_lambda(payload))
 
@@ -980,6 +1128,7 @@ def brd_generate_from_history(
         "session_id": body.session_id,
         "user_id": user_id,
         "project_id": body.project_id or session.get("project_id"),
+        "session": _serialize_session_for_event(session),
     }
     return _generation_kickoff_response(session, _invoke_brd_lambda(payload))
 
@@ -1006,6 +1155,7 @@ def brd_cancel_generation(
         "session_id": body.session_id,
         "user_id": user_id,
         "brd_id": body.brd_id,
+        "session": _serialize_session_for_event(session),
     })
 
     if isinstance(result, dict) and result.get("type") == "generation_cancelled":
@@ -1031,6 +1181,7 @@ def brd_audit(
         "user_id": user_id,
         "project_id": body.project_id or session.get("project_id"),
         "section_number": body.section_number,
+        "session": _serialize_session_for_event(session),
     })
     # An audit IS a refinement action -- bump DRAFTED -> REFINING
     # per the canonical state machine table.
@@ -1056,6 +1207,7 @@ def brd_ingest_doc(
         "project_id": body.project_id or session.get("project_id"),
         "file": body.file,
         "files": body.files,
+        "session": _serialize_session_for_event(session),
     })
 
 
@@ -1081,6 +1233,7 @@ def brd_revert_section(
         "user_id": user_id,
         "project_id": session.get("project_id"),
         "section_number": body.section_number,
+        "session": _serialize_session_for_event(session),
     })
 
     _maybe_promote_to_refining(session, result)
@@ -1360,3 +1513,199 @@ async def brd_turn_stream(
         ),
         media_type="text/event-stream",
     )
+
+
+# ============================================
+# Phase 6 — GET /api/brd/stream/{session_id}
+#
+# SSE channel that the frontend subscribes to during GENERATING stage to
+# receive per-section completion events in real time. Polls S3 for new
+# partials at brds/{brd_id}/sections/{n}.partial.json and reads the
+# terminal state from brds/{brd_id}/_generation_status.json.
+#
+# Event shapes (all lines prefixed "data: "):
+#   {"type": "section_complete", "section_number": 4, "title": "...",
+#    "row_count": 7}
+#   {"type": "brd_generated", "brd_id": "...", "section_count": 16,
+#    "total_duration_s": 47}
+#   {"type": "generation_failed", "missing_sections": [4, 11],
+#    "error_message": "..."}
+#   {"type": "timeout"}   (hard cap reached without terminal state)
+#
+# Implementation: polling (S3 LIST every 500ms). Plan documents this as
+# a deliberate choice — upgrade to S3 event notifications when generation
+# traffic >50K/month. At polled cadence: ~100 LIST calls per 50s gen, <$0.001 per gen.
+# ============================================
+
+BRD_STREAM_POLL_INTERVAL_S = float(os.getenv("BRD_STREAM_POLL_INTERVAL_S", "0.5"))
+BRD_STREAM_HARD_TIMEOUT_S  = int(os.getenv("BRD_STREAM_HARD_TIMEOUT_S", "120"))
+BRD_S3_BUCKET              = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+
+_s3_client = None
+def _s3():
+    global _s3_client
+    if _s3_client is None:
+        _s3_client = boto3.client("s3", region_name=AWS_REGION)
+    return _s3_client
+
+
+def _read_s3_json(key: str) -> Optional[Dict[str, Any]]:
+    """Best-effort S3 read returning the parsed JSON or None on any
+    failure (404 / parse error / permission). The SSE loop treats None
+    as 'not yet there' and keeps polling."""
+    try:
+        obj = _s3().get_object(Bucket=BRD_S3_BUCKET, Key=key)
+        return json.loads(obj["Body"].read())
+    except Exception:
+        return None
+
+
+def _list_completed_section_numbers(brd_id: str) -> List[int]:
+    """List the section numbers that have written their partial.json
+    file. Returns sorted ascending."""
+    prefix = f"brds/{brd_id}/sections/"
+    try:
+        resp = _s3().list_objects_v2(Bucket=BRD_S3_BUCKET, Prefix=prefix)
+    except Exception as e:
+        logger.warning(f"[BRD stream] list_objects_v2 failed for {prefix}: {e}")
+        return []
+    nums: List[int] = []
+    for obj in resp.get("Contents") or []:
+        # Key shape: brds/{brd_id}/sections/{n}.partial.json
+        key = obj["Key"]
+        try:
+            tail = key.rsplit("/", 1)[-1]            # "{n}.partial.json"
+            num = int(tail.split(".", 1)[0])
+            nums.append(num)
+        except (ValueError, IndexError):
+            continue
+    return sorted(nums)
+
+
+@router.get("/stream/{session_id}")
+def brd_generation_stream(
+    session_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Subscribe to per-section completion events for an in-flight or
+    just-finished BRD generation. The frontend opens this during the
+    GENERATING stage and consumes events until `brd_generated` or
+    `generation_failed` arrives (or the hard timeout fires).
+
+    Reuses _ensure_session_owned for auth so a user can't subscribe to
+    another user's generation by guessing the session_id.
+    """
+    user_id = current_user["id"]
+    session = _ensure_session_owned(session_id, user_id)
+
+    brd_id = session.get("brd_id")
+
+    import asyncio
+    import time
+
+    async def event_gen():
+        nonlocal brd_id
+
+        deadline = time.time() + BRD_STREAM_HARD_TIMEOUT_S
+        seen: set = set()
+
+        # If the session doesn't have a brd_id yet, wait briefly for the
+        # orchestrator to mint and persist one. The orchestrator's
+        # _start_generation invokes the worker BEFORE the FastAPI router
+        # has a chance to bump the session row, so a slim warm-up loop
+        # avoids racing.
+        while not brd_id and time.time() < deadline:
+            await asyncio.sleep(BRD_STREAM_POLL_INTERVAL_S)
+            refreshed = get_brd_session(session_id)
+            brd_id = (refreshed or {}).get("brd_id")
+
+        if not brd_id:
+            yield _stream_sse(
+                "generation_failed",
+                error_message="No brd_id found on session — generation did not start.",
+            )
+            return
+
+        # Acknowledge we're now listening on this brd_id so the frontend
+        # can confirm the SSE channel is alive.
+        yield _stream_sse("subscribed", brd_id=brd_id)
+
+        # Poll loop: surface every new partial as it appears, plus the
+        # terminal status when it lands. Stops on terminal or timeout.
+        while time.time() < deadline:
+            # 1. Surface new section partials.
+            completed = _list_completed_section_numbers(brd_id)
+            for n in completed:
+                if n in seen:
+                    continue
+                seen.add(n)
+                partial = _read_s3_json(f"brds/{brd_id}/sections/{n}.partial.json") or {}
+                row_count = _count_rows(partial.get("content") or [])
+                yield _stream_sse(
+                    "section_complete",
+                    section_number=n,
+                    title=partial.get("title"),
+                    status=partial.get("status", "llm_generated"),
+                    row_count=row_count,
+                )
+
+            # 2. Check terminal status.
+            status_doc = _read_s3_json(f"brds/{brd_id}/_generation_status.json")
+            if status_doc:
+                terminal = status_doc.get("status")
+                if terminal == "complete":
+                    # Promote stage to DRAFTED + persist brd_id on the row.
+                    try:
+                        update_brd_session_on_completion(
+                            session_id=session_id,
+                            brd_id=brd_id,
+                            sections_complete=len(status_doc.get("sections_complete") or []),
+                        )
+                    except Exception as e:
+                        logger.warning(f"[BRD stream] update_brd_session_on_completion failed: {e}")
+                    yield _stream_sse(
+                        "brd_generated",
+                        brd_id=brd_id,
+                        section_count=len(status_doc.get("sections_complete") or []),
+                        total_duration_s=None,  # populated when the structure write completes
+                    )
+                    return
+                if terminal == "partial":
+                    yield _stream_sse(
+                        "brd_generated",
+                        brd_id=brd_id,
+                        section_count=len(status_doc.get("sections_complete") or []),
+                        partial=True,
+                        missing_sections=status_doc.get("missing_sections") or [],
+                    )
+                    return
+                if terminal == "failed":
+                    yield _stream_sse(
+                        "generation_failed",
+                        brd_id=brd_id,
+                        error_message=status_doc.get("error_message") or "unknown",
+                        missing_sections=status_doc.get("missing_sections") or [],
+                    )
+                    return
+
+            await asyncio.sleep(BRD_STREAM_POLL_INTERVAL_S)
+
+        # Hard timeout — frontend should fall back to polling
+        # /api/brd/{sid}/sections directly.
+        yield _stream_sse("timeout", brd_id=brd_id)
+
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+def _count_rows(content_blocks: List[Dict[str, Any]]) -> int:
+    """Best-effort row/item count for the SSE event payload. Used by the
+    frontend for "§7 — 12 requirements" style progress chips."""
+    for b in content_blocks:
+        if not isinstance(b, dict):
+            continue
+        if b.get("type") == "table":
+            return len(b.get("rows") or [])
+        if b.get("type") in ("bullet_list", "ordered_list"):
+            return len(b.get("items") or [])
+    # Prose section — return the paragraph count.
+    return sum(1 for b in content_blocks if isinstance(b, dict) and b.get("type") == "paragraph")

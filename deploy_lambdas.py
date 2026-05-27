@@ -60,11 +60,23 @@ LAMBDAS = {
         "needs_prompts": True,
         "extra_shared_files": ["db_helper.py"],
         "extra_shared_dir_files": {"services": ["brd_orchestrator_utils.py"]},
+        # db_helper top-imports psycopg2; without this the orchestrator
+        # crashes the moment it tries to verify session ownership.
+        # psycopg2-binary ships manylinux2014_x86_64 wheels so it
+        # cross-compiles into the Lambda zip from any host OS.
+        "extra_pip_packages": ["psycopg2-binary"],
     },
     "brd-from-history": {
         "function_name": "sdlc-dev-brd-from-history",
         "handler_file": "lambda_brd_from_history.py",
         "needs_prompts": True,
+        # Phase 6: the parallel history-path lazy-imports a few helpers
+        # from lambda_brd_generator (_prime_cache, _estimate_cost_usd,
+        # _validate_section_against_format). Bundle it so the import
+        # resolves at runtime. Lambda only uses the .lambda_handler from
+        # lambda_brd_from_history.py — the additional module is library
+        # code only.
+        "extra_shared_files": ["lambda_brd_generator.py"],
     },
     "brd-generator": {
         "function_name": "sdlc-dev-brd-generator",
@@ -166,11 +178,15 @@ def build_lambda(name: str, config: dict) -> str:
             shutil.copytree(prompts_src, prompts_dest, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
             print(f"  + prompts/")
 
-    # 5. Install pip packages (target Linux x86_64 for Lambda runtime)
-    print(f"  Installing pip packages: {PIP_PACKAGES} (linux x86_64)")
+    # 5. Install pip packages (target Linux x86_64 for Lambda runtime).
+    #    Per-lambda extras (e.g. psycopg2-binary for the orchestrator)
+    #    are merged with the global set so only Lambdas that need a
+    #    package pay its zip-size cost.
+    pkgs = PIP_PACKAGES + list(config.get("extra_pip_packages", []))
+    print(f"  Installing pip packages: {pkgs} (linux x86_64)")
     subprocess.run(
         [
-            sys.executable, "-m", "pip", "install", *PIP_PACKAGES,
+            sys.executable, "-m", "pip", "install", *pkgs,
             "-t", pkg_dir,
             "--quiet", "--upgrade",
             "--platform", "manylinux2014_x86_64",

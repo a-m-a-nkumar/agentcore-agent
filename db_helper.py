@@ -958,6 +958,54 @@ def update_session(
         release_db_connection(conn)
 
 
+def update_brd_session_on_completion(
+    session_id: str,
+    brd_id: str,
+    sections_complete: int,
+) -> None:
+    """Phase 6 — called by the SSE endpoint (or final-assembly step)
+    after a parallel BRD generation completes successfully.
+
+    Sets `brd_id` on the row (if not already), promotes stage to
+    DRAFTED if it was GENERATING, and updates `last_updated`. Used to
+    close the loop: generation Lambda finishes -> SSE endpoint observes
+    `_generation_status.json::status=complete` -> calls this -> session
+    advances to DRAFTED so the frontend can render the document.
+
+    `sections_complete` is informational only — we don't persist it on
+    the row (the count is derivable from brd_structure.json) but the
+    parameter exists so callers can pass it for logging.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE analyst_sessions
+                   SET brd_id       = %s,
+                       stage        = CASE WHEN stage = 'GENERATING'
+                                           THEN 'DRAFTED'
+                                           ELSE stage
+                                      END,
+                       last_updated = CURRENT_TIMESTAMP
+                 WHERE id = %s
+                """,
+                (brd_id, session_id),
+            )
+            conn.commit()
+            logger.info(
+                f"[DB] update_brd_session_on_completion: session={session_id} "
+                f"brd_id={brd_id} sections_complete={sections_complete} "
+                f"(stage -> DRAFTED if was GENERATING)"
+            )
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error in update_brd_session_on_completion: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
 def increment_message_count(session_id: str) -> int:
     """Increment message count for a session"""
     conn = get_db_connection()

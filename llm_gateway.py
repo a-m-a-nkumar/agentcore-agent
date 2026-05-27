@@ -2,7 +2,7 @@ import logging
 import os
 import threading
 import time
-from typing import Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from openai import OpenAI
 
@@ -95,15 +95,29 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
 
 
 def chat_completion(
-    messages: List[Dict[str, str]],
+    messages: List[Dict[str, Any]],
     model: Optional[str] = None,
     temperature: float = 0.9,
     max_tokens: Optional[int] = None,
-    system_prompt: Optional[str] = None,
+    system_prompt: Optional[Union[str, List[Dict[str, Any]]]] = None,
     return_metadata: bool = False,
     user_id: Optional[str] = None,
     token_source: Optional[str] = None,
 ) -> Union[str, Dict]:
+    """Call the Deluxe gateway.
+
+    `system_prompt` accepts two shapes:
+      - A string (legacy): wrapped as `{"role": "system", "content": <str>}`.
+      - A list of content blocks (new — for Anthropic prompt caching):
+        e.g. `[{"type": "text", "text": "...", "cache_control": {"type":
+        "ephemeral"}}]`. Each block is passed through to the model
+        unchanged. The DLX gateway's pass-through preserves cache_control
+        (verified Step 0 of Phase 6 — see .scratch/gateway_cache_passthrough_test.py).
+
+    When `return_metadata=True`, the returned dict includes `usage` with
+    `cache_creation_input_tokens` / `cache_read_input_tokens` when present
+    so callers can verify caching is working.
+    """
     client = _get_client()
     resolved = model or os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
     # Bedrock model IDs (e.g. "global.anthropic.claude-…") aren't valid on the
@@ -112,7 +126,13 @@ def chat_completion(
         resolved = os.getenv("DLXAI_CHAT_MODEL", DEFAULT_CHAT_MODEL)
 
     if system_prompt:
-        messages = [{"role": "system", "content": system_prompt}] + list(messages)
+        # List form: pass content blocks as-is so `cache_control` survives.
+        # String form: legacy wrapper.
+        if isinstance(system_prompt, list):
+            sys_msg: Dict[str, Any] = {"role": "system", "content": system_prompt}
+        else:
+            sys_msg = {"role": "system", "content": system_prompt}
+        messages = [sys_msg] + list(messages)
 
     params = {
         "model": resolved,
@@ -127,14 +147,31 @@ def chat_completion(
     response = client.chat.completions.create(**params)
     elapsed = time.time() - start
 
+    usage_dict: Dict[str, Any] = {}
     usage = getattr(response, "usage", None)
     if usage:
-        total = getattr(usage, "total_tokens", 0) or 0
+        # openai-python v1 usage is a pydantic model; dump to dict so we
+        # can capture cache_creation_input_tokens / cache_read_input_tokens
+        # (returned by Anthropic-compat gateways) alongside the standard
+        # prompt/completion counts.
+        try:
+            usage_dict = usage.model_dump()
+        except AttributeError:
+            usage_dict = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", None),
+                "completion_tokens": getattr(usage, "completion_tokens", None),
+                "total_tokens": getattr(usage, "total_tokens", None),
+            }
+        total = usage_dict.get("total_tokens") or 0
+        cache_w = usage_dict.get("cache_creation_input_tokens") or 0
+        cache_r = usage_dict.get("cache_read_input_tokens") or 0
+        cache_suffix = f" cache_write={cache_w} cache_read={cache_r}" if (cache_w or cache_r) else ""
         logger.info(
             f"[LLM Gateway] {elapsed:.1f}s model={resolved} user={user_id or 'unknown'} "
             f"source={token_source or '?'} "
-            f"tokens prompt={getattr(usage, 'prompt_tokens', '?')} "
-            f"completion={getattr(usage, 'completion_tokens', '?')} total={total}"
+            f"tokens prompt={usage_dict.get('prompt_tokens', '?')} "
+            f"completion={usage_dict.get('completion_tokens', '?')} total={total}"
+            f"{cache_suffix}"
         )
         _record_tokens_async(user_id, total, source=token_source)
     else:
@@ -149,6 +186,7 @@ def chat_completion(
         return {
             "content": content,
             "finish_reason": getattr(response.choices[0], "finish_reason", None),
+            "usage": usage_dict,
         }
     return content
 
