@@ -5,6 +5,7 @@ All calls to app.harness.io are made server-side.
 """
 
 import logging
+import os
 import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -17,7 +18,17 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/harness", tags=["harness"])
 
-HARNESS_BASE = "https://app.harness.io"
+# Harness Cloud base URL — overridable via env so:
+#   1) self-hosted Harness deployments can point at their own host
+#   2) dev/test environments behind a corporate proxy that brokers SaaS
+#      access can route through a different hostname
+HARNESS_BASE = os.getenv("HARNESS_BASE_URL", "https://app.harness.io").rstrip("/")
+
+# Connect + read timeout for outbound calls to Harness. Corporate networks
+# can be slow on the first TLS handshake (cold connection through an
+# intercepting proxy); the previous 15s was tight. Override via
+# HARNESS_HTTP_TIMEOUT_SECS if the dev tunnel is genuinely slow.
+HARNESS_HTTP_TIMEOUT = float(os.getenv("HARNESS_HTTP_TIMEOUT_SECS", "30"))
 
 
 # ─── Auth dependency ──────────────────────────────────────────────────────────
@@ -60,20 +71,85 @@ def _parse_harness_error(text: str) -> str:
         return text
 
 
+def _connect_timeout_detail() -> str:
+    """Human-readable message for the most common Harness-call failure:
+    the dev backend can't reach app.harness.io because the workstation
+    isn't on the corporate network / VPN, or an egress firewall is
+    blocking the destination. Returning a 502 with this message is
+    massively more useful than a generic 500 stack trace."""
+    return (
+        f"Could not reach Harness at {HARNESS_BASE} within "
+        f"{HARNESS_HTTP_TIMEOUT:.0f}s after 3 attempts. If you're running "
+        "the backend locally, check that this machine can reach "
+        "app.harness.io (corporate VPN may be required). Override the host "
+        "via HARNESS_BASE_URL or extend the timeout via HARNESS_HTTP_TIMEOUT_SECS."
+    )
+
+
+# Retryable transient errors. Distinct from upstream-4xx/5xx responses
+# which we surface immediately — those mean Harness answered, just with
+# an error, and we don't want to retry e.g. a 401.
+_RETRYABLE_HTTPX_EXCEPTIONS = (
+    httpx.ConnectTimeout,
+    httpx.ReadTimeout,
+    httpx.ConnectError,
+    httpx.RemoteProtocolError,
+)
+
+
+async def _request_with_retry(
+    method: str,
+    url: str,
+    api_key: str,
+    *,
+    body: Optional[dict] = None,
+    max_attempts: int = 3,
+):
+    """Run a Harness HTTP request with up to N attempts on transient
+    network errors. The connection pool gets exhausted intermittently
+    when the dashboard fires 4+ parallel /pipelines + /executions calls
+    on mount; the first batch succeeds, the second batch times out.
+    A short retry with backoff almost always recovers."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            async with httpx.AsyncClient(timeout=HARNESS_HTTP_TIMEOUT) as client:
+                if method == "GET":
+                    return await client.get(url, headers=harness_headers(api_key))
+                return await client.post(url, headers=harness_headers(api_key), json=body or {})
+        except _RETRYABLE_HTTPX_EXCEPTIONS as e:
+            last_exc = e
+            if attempt < max_attempts:
+                logger.warning(
+                    f"[Harness] transient network error on {method} {url} "
+                    f"(attempt {attempt}/{max_attempts}): {type(e).__name__}: {e}. Retrying."
+                )
+                # Exponential-ish backoff: 0.4s, 0.9s — keep total < 1.5s
+                # so the user doesn't see a long stall on top of the
+                # already-slow Harness call.
+                import asyncio
+                await asyncio.sleep(0.4 * attempt + 0.1)
+                continue
+            logger.warning(
+                f"[Harness] network error on {method} {url} after {max_attempts} attempts: {e}"
+            )
+            raise HTTPException(status_code=502, detail=_connect_timeout_detail()) from e
+    # Unreachable, but mypy-quiet.
+    raise last_exc if last_exc else RuntimeError("retry loop exited unexpectedly")
+
+
 async def harness_get(api_key: str, url: str) -> dict:
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.get(url, headers=harness_headers(api_key))
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=_parse_harness_error(resp.text))
-        return resp.json()
+    resp = await _request_with_retry("GET", url, api_key)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=_parse_harness_error(resp.text))
+    return resp.json()
 
 
 async def harness_post(api_key: str, url: str, body: dict) -> dict:
-    async with httpx.AsyncClient(timeout=15) as client:
-        resp = await client.post(url, headers=harness_headers(api_key), json=body)
-        if resp.status_code != 200:
-            raise HTTPException(status_code=resp.status_code, detail=_parse_harness_error(resp.text))
-        return resp.json()
+    resp = await _request_with_retry("POST", url, api_key, body=body)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=resp.status_code, detail=_parse_harness_error(resp.text))
+    return resp.json()
 
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────

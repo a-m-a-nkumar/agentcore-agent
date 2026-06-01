@@ -433,6 +433,39 @@ def get_harness_status(current_user: dict = Depends(get_current_user)):
     }
 
 
+@router.get("/harness/credentials")
+def get_harness_credentials_for_owner(current_user: dict = Depends(get_current_user)):
+    """Return the FULL Harness credentials (including decrypted PAT) for the
+    authenticated owner.
+
+    The Harness page calls this when its in-browser sessionStorage cache is
+    empty but `/harness/status` reports `linked=true` — e.g. the user
+    connected on one machine and then opened the app on another, or just
+    closed the tab. Without this endpoint, the page can't make Harness API
+    calls and the user is forced to re-enter their PAT from My Profile
+    even though it's already stored server-side.
+
+    Security:
+      • Caller is authenticated via the same JWT pipeline as every other
+        endpoint, so we only ever hand the PAT back to its owner.
+      • Kept as a separate route from /status so the default page-load
+        traffic doesn't ferry the secret across the wire — only the
+        Harness page on first mount fetches it.
+    """
+    creds = get_user_harness_credentials(current_user["id"])
+    if not creds or not creds.get("harness_pat"):
+        raise HTTPException(
+            status_code=404,
+            detail="No Harness credentials on file. Connect Harness in Profile first.",
+        )
+    return {
+        "pat": creds["harness_pat"],
+        "account_id": creds.get("harness_account_id"),
+        "org_id": creds.get("harness_org_id"),
+        "project_id": creds.get("harness_project_id"),
+    }
+
+
 @router.delete("/harness/unlink")
 def unlink_harness_account(current_user: dict = Depends(get_current_user)):
     """Drop the user's stored Harness credentials. Idempotent."""
