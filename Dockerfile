@@ -4,10 +4,51 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt .
+COPY requirements.txt requirements-terraform.txt ./
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir -r requirements.txt
+
+# ─── Checkov (IaC security scanning) ──────────────────────────────────────
+# checkov 3.2.526 hard-pins boto3==1.35.49, which conflicts with
+# bedrock-agentcore's boto3>=1.40.52 — installing it normally would either
+# fail with ResolutionImpossible or downgrade boto3 and break bedrock-agentcore.
+# We install checkov with --no-deps to keep our newer boto3 intact, then
+# explicitly layer in the transitive deps the Terraform Runner needs at
+# runtime. services/checkov_service.py only imports
+# `checkov.terraform.runner.Runner`, so this curated set is enough for the
+# scan path the /api/terraform/* endpoints use. checkov tolerates the newer
+# boto3 in practice — the pin is overly conservative.
+RUN pip install --no-cache-dir --no-deps -r requirements-terraform.txt \
+ && pip install --no-cache-dir \
+        bc-python-hcl2 \
+        bc-jsonpath-ng \
+        bc-detect-secrets \
+        networkx \
+        deep-merge \
+        dpath \
+        prettytable \
+        policyuniverse \
+        pycep-parser \
+        igraph \
+        update-checker \
+        configargparse \
+        termcolor \
+        text-unidecode \
+        junit-xml \
+        license-expression \
+        spdx-tools \
+        cyclonedx-python-lib \
+        packageurl-python \
+        dockerfile-parse \
+        docker \
+        GitPython \
+        arrow \
+        semantic-version \
+        tabulate \
+        jsonschema \
+        beautifulsoup4 \
+        charset-normalizer
 FROM public.ecr.aws/docker/library/python:3.12-slim AS runtime
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
