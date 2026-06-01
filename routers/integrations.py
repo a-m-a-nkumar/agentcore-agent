@@ -26,7 +26,8 @@ from db_helper import (
     get_user_bitbucket_credentials,
     clear_user_bitbucket_credentials,
     create_or_update_user,
-    get_project
+    get_project,
+    get_design_session,
 )
 from services.jira_service import JiraService
 from services.confluence_service import ConfluenceService
@@ -180,6 +181,12 @@ class LinkAtlassianRequest(BaseModel):
 class UploadBRDToConfluenceRequest(BaseModel):
     brd_id: str = Field(..., description="BRD ID to upload")
     project_id: str = Field(..., description="Project ID")
+    page_title: Optional[str] = Field(None, description="Custom page title (optional)")
+
+
+class UploadSADToConfluenceRequest(BaseModel):
+    session_id: str = Field(..., description="Design session ID whose SAD will be uploaded")
+    project_id: str = Field(..., description="Project ID (provides the Confluence space key)")
     page_title: Optional[str] = Field(None, description="Custom page title (optional)")
 
 
@@ -620,12 +627,38 @@ def list_confluence_spaces(
 @router.get("/confluence/pages")
 def list_confluence_pages(
     space_key: str = "SO",
-    limit: int = 500,
     current_user: dict = Depends(get_current_user),
 ):
     """
-    List pages in a Confluence space using the current user's linked Atlassian credentials.
-    Paginates through all results (Confluence Cloud may return max 25 per request).
+    Exhaustively fetch every page AND every folder in a Confluence space,
+    preserving the folder hierarchy as it exists in Confluence's UI.
+
+    Replaces the legacy v1 path which:
+      - capped at 200 pages server-side (so spaces with >200 pages silently
+        truncated to the first 200 in oldest-first order — newly-created
+        pages didn't show up)
+      - missed pages nested inside Confluence Folders (a 2024 content type
+        the v1 /rest/api/content endpoint doesn't enumerate)
+      - returned a flat list with no folder grouping
+
+    Returns:
+        {
+            "tree":     [<top-level nodes>],   # nested children inline
+            "results":  [<every page, flat>],  # kept for old callers
+            "stats": {
+                "pages": N, "folders": M, "top_level": K, "max_depth": D,
+                "orphaned": O, "list_calls": H
+            }
+        }
+
+    Each node carries `type` ("page"|"folder"), `id`, `title`, `parentId`,
+    `parentType`, `_links.webui`, and `children` (the items nested under it,
+    sorted alphabetically). Pages inside folders appear as children of
+    those folders; pages at the space root appear at the top of the tree.
+
+    Per-batch progress + final totals are logged at INFO level
+    (see [get_space_tree] prefix in the service logs) so we can confirm
+    everything was fetched.
     """
     credentials = get_user_atlassian_credentials(current_user["id"])
     if not credentials or not credentials.get("atlassian_api_token"):
@@ -639,8 +672,20 @@ def list_confluence_pages(
             credentials["atlassian_email"],
             credentials["atlassian_api_token"],
         )
-        results = confluence_service.get_content_pages(space_key=space_key, limit=limit)
-        return {"results": results}
+        bundle = confluence_service.get_space_tree(space_key=space_key)
+        logger.info(
+            f"[/confluence/pages] space={space_key} returned "
+            f"pages={bundle['stats']['pages']} folders={bundle['stats']['folders']} "
+            f"top_level={bundle['stats']['top_level']} "
+            f"max_depth={bundle['stats']['max_depth']} "
+            f"orphaned={bundle['stats']['orphaned']} "
+            f"http_calls={bundle['stats']['list_calls']}"
+        )
+        return {
+            "tree":    bundle["tree"],
+            "results": bundle["flat"],
+            "stats":   bundle["stats"],
+        }
     except Exception as e:
         logger.error(f"Error fetching Confluence pages: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -937,6 +982,190 @@ def upload_brd_to_confluence(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to create Confluence page: {str(e)}"
+        )
+
+
+@router.post("/confluence/upload-sad")
+def upload_sad_to_confluence(
+    request: UploadSADToConfluenceRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Push a generated SAD (Software Architecture Document) to Confluence.
+
+    Mirrors /confluence/upload-brd: reads the SAD JSON the SAD-orchestrator
+    Lambda persisted to S3, converts each section's content blocks to
+    Confluence storage XHTML, creates the page in the project's linked space,
+    and uploads each diagram block's PNG/SVG as a page attachment so the
+    inline `<ac:image>` references resolve.
+    """
+    logger.info(
+        f"Uploading SAD for session {request.session_id} to Confluence (project={request.project_id})"
+    )
+
+    # 1. Ownership — the session must belong to the caller.
+    session = get_design_session(request.session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Design session not found")
+    if session.get("user_id") != current_user["id"]:
+        raise HTTPException(status_code=403, detail="You don't have access to this session")
+
+    # 2. Atlassian credentials.
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first.",
+        )
+
+    # 3. Project + Confluence space key.
+    project = get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    confluence_space_key = project.get("confluence_space_key")
+    if not confluence_space_key:
+        raise HTTPException(
+            status_code=400,
+            detail="No Confluence space linked to this project. Please link a Confluence space in project settings.",
+        )
+
+    # 4. Read SAD JSON from S3.
+    s3_client = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+    from environment import S3_BUCKET_NAME
+    sad_key = f"sessions/{request.session_id}/sad/sad_structure.json"
+    try:
+        sad_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=sad_key)
+        sad_data = json.loads(sad_obj["Body"].read().decode("utf-8"))
+    except Exception as e:
+        logger.error(f"Failed to read SAD from s3://{S3_BUCKET_NAME}/{sad_key}: {e}")
+        raise HTTPException(
+            status_code=404,
+            detail="SAD has not been generated for this session. Generate the SAD before pushing to Confluence.",
+        )
+
+    # 5. Collect diagram blocks and pre-fetch their bytes from S3. SVGs are
+    # rasterised to PNG (Confluence renders inline PNG/JPEG reliably; SVG via
+    # attachment is unreliable). Each unique s3_key maps to one attachment.
+    try:
+        import cairosvg  # type: ignore
+    except Exception:
+        cairosvg = None
+
+    diagrams: Dict[str, Dict] = {}  # s3_key -> {filename, bytes, content_type}
+    for section in sad_data.get("sections", []) or []:
+        for block in section.get("content", []) or []:
+            if block.get("type") != "diagram":
+                continue
+            s3_key = block.get("s3_key") or ""
+            if not s3_key or s3_key in diagrams:
+                continue
+            try:
+                body = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)["Body"].read()
+            except Exception as e:
+                logger.warning(f"SAD push: could not fetch diagram {s3_key}: {e}")
+                continue
+            lower = s3_key.lower()
+            if lower.endswith(".svg"):
+                if not cairosvg:
+                    logger.warning(
+                        f"SAD push: cairosvg unavailable; skipping SVG diagram {s3_key}"
+                    )
+                    continue
+                try:
+                    import io as _io
+                    png_buf = _io.BytesIO()
+                    cairosvg.svg2png(bytestring=body, write_to=png_buf, output_width=1200)
+                    body = png_buf.getvalue()
+                    content_type = "image/png"
+                    filename_ext = ".png"
+                except Exception as e:
+                    logger.warning(f"SAD push: SVG->PNG conversion failed for {s3_key}: {e}")
+                    continue
+            elif lower.endswith(".png"):
+                content_type = "image/png"
+                filename_ext = ".png"
+            elif lower.endswith((".jpg", ".jpeg")):
+                content_type = "image/jpeg"
+                filename_ext = ".jpg"
+            else:
+                logger.warning(f"SAD push: unsupported diagram extension for {s3_key}; skipping")
+                continue
+
+            base = os.path.basename(s3_key).rsplit(".", 1)[0] or "diagram"
+            safe_base = re.sub(r"[^A-Za-z0-9._-]+", "_", base)
+            filename = f"{safe_base}{filename_ext}"
+            diagrams[s3_key] = {
+                "filename": filename,
+                "bytes": body,
+                "content_type": content_type,
+            }
+
+    # 6. Build Confluence storage XHTML referencing the attachment filenames.
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        diagram_filenames = {k: v["filename"] for k, v in diagrams.items()}
+        confluence_content = confluence_service.convert_sad_to_confluence_storage(
+            sad_data, diagram_filenames=diagram_filenames
+        )
+
+        if request.page_title:
+            page_title = request.page_title
+        else:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+            session_name = session.get("name") or "Untitled"
+            page_title = f"SAD - {project.get('project_name', 'Untitled')} - {session_name} - {timestamp}"
+
+        logger.info(
+            f"Creating Confluence page: '{page_title}' in space '{confluence_space_key}' "
+            f"({len(sad_data.get('sections', []))} sections, {len(diagrams)} diagrams)"
+        )
+
+        page_result = confluence_service.create_page(
+            space_key=confluence_space_key,
+            title=page_title,
+            content=confluence_content,
+        )
+        page_id = page_result["id"]
+
+        # 7. Upload diagrams as page attachments. Best-effort per attachment —
+        # one failure shouldn't tear down the whole push; the page already
+        # exists with placeholder rendering at worst.
+        for s3_key, info in diagrams.items():
+            try:
+                confluence_service.create_attachment(
+                    page_id=page_id,
+                    filename=info["filename"],
+                    file_bytes=info["bytes"],
+                    content_type=info["content_type"],
+                )
+            except Exception as e:
+                logger.warning(
+                    f"SAD push: attachment upload failed for {info['filename']} on page {page_id}: {e}"
+                )
+
+        logger.info(f"Successfully created Confluence page: {page_result['web_url']}")
+
+        return {
+            "status": "success",
+            "message": "SAD uploaded to Confluence successfully",
+            "confluence_page": {
+                "id": page_result["id"],
+                "title": page_result["title"],
+                "web_url": page_result["web_url"],
+                "space_key": confluence_space_key,
+            },
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error creating Confluence page for SAD: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to create Confluence page: {str(e)}",
         )
 
 

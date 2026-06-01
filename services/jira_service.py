@@ -144,8 +144,16 @@ class JiraService:
     
     def get_project_issues(self, project_key: str) -> List[Dict]:
         """
-        Fetch ALL issues from a specific Jira project using pagination.
-        Results are ordered by created date descending (newest first).
+        Fetch ALL issues from a specific Jira project using cursor pagination.
+        Results are ordered by updated date descending (most recently active first).
+
+        Atlassian replaced /rest/api/3/search with /rest/api/3/search/jql in 2024.
+        The new endpoint uses cursor-based pagination via `nextPageToken` and
+        signals completion with `isLast: true`. It does NOT return a `total`
+        field by default, so the old startAt/total loop terminated after a
+        single page and silently capped results at ~100 issues — that's why
+        the Status / Type dropdowns in the Jira module were only showing the
+        statuses/types that happened to fall in the first 100 results.
 
         Args:
             project_key: The Jira project key (e.g., 'PROJ')
@@ -153,7 +161,6 @@ class JiraService:
         Returns:
             List of all issues with all fields needed by the frontend
         """
-        # Include all fields that the frontend expects
         fields = [
             "summary",
             "description",
@@ -165,30 +172,45 @@ class JiraService:
             "created",
             "updated",
             "labels",
-            "customfield_10016",  # Story points (common field ID)
-            "parent",  # Parent epic for stories
+            "customfield_10016",  # Story points
+            "customfield_10014",  # Epic Link — classic / company-managed projects
+                                   # use this to point stories at their epic;
+                                   # newer team-managed projects unify under
+                                   # `parent` but customfield_10014 is still
+                                   # populated on the legacy ones. Fetching
+                                   # both ensures the frontend can resolve
+                                   # the hierarchy on either project style.
+            "parent",
         ]
 
-        jql = f"project = {project_key} ORDER BY created DESC"
+        jql = f"project = {project_key} ORDER BY updated DESC"
         url = f"{self.base_url}/rest/api/3/search/jql"
-        page_size = 100  # Max allowed per request by Jira API
-        start_at = 0
-        all_issues = []
+        page_size = 100
+        next_page_token: Optional[str] = None
+        all_issues: List[Dict] = []
+        batch_num = 0
 
-        logger.info(f"Fetching all Jira issues from: {url} with JQL: {jql}")
+        logger.info(f"[Jira] Fetching ALL issues from {url} with JQL: {jql}")
 
         try:
             while True:
-                params = {
+                batch_num += 1
+                params: Dict[str, str] = {
                     "jql": jql,
-                    "maxResults": page_size,
-                    "startAt": start_at,
-                    "fields": ",".join(fields)
+                    "maxResults": str(page_size),
+                    "fields": ",".join(fields),
                 }
+                if next_page_token:
+                    params["nextPageToken"] = next_page_token
 
-                response = requests.get(url, headers=self.headers, auth=self.auth, params=params, timeout=30)
+                response = self._session.get(
+                    url,
+                    headers=self.headers,
+                    auth=self.auth,
+                    params=params,
+                    timeout=30,
+                )
 
-                # Handle specific error codes
                 if response.status_code == 400:
                     try:
                         error_data = response.json()
@@ -206,36 +228,48 @@ class JiraService:
 
                 elif response.status_code == 410:
                     logger.error(f"Project {project_key} returned 410")
-                    try:
-                        error_body = response.text
-                        logger.error(f"Response body: {error_body}")
-                    except:
-                        pass
                     raise Exception(f"Project '{project_key}' may be archived, deleted, or inaccessible. Please verify in Jira.")
 
                 response.raise_for_status()
-
                 result = response.json()
-                issues = result.get('issues', [])
-                total = result.get('total', 0)
+                issues = result.get('issues', []) or []
                 all_issues.extend(issues)
 
-                logger.info(f"Fetched {len(all_issues)}/{total} issues from project {project_key}")
+                is_last = result.get('isLast')
+                next_page_token = result.get('nextPageToken')
 
-                # Check if we've fetched all issues
-                if len(all_issues) >= total or len(issues) == 0:
+                logger.info(
+                    f"[Jira] project={project_key} batch {batch_num}: {len(issues)} issues "
+                    f"(running total={len(all_issues)}, isLast={is_last}, "
+                    f"hasNextToken={bool(next_page_token)})"
+                )
+
+                # New cursor API: stop when isLast=true, no nextPageToken, or
+                # the batch came back empty. We rely on the token rather than
+                # `total` (which the new endpoint may omit).
+                if is_last is True or not next_page_token or len(issues) == 0:
                     break
 
-                start_at += page_size
+                # Defensive cap to avoid runaway loops on a misbehaving server
+                # (would mean Atlassian kept handing back tokens but no issues).
+                if batch_num >= 500:
+                    logger.warning(
+                        f"[Jira] project={project_key} reached batch cap (500). "
+                        f"Stopping pagination at {len(all_issues)} issues."
+                    )
+                    break
 
-            logger.info(f"Successfully fetched all {len(all_issues)} issues from project {project_key}")
+            logger.info(
+                f"[Jira] DONE — fetched all {len(all_issues)} issues from "
+                f"project {project_key} across {batch_num} batches"
+            )
             return all_issues
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"HTTP error fetching Jira issues: {e}")
             try:
                 logger.error(f"Response status: {response.status_code}, body: {response.text[:500]}")
-            except:
+            except Exception:
                 pass
             raise Exception(f"Failed to fetch Jira issues: {str(e)}")
         except requests.exceptions.RequestException as e:

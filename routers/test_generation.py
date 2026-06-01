@@ -19,7 +19,15 @@ from datetime import datetime
 from html import unescape
 
 from auth import verify_azure_token, require_module
-from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project, track_event
+from db_helper import (
+    get_user_atlassian_credentials,
+    create_or_update_user,
+    get_project,
+    track_event,
+    get_user_github_credentials,
+    get_user_bitbucket_credentials,
+)
+import requests as _requests_for_errors
 from services.confluence_service import ConfluenceService
 from services.github_service import GitHubService
 from services.bitbucket_service import BitbucketService
@@ -78,7 +86,11 @@ class FeatureFile(BaseModel):
 
 class PushToGitHubRequest(BaseModel):
     project_id: str
-    github_token: str = Field(..., description="GitHub PAT with repo scope")
+    # Inline token is now optional. When omitted, the endpoint pulls the
+    # KMS-encrypted GitHub PAT the user saved in their Profile. We keep the
+    # inline field for back-compat with callers that still send their own
+    # token; new flows leave it blank and rely on the stored credential.
+    github_token: Optional[str] = Field(None, description="GitHub PAT with repo scope (overrides stored credential)")
     repo_url: str = Field(..., description="GitHub repository URL or owner/repo")
     feature_files: List[FeatureFile]
     branch: str = "test/auto-generated"
@@ -88,8 +100,11 @@ class PushToGitHubRequest(BaseModel):
 
 class PushToBitbucketRequest(BaseModel):
     project_id: str
-    bitbucket_email: str = Field(..., description="Atlassian account email")
-    bitbucket_app_password: str = Field(..., description="Bitbucket App Password")
+    # Same back-compat shape as GitHub above — inline credentials override the
+    # stored ones, but if both are absent the endpoint falls back to whatever
+    # the user saved in Profile.
+    bitbucket_email: Optional[str] = Field(None, description="Atlassian account email (overrides stored credential)")
+    bitbucket_app_password: Optional[str] = Field(None, description="Bitbucket App Password (overrides stored credential)")
     repo_url: str = Field(..., description="Bitbucket repo URL or workspace/slug")
     feature_files: List[FeatureFile]
     branch: str = "test/auto-generated"
@@ -887,7 +902,20 @@ async def push_feature_files_to_github(
 ):
     """
     Push .feature files to a GitHub repository.
-    Creates a branch, commits the files, and optionally opens a PR.
+
+    Credential resolution:
+      1. `request.github_token` if present (back-compat — caller supplied inline).
+      2. Otherwise the KMS-encrypted PAT stored on the user's profile via
+         /api/integrations/github/link.
+
+    Error mapping (so the UI can render an actionable banner instead of a
+    generic "500"):
+      - 400 GITHUB_NOT_LINKED   — no inline token, no stored PAT
+      - 401 GITHUB_TOKEN_INVALID — token rejected by GitHub (expired/revoked/typo)
+      - 403 GITHUB_TOKEN_SCOPE   — token lacks the 'repo' scope
+      - 404 GITHUB_REPO_NOT_FOUND — repo URL doesn't resolve OR token can't see it
+      - 400 INVALID_REPO_URL     — malformed URL
+      - 500 GITHUB_UNEXPECTED    — anything else (logged with stack trace)
     """
     project = get_project(request.project_id)
     if not project:
@@ -896,12 +924,71 @@ async def push_feature_files_to_github(
     if not request.feature_files:
         raise HTTPException(status_code=400, detail="No feature files provided")
 
-    try:
-        github_service = GitHubService(request.github_token)
+    # Resolve token: explicit > stored > error.
+    github_token = request.github_token
+    if not github_token:
+        stored = get_user_github_credentials(current_user["id"])
+        if not stored:
+            logger.info(
+                f"[push-to-github] user={current_user['id']} has no stored GitHub PAT"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "GITHUB_NOT_LINKED",
+                    "message": "No GitHub credentials on file. Add a GitHub PAT in your Profile, then try again.",
+                },
+            )
+        github_token = stored["github_pat"]
+        logger.info(f"[push-to-github] using stored GitHub PAT for user={current_user['id']}")
 
-        # Validate token
-        user_info = github_service.test_connection()
-        logger.info(f"GitHub authenticated as: {user_info['login']}")
+    try:
+        github_service = GitHubService(github_token)
+
+        # Validate token before touching the repo. Cheap call against /user.
+        try:
+            user_info = github_service.test_connection()
+            logger.info(
+                f"[push-to-github] GitHub authenticated as: {user_info['login']} "
+                f"(repo={request.repo_url}, branch={request.branch})"
+            )
+        except _requests_for_errors.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 401:
+                logger.warning(f"[push-to-github] token rejected (401) for user={current_user['id']}")
+                raise HTTPException(
+                    status_code=401,
+                    detail={
+                        "code": "GITHUB_TOKEN_INVALID",
+                        "message": "GitHub rejected this token — it may be expired, revoked, or mistyped. Update it in Profile.",
+                    },
+                )
+            raise
+
+        # Confirm the repo exists AND this token can see it BEFORE we start
+        # branching/committing — otherwise we'd half-commit and confuse the user.
+        try:
+            owner, repo = github_service._parse_repo(request.repo_url)
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "INVALID_REPO_URL", "message": str(e)},
+            )
+        if not github_service._get_repo_info(owner, repo):
+            logger.warning(
+                f"[push-to-github] repo {owner}/{repo} not visible to user={current_user['id']} "
+                f"— either doesn't exist or token lacks access"
+            )
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "GITHUB_REPO_NOT_FOUND",
+                    "message": (
+                        f"Repository {owner}/{repo} not found, or your GitHub PAT can't see it. "
+                        "Check the URL, and that the PAT has the 'repo' scope on a token authorized for this org."
+                    ),
+                },
+            )
 
         result = github_service.push_feature_files(
             repo_url=request.repo_url,
@@ -919,11 +1006,48 @@ async def push_feature_files_to_github(
             "pr_url": result.get("pr_url"),
             "pr_number": result.get("pr_number"),
         }
+    except HTTPException:
+        raise
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail={"code": "INVALID_REQUEST", "message": str(e)})
+    except _requests_for_errors.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        body = e.response.text[:300] if e.response is not None else ""
+        logger.error(f"[push-to-github] HTTPError status={status} body={body}")
+        if status == 401:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "GITHUB_TOKEN_INVALID",
+                    "message": "GitHub rejected this token — it may be expired, revoked, or mistyped. Update it in Profile.",
+                },
+            )
+        if status == 403:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "GITHUB_TOKEN_SCOPE",
+                    "message": "GitHub PAT lacks required permission. Regenerate with the 'repo' scope (or grant the fine-grained PAT write access to this repo) and update it in Profile.",
+                },
+            )
+        if status == 404:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "GITHUB_REPO_NOT_FOUND",
+                    "message": f"GitHub couldn't find the resource (HTTP 404). Verify the repository URL and branch. Body: {body}",
+                },
+            )
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "GITHUB_UNEXPECTED", "message": f"GitHub responded {status}: {body}"},
+        )
     except Exception as e:
-        logger.error(f"Error pushing to GitHub: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to push to GitHub: {str(e)}")
+        logger.exception(f"[push-to-github] unexpected error for user={current_user['id']}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "GITHUB_UNEXPECTED", "message": f"Failed to push to GitHub: {str(e)}"},
+        )
 
 
 # ============================================
@@ -937,7 +1061,16 @@ async def push_feature_files_to_bitbucket(
 ):
     """
     Push .feature files to a Bitbucket Cloud repository.
-    Commits files to a branch via the src API and optionally opens a PR.
+
+    Credential resolution: same pattern as /push-to-github — inline > stored.
+
+    Error mapping:
+      - 400 BITBUCKET_NOT_LINKED   — no inline creds, no stored
+      - 401 BITBUCKET_TOKEN_INVALID — credentials rejected
+      - 403 BITBUCKET_TOKEN_SCOPE   — App Password lacks repository:write
+      - 404 BITBUCKET_REPO_NOT_FOUND — workspace/slug not visible
+      - 400 INVALID_REPO_URL        — malformed
+      - 500 BITBUCKET_UNEXPECTED    — anything else
     """
     project = get_project(request.project_id)
     if not project:
@@ -946,14 +1079,86 @@ async def push_feature_files_to_bitbucket(
     if not request.feature_files:
         raise HTTPException(status_code=400, detail="No feature files provided")
 
-    try:
-        workspace, repo_slug = BitbucketService.parse_repo_url(request.repo_url)
-        bb = BitbucketService(request.bitbucket_email, request.bitbucket_app_password)
+    # Resolve credentials: explicit > stored > error.
+    bb_email = request.bitbucket_email
+    bb_password = request.bitbucket_app_password
+    if not bb_email or not bb_password:
+        stored = get_user_bitbucket_credentials(current_user["id"])
+        if not stored:
+            logger.info(
+                f"[push-to-bitbucket] user={current_user['id']} has no stored Bitbucket credentials"
+            )
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "BITBUCKET_NOT_LINKED",
+                    "message": "No Bitbucket credentials on file. Add your Atlassian email + Bitbucket App Password in your Profile, then try again.",
+                },
+            )
+        bb_email = bb_email or stored["bitbucket_email"]
+        bb_password = bb_password or stored["bitbucket_app_password"]
+        logger.info(
+            f"[push-to-bitbucket] using stored Bitbucket credentials for user={current_user['id']}"
+        )
 
-        # Validate credentials first
+    try:
+        try:
+            workspace, repo_slug = BitbucketService.parse_repo_url(request.repo_url)
+        except (ValueError, Exception) as e:
+            raise HTTPException(
+                status_code=400,
+                detail={"code": "INVALID_REPO_URL", "message": str(e)},
+            )
+
+        bb = BitbucketService(bb_email, bb_password)
+
+        # Validate credentials BEFORE touching the repo.
         ok, err = bb.test_connection()
         if not ok:
-            raise HTTPException(status_code=401, detail=err or "Invalid Bitbucket credentials")
+            logger.warning(
+                f"[push-to-bitbucket] credentials rejected for user={current_user['id']}: {err}"
+            )
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "BITBUCKET_TOKEN_INVALID",
+                    "message": (
+                        "Bitbucket rejected these credentials — the email or App Password is wrong, "
+                        f"or the password was revoked. Update them in Profile. ({err or 'no detail'})"
+                    ),
+                },
+            )
+
+        # Confirm repo visibility BEFORE branching/committing.
+        repo_check = _requests_for_errors.get(
+            f"https://api.bitbucket.org/2.0/repositories/{workspace}/{repo_slug}",
+            auth=(bb_email, bb_password),
+            timeout=10,
+        )
+        if repo_check.status_code == 404:
+            logger.warning(
+                f"[push-to-bitbucket] repo {workspace}/{repo_slug} not visible to "
+                f"user={current_user['id']}"
+            )
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "BITBUCKET_REPO_NOT_FOUND",
+                    "message": (
+                        f"Repository {workspace}/{repo_slug} not found, or your Bitbucket App "
+                        "Password can't see it. Verify the URL and that the App Password has "
+                        "'Repositories: write' permission on this workspace."
+                    ),
+                },
+            )
+        if repo_check.status_code == 403:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "BITBUCKET_TOKEN_SCOPE",
+                    "message": "Bitbucket App Password lacks required permission. Regenerate with 'Repositories: write' (and 'Pull requests: write' if you want PRs) and update it in Profile.",
+                },
+            )
 
         result = bb.push_feature_files(
             workspace=workspace,
@@ -974,8 +1179,43 @@ async def push_feature_files_to_bitbucket(
         }
     except HTTPException:
         raise
+    except _requests_for_errors.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        body = e.response.text[:300] if e.response is not None else ""
+        logger.error(f"[push-to-bitbucket] HTTPError status={status} body={body}")
+        if status == 401:
+            raise HTTPException(
+                status_code=401,
+                detail={
+                    "code": "BITBUCKET_TOKEN_INVALID",
+                    "message": "Bitbucket rejected this App Password. Update it in Profile.",
+                },
+            )
+        if status == 403:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "BITBUCKET_TOKEN_SCOPE",
+                    "message": "Bitbucket App Password lacks 'Repositories: write' permission.",
+                },
+            )
+        if status == 404:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "BITBUCKET_REPO_NOT_FOUND",
+                    "message": f"Bitbucket returned 404. Verify the repository URL and branch. Body: {body}",
+                },
+            )
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "BITBUCKET_UNEXPECTED", "message": f"Bitbucket responded {status}: {body}"},
+        )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail={"code": "INVALID_REQUEST", "message": str(e)})
     except Exception as e:
-        logger.error(f"Error pushing to Bitbucket: {e}")
-        raise HTTPException(status_code=500, detail=f"Failed to push to Bitbucket: {str(e)}")
+        logger.exception(f"[push-to-bitbucket] unexpected error for user={current_user['id']}")
+        raise HTTPException(
+            status_code=500,
+            detail={"code": "BITBUCKET_UNEXPECTED", "message": f"Failed to push to Bitbucket: {str(e)}"},
+        )

@@ -245,6 +245,11 @@ class ConfluenceService:
 
         Cached per ConfluenceService instance so a sync makes at most ONE extra
         HTTP call per space, regardless of how many times get_space_pages is invoked.
+
+        Also caches the space's homepageId on `self._space_homepage_cache` so
+        callers that want to exclude the auto-generated space-overview page
+        (the one Confluence creates with macros like "Recently updated content"
+        + "Contributors") can do so without a second HTTP call.
         """
         if space_key in self._space_id_cache:
             return self._space_id_cache[space_key]
@@ -261,8 +266,16 @@ class ConfluenceService:
         if not results:
             raise Exception(f"Confluence v2 API: space key '{space_key}' not found or not accessible")
         space_id = results[0]["id"]
+        homepage_id = results[0].get("homepageId")
         self._space_id_cache[space_key] = space_id
-        logger.info(f"[v2] resolved space_key='{space_key}' -> space_id={space_id}")
+        # Lazily init the homepage cache the first time this method runs.
+        if not hasattr(self, "_space_homepage_cache"):
+            self._space_homepage_cache = {}
+        self._space_homepage_cache[space_key] = homepage_id
+        logger.info(
+            f"[v2] resolved space_key='{space_key}' -> space_id={space_id} "
+            f"homepageId={homepage_id}"
+        )
         return space_id
 
     def get_space_pages(
@@ -388,6 +401,243 @@ class ConfluenceService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Confluence pages (v2): {e}")
             raise Exception(f"Failed to fetch Confluence pages: {str(e)}")
+
+    def get_space_tree(self, space_key: str) -> Dict:
+        """Fetch every page AND every folder in a Confluence space and build a
+        tree that mirrors the live Confluence hierarchy.
+
+        Returns:
+            {
+                "tree":   [<top-level items>],   # nested children populated
+                "flat":   [<every page>],         # full list for search/index
+                "stats":  {
+                    "pages": int,
+                    "folders": int,
+                    "top_level": int,
+                    "max_depth": int,
+                    "orphaned": int,             # parent ID we never saw
+                    "list_calls": int,           # HTTP round-trips made
+                },
+            }
+
+        Every node is a dict shaped like:
+            {
+                "type":       "page" | "folder",
+                "id":         "<numeric id as str>",
+                "title":      "...",
+                "parentId":   "..." | None,
+                "parentType": "space" | "page" | "folder" | None,
+                "spaceId":    "...",
+                "version":    {"number": int, "when": iso8601 str | None},
+                "_links":     {"webui": "..."},
+                "children":   [<nested nodes in title order>],
+            }
+
+        Implementation notes:
+          - Uses v2 endpoints so folder-nested pages are included (v1 hides
+            them since Atlassian added Folders as a content type in 2024).
+          - Paginates exhaustively via _links.next cursor — NO 200-page cap,
+            NO max_results clamp. Every batch is fully drained.
+          - Pages come from /spaces/{id}/pages, folders from /folders?
+            space-id=... (v2's folder listing endpoint).
+          - Hierarchy is built in-memory once both lists are in hand. Items
+            whose parent isn't in the by_id dict are still surfaced under
+            "tree" at the top level AND counted in stats.orphaned so the
+            caller can see if the API returned an inconsistent view.
+          - Per-step logging gives the caller (and CloudWatch) proof that
+            every batch was drained.
+        """
+        space_id = self._resolve_space_id(space_key)
+        homepage_id = getattr(self, "_space_homepage_cache", {}).get(space_key)
+        list_calls = 0
+
+        # ── Step 1: fetch ALL pages ─────────────────────────────────────
+        # No body, metadata only — that lets us use the 250/batch limit so
+        # we drain large spaces in the fewest possible HTTP calls.
+        # We explicitly skip the space's homepage (the auto-generated
+        # space-overview page with "Recently updated content" + "Contributors"
+        # macros). It's not user-authored content; surfacing it just clutters
+        # the picker.
+        pages_by_id: Dict[str, Dict] = {}
+        homepage_dropped = False
+        next_url = f"{self.v2_base}/spaces/{space_id}/pages?limit=250"
+        batch_num = 0
+        while next_url:
+            batch_num += 1
+            list_calls += 1
+            resp = requests.get(
+                next_url,
+                headers={"Accept": "application/json"},
+                auth=self.auth, timeout=30,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            batch = payload.get("results", []) or []
+            for p in batch:
+                pid = p.get("id")
+                if not pid:
+                    continue
+                if homepage_id and str(pid) == str(homepage_id):
+                    homepage_dropped = True
+                    continue
+                pages_by_id[pid] = self._normalise_v2_item(p, item_type="page")
+            logger.info(
+                f"[get_space_tree] space={space_key} pages batch {batch_num}: "
+                f"{len(batch)} (running total={len(pages_by_id)})"
+            )
+            next_rel = (payload.get("_links") or {}).get("next")
+            next_url = (
+                f"https://{self.domain}{next_rel}"
+                if next_rel and next_rel.startswith("/") else next_rel
+            )
+        logger.info(
+            f"[get_space_tree] space={space_key} PAGES PHASE DONE — "
+            f"{len(pages_by_id)} pages across {batch_num} batches "
+            f"(homepage_excluded={homepage_dropped})"
+        )
+
+        # ── Step 2: fetch ALL folders ───────────────────────────────────
+        # Folders are a separate v2 content type. The endpoint is
+        # /api/v2/folders?space-id=<id>. Atlassian started exposing this in
+        # 2024; older Confluence tenants may 404 here — treat that as
+        # "no folders" rather than a hard error.
+        folders_by_id: Dict[str, Dict] = {}
+        next_url = f"{self.v2_base}/folders?space-id={space_id}&limit=250"
+        batch_num = 0
+        folders_unsupported = False
+        while next_url:
+            batch_num += 1
+            list_calls += 1
+            try:
+                resp = requests.get(
+                    next_url,
+                    headers={"Accept": "application/json"},
+                    auth=self.auth, timeout=30,
+                )
+                if resp.status_code == 404:
+                    folders_unsupported = True
+                    logger.info(
+                        f"[get_space_tree] space={space_key} folders endpoint 404 — "
+                        f"tenant doesn't support v2 folders; treating as 0 folders"
+                    )
+                    break
+                resp.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                logger.warning(
+                    f"[get_space_tree] space={space_key} folders fetch failed "
+                    f"(continuing with pages only): {e}"
+                )
+                break
+            payload = resp.json()
+            batch = payload.get("results", []) or []
+            for f in batch:
+                fid = f.get("id")
+                if not fid:
+                    continue
+                folders_by_id[fid] = self._normalise_v2_item(f, item_type="folder")
+            logger.info(
+                f"[get_space_tree] space={space_key} folders batch {batch_num}: "
+                f"{len(batch)} (running total={len(folders_by_id)})"
+            )
+            next_rel = (payload.get("_links") or {}).get("next")
+            next_url = (
+                f"https://{self.domain}{next_rel}"
+                if next_rel and next_rel.startswith("/") else next_rel
+            )
+        if not folders_unsupported:
+            logger.info(
+                f"[get_space_tree] space={space_key} FOLDERS PHASE DONE — "
+                f"{len(folders_by_id)} folders across {batch_num} batches"
+            )
+
+        # ── Step 3: build the tree ──────────────────────────────────────
+        # Walk all items, attach each as a child of its parent. Items whose
+        # parent isn't in the by_id dict (either parentType=space or a
+        # genuinely orphaned record) become top-level.
+        by_id: Dict[str, Dict] = {}
+        by_id.update(folders_by_id)
+        by_id.update(pages_by_id)
+
+        for item in by_id.values():
+            item["children"] = []
+
+        tree: List[Dict] = []
+        orphaned = 0
+        for item in by_id.values():
+            parent_id = item.get("parentId")
+            parent_type = item.get("parentType")
+            if parent_id and parent_id in by_id and parent_type in ("page", "folder"):
+                by_id[parent_id]["children"].append(item)
+            elif parent_type == "space" or not parent_id:
+                tree.append(item)
+            else:
+                # parentId references something we don't have (e.g., a
+                # restricted page the user can't read). Surface it at top
+                # level so it's not hidden, and count it for the caller.
+                tree.append(item)
+                orphaned += 1
+
+        # ── Step 4: sort each level by title (case-insensitive) ─────────
+        def _sort_level(nodes: List[Dict]) -> None:
+            nodes.sort(key=lambda n: (n.get("title") or "").lower())
+            for n in nodes:
+                if n.get("children"):
+                    _sort_level(n["children"])
+        _sort_level(tree)
+
+        # ── Step 5: compute depth for the stats line ────────────────────
+        def _max_depth(nodes: List[Dict], depth: int = 1) -> int:
+            if not nodes:
+                return depth - 1
+            return max(
+                (_max_depth(n.get("children") or [], depth + 1) for n in nodes),
+                default=depth,
+            )
+        max_depth = _max_depth(tree)
+
+        stats = {
+            "pages":     len(pages_by_id),
+            "folders":   len(folders_by_id),
+            "top_level": len(tree),
+            "max_depth": max_depth,
+            "orphaned":  orphaned,
+            "list_calls": list_calls,
+        }
+        logger.info(
+            f"[get_space_tree] space={space_key} TREE BUILT — "
+            f"pages={stats['pages']} folders={stats['folders']} "
+            f"top_level={stats['top_level']} max_depth={max_depth} "
+            f"orphaned={orphaned} http_calls={list_calls}"
+        )
+
+        return {
+            "tree":  tree,
+            "flat":  list(pages_by_id.values()),
+            "stats": stats,
+        }
+
+    def _normalise_v2_item(self, item: Dict, item_type: str) -> Dict:
+        """Shape a raw v2 page/folder dict into the common node shape used
+        by get_space_tree. Folders don't have version/body so version is
+        populated only for pages."""
+        version = item.get("version") or {}
+        links = item.get("_links") or {}
+        return {
+            "type":       item_type,
+            "id":         item.get("id"),
+            "title":      item.get("title") or "",
+            "parentId":   item.get("parentId"),
+            "parentType": item.get("parentType"),
+            "spaceId":    item.get("spaceId"),
+            "status":     item.get("status"),
+            "version": {
+                "number": version.get("number"),
+                "when":   version.get("createdAt"),
+            } if item_type == "page" else None,
+            "_links": {
+                "webui": links.get("webui", ""),
+            },
+        }
 
     def get_all_pages_in_space(self, space_key: str) -> List[Dict]:
         """Exhaustively fetch every page in a Confluence space, newest first.
@@ -651,6 +901,129 @@ class ConfluenceService:
         
         return "".join(html_parts)
     
+    def convert_sad_to_confluence_storage(
+        self,
+        sad_data: Dict,
+        diagram_filenames: Optional[Dict[str, str]] = None,
+    ) -> str:
+        """Convert SAD `sad_structure.json` into Confluence storage XHTML.
+
+        Shape of `sad_data` mirrors the section list rendered by routers/sad.py:
+        each section has `number`, `title`, and a `content` list of typed
+        blocks (paragraph, heading, ordered_list, bullet_list, table, diagram).
+
+        `diagram_filenames` maps a block's `s3_key` to the attachment filename
+        the caller will upload to the Confluence page (via `create_attachment`).
+        Diagram blocks whose s3_key is missing from the map are emitted as a
+        placeholder paragraph so the page never silently drops a section.
+        """
+        diagram_filenames = diagram_filenames or {}
+        out: List[str] = []
+
+        for section in sad_data.get("sections", []):
+            number = section.get("number")
+            title = html.escape(section.get("title", ""))
+            heading_text = f"{number}. {title}" if number is not None else title
+            out.append(f"<h2>{heading_text}</h2>")
+
+            for block in section.get("content", []) or []:
+                btype = block.get("type")
+
+                if btype == "paragraph":
+                    text = html.escape(block.get("text", "")).replace("\n", "<br/>")
+                    out.append(f"<p>{text}</p>")
+
+                elif btype == "heading":
+                    level = max(3, min(int(block.get("level", 3)), 6))
+                    text = html.escape(block.get("text", ""))
+                    out.append(f"<h{level}>{text}</h{level}>")
+
+                elif btype == "ordered_list":
+                    items = block.get("items", []) or []
+                    if items:
+                        out.append("<ol>")
+                        for it in items:
+                            out.append(f"<li>{html.escape(str(it))}</li>")
+                        out.append("</ol>")
+
+                elif btype == "bullet_list":
+                    items = block.get("items", []) or []
+                    if items:
+                        out.append("<ul>")
+                        for it in items:
+                            out.append(f"<li>{html.escape(str(it))}</li>")
+                        out.append("</ul>")
+
+                elif btype == "table":
+                    headers = block.get("headers", []) or []
+                    rows = block.get("rows", []) or []
+                    if headers or rows:
+                        out.append("<table><tbody>")
+                        if headers:
+                            out.append("<tr>")
+                            for h in headers:
+                                out.append(f"<th>{html.escape(str(h))}</th>")
+                            out.append("</tr>")
+                        col_count = len(headers) if headers else (len(rows[0]) if rows else 0)
+                        for row in rows:
+                            out.append("<tr>")
+                            for cell in (row[:col_count] if col_count else row):
+                                out.append(f"<td>{html.escape(str(cell))}</td>")
+                            out.append("</tr>")
+                        out.append("</tbody></table>")
+
+                elif btype == "diagram":
+                    s3_key = block.get("s3_key", "")
+                    filename = diagram_filenames.get(s3_key)
+                    if filename:
+                        alt = html.escape(block.get("alt", "Architecture diagram"))
+                        out.append(
+                            f'<ac:image ac:alt="{alt}"><ri:attachment ri:filename="{html.escape(filename)}"/></ac:image>'
+                        )
+                    else:
+                        out.append(
+                            "<p><em>[Diagram unavailable — re-export the SAD to refresh.]</em></p>"
+                        )
+
+        return "".join(out)
+
+    def create_attachment(
+        self,
+        page_id: str,
+        filename: str,
+        file_bytes: bytes,
+        content_type: str = "application/octet-stream",
+    ) -> Dict:
+        """Attach a file to an existing Confluence page.
+
+        Uses the v1 /rest/api/content/{id}/child/attachment endpoint with the
+        `X-Atlassian-Token: no-check` header Confluence requires for multipart
+        uploads. Returns the first result entry (Confluence returns a list).
+        """
+        url = f"{self.base_url}/rest/api/content/{page_id}/child/attachment"
+        files = {"file": (filename, file_bytes, content_type)}
+        headers = {
+            "Accept": "application/json",
+            "X-Atlassian-Token": "no-check",
+        }
+        try:
+            response = requests.post(
+                url, files=files, headers=headers, auth=self.auth, timeout=60
+            )
+            response.raise_for_status()
+            data = response.json()
+            results = data.get("results", [data]) if isinstance(data, dict) else data
+            attachment = results[0] if isinstance(results, list) and results else {}
+            logger.info(
+                f"Attached {filename} ({len(file_bytes)} bytes) to page {page_id}"
+            )
+            return attachment
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error attaching {filename} to page {page_id}: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                logger.error(f"Response: {e.response.text}")
+            raise Exception(f"Failed to attach file to Confluence page: {str(e)}")
+
     def create_page(
         self,
         space_key: str,
