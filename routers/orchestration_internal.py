@@ -6,12 +6,13 @@ expose distinct paths so the user-module activity tracker can attribute each
 call to its source MCP (prompt-enhancer vs pipeline-analyzer).
 """
 
+import os
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 from services.rag_service import rag_service
 from routers.internal_utils import validate_api_key
-from db_helper import get_project, track_event
+from db_helper import get_project, track_event, get_user_harness_credentials
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,10 @@ class EnhanceRequest(BaseModel):
     source_filter: Optional[str] = None
     frontend_requirements: Optional[str] = None
     backend_requirements: Optional[str] = None
+
+
+class HarnessConfigRequest(BaseModel):
+    project_id: Optional[str] = None
 
 
 # ============================================
@@ -171,3 +176,49 @@ async def pipeline_rag_internal(
         )
 
     return {"type": "rag_context", "results": results}
+
+
+@router.post("/harness-config-internal")
+async def harness_config_internal(
+    request: HarnessConfigRequest,
+    x_api_key: str = Header(alias="X-API-Key"),
+):
+    """
+    Resolve Harness credentials for a project's owner so the pipeline-analyzer
+    MCP doesn't need any HARNESS_* env vars in its config.
+
+    Auth: X-API-Key (INTERNAL_API_KEYS).
+    Body: {project_id} — falls back to the key-mapped project if omitted.
+    Returns the same shape harness_client.py expects:
+      {api_key, account_id, org_id, project_id, base_url}
+    """
+    key_project_id = validate_api_key(x_api_key)
+    project_id = request.project_id or key_project_id
+    if not project_id:
+        raise HTTPException(status_code=400, detail="project_id is required")
+
+    project = get_project(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+
+    user_id = project.get("user_id")
+    if not user_id:
+        raise HTTPException(status_code=500, detail="Project has no owner; cannot resolve Harness credentials.")
+
+    creds = get_user_harness_credentials(user_id)
+    if not creds or not creds.get("harness_pat"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Project owner has not linked a Harness account. "
+                "Owner must visit Settings → Harness on the SDLC frontend before using the pipeline-analyzer MCP."
+            ),
+        )
+
+    return {
+        "api_key":    creds["harness_pat"],
+        "account_id": creds.get("harness_account_id", "") or "",
+        "org_id":     creds.get("harness_org_id", "default") or "default",
+        "project_id": creds.get("harness_project_id", "") or "",
+        "base_url":   os.getenv("HARNESS_BASE_URL", "https://app.harness.io").rstrip("/"),
+    }

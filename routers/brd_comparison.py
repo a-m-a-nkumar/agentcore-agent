@@ -1,5 +1,5 @@
 """
-BRD ↔ Code Summary comparison router.
+BRD ↔ Code Documentation comparison router.
 
 Two-step flow:
   POST /api/brd-sync/compare  — fetch both pages, ask the LLM for structured
@@ -56,7 +56,7 @@ ChangeType = Literal["ADD", "MODIFY", "REMOVE"]
 
 class CompareRequest(BaseModel):
     project_id: str
-    code_summary_page_id: str = Field(..., description="Confluence page ID of the published code summary")
+    code_summary_page_id: str = Field(..., description="Confluence page ID of the published code documentation")
     brd_page_id: str = Field(..., description="Confluence page ID of the BRD to update")
 
 
@@ -107,9 +107,9 @@ def _strip_html(html: str) -> str:
 # ── Prompt builders ──────────────────────────────────────────────────────────
 
 def _build_compare_prompt(code_summary: str, brd: str, code_summary_title: str, brd_title: str) -> str:
-    return f"""You are an analyst reconciling a Business Requirements Document (BRD) with a Code Summary that describes the system as it actually exists today.
+    return f"""You are an analyst reconciling a Business Requirements Document (BRD) with a Code Documentation page that describes the system as it actually exists today.
 
-CODE SUMMARY (ground truth — what the code does now)
+CODE DOCUMENTATION (ground truth — what the code does now)
 TITLE: {code_summary_title}
 ---
 {code_summary}
@@ -121,10 +121,10 @@ TITLE: {brd_title}
 {brd}
 ---
 
-Task: produce a list of concrete suggestions that would bring the BRD into alignment with the code summary. Each suggestion must be one of:
-  - ADD     → information present in the code summary but missing from the BRD
-  - MODIFY  → information in the BRD that contradicts the code summary
-  - REMOVE  → information in the BRD that no longer applies according to the code summary
+Task: produce a list of concrete suggestions that would bring the BRD into alignment with the code documentation. Each suggestion must be one of:
+  - ADD     → information present in the code documentation but missing from the BRD
+  - MODIFY  → information in the BRD that contradicts the code documentation
+  - REMOVE  → information in the BRD that no longer applies according to the code documentation
 
 Rules:
 1. Be precise. Quote the BRD text you want to change verbatim in `current_text`.
@@ -132,7 +132,7 @@ Rules:
 3. For REMOVE suggestions, `proposed_text` is null.
 4. `section` is the human-readable BRD section path, e.g. "5. External Integrations" or "User Story 3.2".
 5. `reason` is one sentence explaining why this change reflects the code.
-6. Do NOT invent code behavior that isn't in the code summary.
+6. Do NOT invent code behavior that isn't in the code documentation.
 7. Do NOT suggest stylistic edits — only semantic mismatches.
 8. Skip sections that already agree.
 
@@ -366,12 +366,12 @@ def apply_approved_changes(
         logger.exception("Failed to update BRD page in Confluence")
         raise HTTPException(status_code=502, detail=f"Confluence update error: {e}")
 
-    # Best-effort fetch of code-summary version for lineage; fall back to 0 if it fails.
+    # Best-effort fetch of code-documentation version for lineage; fall back to 0 if it fails.
     code_summary_version = 0
     try:
         code_summary_version = confluence.get_page_content(request.code_summary_page_id).get("version", 0)
     except Exception as e:
-        logger.warning(f"Could not fetch code-summary page version for lineage (non-fatal): {e}")
+        logger.warning(f"Could not fetch code-documentation page version for lineage (non-fatal): {e}")
 
     # Record lineage in background — failure is non-fatal.
     def _write_lineage():

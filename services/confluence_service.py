@@ -1250,7 +1250,7 @@ class ConfluenceService:
             raise Exception(f"Failed to fetch Confluence page: {str(e)}")
 
     # ------------------------------------------------------------------
-    # Code Summary helpers
+    # Code Documentation helpers
     # ------------------------------------------------------------------
 
     def apply_label(self, page_id: str, label: str) -> bool:
@@ -1351,7 +1351,7 @@ class ConfluenceService:
     def find_or_create_page(self, space_key: str, title: str, default_content: str = "") -> Dict:
         """
         Find a page by exact title in a space; if missing, create at space root.
-        Used to ensure a 'Code Summary' parent page exists.
+        Used to ensure a 'Code Documentation' parent page exists.
         """
         existing = self.find_page_by_title(space_key, title)
         if existing:
@@ -1362,9 +1362,9 @@ class ConfluenceService:
                 "created": False,
             }
         body = default_content or (
-            "<p>This page collects Code Summaries published from the IDE via the "
-            "<strong>code-summary</strong> MCP. Each child page is one summary of the "
-            "current state of the codebase at a given commit.</p>"
+            "<p>This page collects Code Documentation pages published from the IDE via the "
+            "<strong>code-documentation</strong> MCP. Each child page is one document describing "
+            "the current state of the codebase at a given commit.</p>"
         )
         created = self.create_page(space_key, title, body)
         created["created"] = True
@@ -1377,7 +1377,7 @@ class ConfluenceService:
         Supported: ATX headings (# / ## / ###), unordered lists (- / *),
         **bold**, inline `code`, ```fenced code blocks```, blank-line paragraphs.
         Anything else is escaped and emitted as paragraph text — good enough for
-        the locked-shape Code Summary template.
+        the locked-shape Code Documentation template.
         """
         import re as _re
 
@@ -1466,15 +1466,15 @@ class ConfluenceService:
 
     def build_code_summary_info_panel(self, project_id: str, commit_sha: str, scope: str) -> str:
         """
-        Return a Confluence 'info' panel macro to prepend to a code summary page,
+        Return a Confluence 'info' panel macro to prepend to a code documentation page,
         so anyone landing on the page out of context understands what it is.
         """
         body = (
-            f"<p><strong>Auto-generated code summary.</strong> "
+            f"<p><strong>Auto-generated code documentation.</strong> "
             f"Project: <code>{html.escape(project_id)}</code> &middot; "
             f"Scope: <code>{html.escape(scope)}</code> &middot; "
             f"Commit: <code>{html.escape(commit_sha)}</code></p>"
-            "<p>Published from the IDE via the <strong>code-summary</strong> MCP. "
+            "<p>Published from the IDE via the <strong>code-documentation</strong> MCP. "
             "Source of truth for what the code currently does; do not edit by hand.</p>"
         )
         return (

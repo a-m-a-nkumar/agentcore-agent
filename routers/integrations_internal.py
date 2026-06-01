@@ -1,12 +1,13 @@
 """
 Internal Integrations Router — MCP/API-key authenticated endpoints.
 
-Currently exposes the code-summary publish flow consumed by the
-`code-summary` MCP server: the MCP sends a finished markdown summary,
-this endpoint resolves the project's owner + Confluence credentials,
-finds (or creates) a parent "Code Summary" page in the project space,
-publishes the new page underneath it, and labels it `code-summary` so
-the frontend can list it via the public pages-by-label endpoint.
+Currently exposes the code-documentation publish flow consumed by the
+`code-documentation` MCP server: the MCP sends a finished markdown
+document, this endpoint resolves the project's owner + Confluence
+credentials, finds (or creates) a parent "Code Documentation" page in
+the project space, publishes the new page underneath it, and labels it
+`code-documentation` so the frontend can list it via the public
+pages-by-label endpoint.
 """
 
 from fastapi import APIRouter, Header, HTTPException
@@ -27,9 +28,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/integrations", tags=["integrations-internal"])
 
 
-# Anchor page title that gathers every code-summary child page in a space.
-PARENT_PAGE_TITLE = "Code Summary"
-CODE_SUMMARY_LABEL = "code-summary"
+# Anchor page title that gathers every code-documentation child page in a space.
+PARENT_PAGE_TITLE = "Code Documentation"
+CODE_SUMMARY_LABEL = "code-documentation"
 
 
 class PushCodeSummaryRequest(BaseModel):
@@ -44,17 +45,17 @@ def _short_sha(sha: str) -> str:
 
 
 def _build_title(scope: str, commit_sha: str) -> str:
-    return f"Code Summary — {scope} — {_short_sha(commit_sha)}"
+    return f"Code Documentation — {scope} — {_short_sha(commit_sha)}"
 
 
-@router.post("/code-summary/push-to-confluence-internal")
+@router.post("/code-documentation/push-to-confluence-internal")
 async def push_code_summary_internal(
     request: PushCodeSummaryRequest,
     x_api_key: str = Header(alias="X-API-Key"),
 ):
     """
-    Publish a code summary as a Confluence page under the project's
-    "Code Summary" parent page, tagged with the `code-summary` label.
+    Publish a code documentation page in Confluence under the project's
+    "Code Documentation" parent page, tagged with the `code-documentation` label.
 
     Auth: X-API-Key (validated via INTERNAL_API_KEYS → project_id).
     """
@@ -99,7 +100,7 @@ async def push_code_summary_internal(
         api_token=creds["atlassian_api_token"],
     )
 
-    # ── Ensure the "Code Summary" parent page exists ─────────────────────────
+    # ── Ensure the "Code Documentation" parent page exists ──────────────────
     try:
         parent = confluence.find_or_create_page(space_key, PARENT_PAGE_TITLE)
     except Exception as e:
@@ -124,7 +125,7 @@ async def push_code_summary_internal(
     existing = confluence.find_page_by_title(space_key, title)
     if existing:
         existing_url = f"{confluence.base_url}{existing.get('_links', {}).get('webui', '')}"
-        logger.info(f"Code summary already exists at {existing_url} — returning existing")
+        logger.info(f"Code documentation already exists at {existing_url} — returning existing")
         return {
             "page_id": existing.get("id"),
             "title": existing.get("title"),
@@ -143,7 +144,7 @@ async def push_code_summary_internal(
             parent_id=parent_id,
         )
     except Exception as e:
-        logger.exception("Failed to create code-summary page")
+        logger.exception("Failed to create code-documentation page")
         raise HTTPException(status_code=502, detail=f"Confluence create-page error: {e}")
 
     # Best-effort label — page already exists either way, so don't fail the call.

@@ -748,13 +748,13 @@ def list_confluence_pages(
 @router.get("/confluence/pages-by-label")
 def list_confluence_pages_by_label(
     space_key: str,
-    label: str = "code-summary",
+    label: str = "code-documentation",
     limit: int = 50,
     current_user: dict = Depends(get_current_user),
 ):
     """
     List Confluence pages in a space tagged with a label (newest first).
-    Used by the BRD Sync page to enumerate published code summaries.
+    Used by the BRD Sync page to enumerate published code documentation pages.
     """
     credentials = get_user_atlassian_credentials(current_user["id"])
     if not credentials or not credentials.get("atlassian_api_token"):
@@ -768,9 +768,9 @@ def list_confluence_pages_by_label(
             credentials["atlassian_email"],
             credentials["atlassian_api_token"],
         )
-        # Prefer the content tree under the "Code Summary" parent page (instant after publish);
+        # Prefer the content tree under the "Code Documentation" parent page (instant after publish);
         # fall back to CQL search only when no anchor parent exists.
-        parent = confluence_service.find_page_by_title(space_key, "Code Summary")
+        parent = confluence_service.find_page_by_title(space_key, "Code Documentation")
         if parent and parent.get("id"):
             raw = confluence_service.list_children_with_label(
                 parent_id=parent["id"], label=label, limit=limit
