@@ -19,6 +19,12 @@ from db_helper import (
     update_user_harness_credentials,
     get_user_harness_credentials,
     clear_user_harness_credentials,
+    update_user_github_credentials,
+    get_user_github_credentials,
+    clear_user_github_credentials,
+    update_user_bitbucket_credentials,
+    get_user_bitbucket_credentials,
+    clear_user_bitbucket_credentials,
     create_or_update_user,
     get_project
 )
@@ -426,6 +432,120 @@ def unlink_harness_account(current_user: dict = Depends(get_current_user)):
     clear_user_harness_credentials(current_user["id"])
     logger.info(f"[HARNESS] Unlinked for user {current_user['id']}")
     return {"status": "success", "message": "Harness account unlinked"}
+
+
+# ============================================================
+# GitHub integration — store PAT in DB (KMS-encrypted)
+# ============================================================
+
+class LinkGithubRequest(BaseModel):
+    pat: str = Field(..., min_length=1, description="GitHub Personal Access Token")
+
+
+@router.post("/github/link")
+def link_github_account(
+    req: LinkGithubRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Validate and persist the user's GitHub PAT (KMS-encrypted)."""
+    import requests as _requests
+    pat = req.pat.strip()
+    if not pat:
+        raise HTTPException(status_code=400, detail="GitHub PAT is required")
+    try:
+        resp = _requests.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"},
+            timeout=10,
+        )
+        if resp.status_code == 401:
+            raise HTTPException(status_code=400, detail="Invalid GitHub token. Please check and try again.")
+        if resp.status_code not in (200, 204):
+            raise HTTPException(status_code=400, detail=f"GitHub returned {resp.status_code}. Please check your token.")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"[GITHUB] Validation network error: {e} — accepting token anyway")
+
+    update_user_github_credentials(current_user["id"], pat)
+    logger.info(f"[GITHUB] Linked for user {current_user['id']}")
+    return {"status": "success", "message": "GitHub account linked"}
+
+
+@router.get("/github/status")
+def get_github_status(current_user: dict = Depends(get_current_user)):
+    """Return whether the user has a stored GitHub PAT. PAT is never returned."""
+    creds = get_user_github_credentials(current_user["id"])
+    if not creds or not creds.get("github_pat"):
+        return {"linked": False}
+    linked_at = creds.get("github_linked_at")
+    return {
+        "linked": True,
+        "linked_at": linked_at.isoformat() if linked_at else None,
+    }
+
+
+@router.delete("/github/unlink")
+def unlink_github_account(current_user: dict = Depends(get_current_user)):
+    """Drop the user's stored GitHub PAT. Idempotent."""
+    clear_user_github_credentials(current_user["id"])
+    logger.info(f"[GITHUB] Unlinked for user {current_user['id']}")
+    return {"status": "success", "message": "GitHub account unlinked"}
+
+
+# ============================================================
+# Bitbucket integration — store email + App Password in DB
+# ============================================================
+
+class LinkBitbucketRequest(BaseModel):
+    email: str = Field(..., min_length=1, description="Atlassian login email")
+    app_password: str = Field(..., min_length=1, description="Bitbucket App Password")
+
+
+@router.post("/bitbucket/link")
+def link_bitbucket_account(
+    req: LinkBitbucketRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Validate and persist the user's Bitbucket credentials (App Password KMS-encrypted)."""
+    email = req.email.strip()
+    app_password = req.app_password.strip()
+    if not email or not app_password:
+        raise HTTPException(status_code=400, detail="Email and App Password are required")
+
+    svc = BitbucketService(email, app_password)
+    ok, error_msg = svc.test_connection()
+    if not ok:
+        raise HTTPException(
+            status_code=400,
+            detail=error_msg or "Invalid Bitbucket credentials. Please check your email and App Password.",
+        )
+
+    update_user_bitbucket_credentials(current_user["id"], email, app_password)
+    logger.info(f"[BITBUCKET] Linked for user {current_user['id']}")
+    return {"status": "success", "message": "Bitbucket account linked"}
+
+
+@router.get("/bitbucket/status")
+def get_bitbucket_status(current_user: dict = Depends(get_current_user)):
+    """Return whether the user has stored Bitbucket credentials. App Password is never returned."""
+    creds = get_user_bitbucket_credentials(current_user["id"])
+    if not creds or not creds.get("bitbucket_app_password"):
+        return {"linked": False}
+    linked_at = creds.get("bitbucket_linked_at")
+    return {
+        "linked": True,
+        "email": creds.get("bitbucket_email"),
+        "linked_at": linked_at.isoformat() if linked_at else None,
+    }
+
+
+@router.delete("/bitbucket/unlink")
+def unlink_bitbucket_account(current_user: dict = Depends(get_current_user)):
+    """Drop the user's stored Bitbucket credentials. Idempotent."""
+    clear_user_bitbucket_credentials(current_user["id"])
+    logger.info(f"[BITBUCKET] Unlinked for user {current_user['id']}")
+    return {"status": "success", "message": "Bitbucket account unlinked"}
 
 
 @router.get("/jira/projects")

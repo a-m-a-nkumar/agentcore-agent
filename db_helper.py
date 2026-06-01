@@ -1471,6 +1471,132 @@ def clear_user_harness_credentials(user_id: str) -> bool:
         release_db_connection(conn)
 
 
+def update_user_github_credentials(user_id: str, pat: str) -> bool:
+    """Encrypt and persist the user's GitHub PAT. Mirrors update_user_harness_credentials."""
+    encrypted_pat = _encrypt_token(pat)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET github_pat       = %s,
+                    github_linked_at = NOW()
+                WHERE id = %s
+            """, (encrypted_pat, user_id))
+            conn.commit()
+            logger.info(f"[GITHUB] Credentials updated (KMS-encrypted) for user: {user_id}")
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"[GITHUB] Error updating credentials for user {user_id}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_github_credentials(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve GitHub credentials from DB and decrypt the PAT.
+    Returns None if no PAT is on file."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT github_pat, github_linked_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            if not result or not result.get("github_pat"):
+                return None
+            creds = dict(result)
+            creds["github_pat"] = _decrypt_token(creds["github_pat"])
+            return creds
+    finally:
+        release_db_connection(conn)
+
+
+def clear_user_github_credentials(user_id: str) -> bool:
+    """Unlink: clear the user's GitHub PAT."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET github_pat       = NULL,
+                    github_linked_at = NULL
+                WHERE id = %s
+            """, (user_id,))
+            conn.commit()
+            logger.info(f"[GITHUB] Credentials cleared for user: {user_id}")
+            return cursor.rowcount > 0
+    finally:
+        release_db_connection(conn)
+
+
+def update_user_bitbucket_credentials(user_id: str, email: str, app_password: str) -> bool:
+    """Encrypt and persist the user's Bitbucket email + App Password."""
+    encrypted_password = _encrypt_token(app_password)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET bitbucket_email        = %s,
+                    bitbucket_app_password = %s,
+                    bitbucket_linked_at    = NOW()
+                WHERE id = %s
+            """, (email, encrypted_password, user_id))
+            conn.commit()
+            logger.info(f"[BITBUCKET] Credentials updated (KMS-encrypted) for user: {user_id}")
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"[BITBUCKET] Error updating credentials for user {user_id}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_bitbucket_credentials(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve Bitbucket credentials from DB and decrypt the App Password.
+    Returns None if no credentials are on file."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT bitbucket_email, bitbucket_app_password, bitbucket_linked_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            if not result or not result.get("bitbucket_app_password"):
+                return None
+            creds = dict(result)
+            creds["bitbucket_app_password"] = _decrypt_token(creds["bitbucket_app_password"])
+            return creds
+    finally:
+        release_db_connection(conn)
+
+
+def clear_user_bitbucket_credentials(user_id: str) -> bool:
+    """Unlink: clear the user's Bitbucket credentials."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET bitbucket_email        = NULL,
+                    bitbucket_app_password = NULL,
+                    bitbucket_linked_at    = NULL
+                WHERE id = %s
+            """, (user_id,))
+            conn.commit()
+            logger.info(f"[BITBUCKET] Credentials cleared for user: {user_id}")
+            return cursor.rowcount > 0
+    finally:
+        release_db_connection(conn)
+
+
 def update_user_figma_credentials(user_id: str, pat: str, team_id: str) -> bool:
     """Save Figma PAT and Team ID for a user."""
     conn = get_db_connection()
