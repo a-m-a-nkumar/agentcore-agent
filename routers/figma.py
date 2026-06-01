@@ -53,6 +53,7 @@ def _invoke_claude(
     model_id: str = FIGMA_MODEL_ID,
     max_tokens: int = FIGMA_MAX_TOKENS,
     user_id: Optional[str] = None,
+    token_source: str = "figma_invoke_claude",
 ) -> str:
     """Call Claude via the environment gateway (local: Bedrock, VDI: Deluxe proxy)."""
     try:
@@ -63,6 +64,7 @@ def _invoke_claude(
             max_tokens=max_tokens,
             system_prompt=system_prompt,
             user_id=user_id,
+            token_source=token_source,
         )
     except Exception as e:
         logger.error(f"[FIGMA] LLM invoke error: {e}")

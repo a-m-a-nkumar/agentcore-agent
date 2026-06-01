@@ -225,10 +225,31 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         print(f"[VALIDATION ERROR] Body: {json.dumps(body, indent=2)}")
     except Exception:
         print(f"[VALIDATION ERROR] Body: <could not parse json>")
-        
+
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": "Check server logs for details"},
+    )
+
+
+from db_helper import KMSCredentialsExpiredError
+
+
+@app.exception_handler(KMSCredentialsExpiredError)
+async def kms_expired_handler(request: Request, exc: KMSCredentialsExpiredError):
+    """Surface AWS-credential expiry as a clear 503 with actionable message.
+
+    Hits the Atlassian / Lucid / Harness / GitHub / Bitbucket link+status
+    endpoints whenever the operator's SSO session expires. Returns 503 so
+    the frontend can render a "refresh your AWS session" banner instead of
+    a generic 500.
+    """
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": str(exc),
+            "code": "AWS_CREDENTIALS_EXPIRED",
+        },
     )
 
 # Helper function to check AWS credentials

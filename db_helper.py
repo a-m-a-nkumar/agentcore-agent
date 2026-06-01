@@ -1219,35 +1219,94 @@ def set_session_authoring_tool(session_id: str, tool: Optional[str]) -> None:
 # Atlassian Integration Functions
 # ============================================
 
-# KMS encryption for Atlassian PAT tokens (industry standard: never store secrets in plain text)
+# KMS encryption for PAT tokens (Atlassian, Lucid, Harness, GitHub, Bitbucket).
+# Industry standard: never store secrets in plain text.
 _KMS_KEY_ARN = os.getenv("KMS_KEY_ARN", "")
 _kms_client = None
 
-def _get_kms_client():
+
+def _get_kms_client(*, force_refresh: bool = False):
+    """Return a cached KMS client, or build a fresh one when asked.
+
+    Caching the client at module scope avoids per-call boto3 overhead but
+    means a cached client keeps the STS token its credential provider
+    resolved at startup. When that token expires (typical for `aws sso login`
+    workflows), every call raises ExpiredTokenException until the process
+    restarts — even though a fresh `aws sso login` already wrote new
+    credentials to disk. `force_refresh=True` lets callers ditch the cached
+    client so the next boto3 construction triggers a fresh resolution.
+    """
     global _kms_client
+    if force_refresh:
+        _kms_client = None
     if _kms_client is None:
         _kms_client = boto3.client("kms", region_name=os.getenv("AWS_REGION", "us-east-1"))
     return _kms_client
 
+
+class KMSCredentialsExpiredError(RuntimeError):
+    """Raised when KMS rejects the call because AWS credentials have expired.
+
+    Wraps botocore's ExpiredTokenException with a message the API layer can
+    surface to the user, prompting them to refresh their SSO session.
+    """
+
+
+def _is_expired_token_error(exc: Exception) -> bool:
+    """True iff `exc` is a botocore ExpiredTokenException."""
+    try:
+        from botocore.exceptions import ClientError  # local import to avoid hard dep at module load
+    except Exception:
+        return False
+    if not isinstance(exc, ClientError):
+        return False
+    code = (exc.response or {}).get("Error", {}).get("Code", "")
+    return code == "ExpiredTokenException"
+
+
 def _encrypt_token(plain_token: str) -> str:
-    """Encrypt a PAT token using AWS KMS before storing in DB."""
+    """Encrypt a PAT token using AWS KMS before storing in DB.
+
+    On ExpiredTokenException we drop the cached KMS client and retry once
+    so a freshly-refreshed SSO session is picked up without restarting the
+    backend.
+    """
     if not _KMS_KEY_ARN:
         logger.warning("[KMS] KMS_KEY_ARN not set — storing token without encryption (dev only)")
         return plain_token
-    try:
-        response = _get_kms_client().encrypt(
-            KeyId=_KMS_KEY_ARN,
-            Plaintext=plain_token.encode("utf-8"),
-        )
-        # Store as base64 string with a prefix so we can detect encrypted values
-        encrypted_b64 = base64.b64encode(response["CiphertextBlob"]).decode("utf-8")
-        return f"kms:{encrypted_b64}"
-    except Exception as e:
-        logger.error(f"[KMS] Encryption failed: {e}")
-        raise RuntimeError("Failed to encrypt Atlassian token. Check KMS configuration.") from e
+
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            response = _get_kms_client(force_refresh=attempt > 0).encrypt(
+                KeyId=_KMS_KEY_ARN,
+                Plaintext=plain_token.encode("utf-8"),
+            )
+            # Store as base64 string with a prefix so we can detect encrypted values
+            encrypted_b64 = base64.b64encode(response["CiphertextBlob"]).decode("utf-8")
+            return f"kms:{encrypted_b64}"
+        except Exception as e:
+            last_exc = e
+            if _is_expired_token_error(e) and attempt == 0:
+                logger.warning(
+                    "[KMS] Encrypt: AWS credentials expired on cached client — refreshing and retrying once."
+                )
+                continue
+            break
+
+    logger.error(f"[KMS] Encryption failed: {last_exc}")
+    if _is_expired_token_error(last_exc):
+        raise KMSCredentialsExpiredError(
+            "AWS credentials expired. Run `aws sso login` (or refresh your SSO session) and try again."
+        ) from last_exc
+    raise RuntimeError("Failed to encrypt token. Check KMS configuration.") from last_exc
+
 
 def _decrypt_token(stored_token: str) -> str:
-    """Decrypt a KMS-encrypted PAT token retrieved from DB."""
+    """Decrypt a KMS-encrypted PAT token retrieved from DB.
+
+    Same expired-token retry pattern as `_encrypt_token`.
+    """
     if not stored_token:
         return stored_token
     # If token was stored without encryption (dev/legacy), return as-is
@@ -1256,16 +1315,31 @@ def _decrypt_token(stored_token: str) -> str:
     if not _KMS_KEY_ARN:
         logger.warning("[KMS] KMS_KEY_ARN not set — cannot decrypt token")
         return stored_token
-    try:
-        ciphertext = base64.b64decode(stored_token[4:])  # strip "kms:" prefix
-        response = _get_kms_client().decrypt(
-            KeyId=_KMS_KEY_ARN,
-            CiphertextBlob=ciphertext,
-        )
-        return response["Plaintext"].decode("utf-8")
-    except Exception as e:
-        logger.error(f"[KMS] Decryption failed: {e}")
-        raise RuntimeError("Failed to decrypt Atlassian token. Check KMS configuration.") from e
+
+    ciphertext = base64.b64decode(stored_token[4:])  # strip "kms:" prefix
+    last_exc: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            response = _get_kms_client(force_refresh=attempt > 0).decrypt(
+                KeyId=_KMS_KEY_ARN,
+                CiphertextBlob=ciphertext,
+            )
+            return response["Plaintext"].decode("utf-8")
+        except Exception as e:
+            last_exc = e
+            if _is_expired_token_error(e) and attempt == 0:
+                logger.warning(
+                    "[KMS] Decrypt: AWS credentials expired on cached client — refreshing and retrying once."
+                )
+                continue
+            break
+
+    logger.error(f"[KMS] Decryption failed: {last_exc}")
+    if _is_expired_token_error(last_exc):
+        raise KMSCredentialsExpiredError(
+            "AWS credentials expired. Run `aws sso login` (or refresh your SSO session) and try again."
+        ) from last_exc
+    raise RuntimeError("Failed to decrypt token. Check KMS configuration.") from last_exc
 
 
 def update_user_atlassian_credentials(
@@ -1898,6 +1972,22 @@ def _humanize_event(event_type: str, metadata: Optional[Dict[str, Any]]) -> str:
         "analyst_agent_brd_generated": "Analyst Agent · BRD generated",
         "test_scenarios_generated_confluence": "Confluence · Test scenarios generated",
         "jira_items_generated_confluence": "Confluence · Jira items generated",
+        # Pair Programming
+        "prompt_enhancement": "Pair Programming · Prompt enhanced (MCP)",
+        "code_summary_published": "Pair Programming · Code summary published (MCP)",
+        # Architecture
+        "lucid_prompt_generated": "Architecture · Lucid diagram prompt generated",
+        "sad_generated": "Architecture · SAD generated",
+        # Testing
+        "test_scenarios_generated": "Testing · Test scenarios generated",
+        "scenarios_parsed": "Testing · Scenarios parsed for Gherkin prompt",
+        # Deployment
+        "harness_pipeline_ai_edited": "Deployment · Harness pipeline AI-edited",
+        "terraform_generated": "Deployment · Terraform IaC generated",
+        "pipeline_failure_root_cause_analysis": "Deployment · Pipeline failure analyzed (MCP)",
+        # Drift Alignment (BRD Sync)
+        "brd_compared": "Drift Alignment · BRD compared",
+        "brd_merged": "Drift Alignment · BRD changes applied",
     }
     return labels.get(event_type, event_type.replace("_", " ").capitalize())
 

@@ -21,6 +21,7 @@ from pydantic import BaseModel
 
 from auth import verify_azure_token
 from environment import chat_completion
+from db_helper import track_event
 from services.checkov_service import run_checkov, format_failures_for_prompt
 from db_helper import get_user_bitbucket_credentials, create_or_update_user
 
@@ -30,10 +31,22 @@ router = APIRouter(prefix="/api/terraform", tags=["terraform"])
 
 # ─── LLM call (uses environment switch: VDI gateway or direct Bedrock) ───────
 
-def invoke_claude(prompt: str, max_tokens: int = 8000, temperature: float = 1.0, user_id: Optional[str] = None) -> str:
+def invoke_claude(
+    prompt: str,
+    max_tokens: int = 8000,
+    temperature: float = 1.0,
+    user_id: Optional[str] = None,
+    token_source: str = "terraform_invoke_claude",
+) -> str:
     """Call Claude via the environment-configured LLM provider (gateway or Bedrock)."""
     messages = [{"role": "user", "content": prompt}]
-    return chat_completion(messages=messages, temperature=temperature, max_tokens=max_tokens, user_id=user_id)
+    return chat_completion(
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        user_id=user_id,
+        token_source=token_source,
+    )
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 
@@ -526,6 +539,28 @@ terraform apply -var-file=terraform.tfvars
         # Stream all files at the end
         yield json.dumps({"type": "files", "files": files}) + "\n"
         yield json.dumps({"type": "done"}) + "\n"
+
+        # Record once at the end of a successful generation. Put inside the
+        # generator (not before `return`) so we only count runs where files
+        # actually arrived — a client disconnect before any yields skips
+        # this. The whole block is best-effort: never fail the response over
+        # a missing event row.
+        try:
+            if user_id and files:
+                track_event(
+                    user_id,
+                    module="deployment",
+                    event_type="terraform_generated",
+                    metadata={
+                        "project_name": req.project_name,
+                        "environment": env,
+                        "aws_region": region,
+                        "component_count": len(valid_components),
+                        "file_count": len(files),
+                    },
+                )
+        except Exception as _track_err:
+            logger.warning(f"track_event failed (non-fatal): {_track_err}")
 
     return StreamingResponse(generate(), media_type="application/x-ndjson")
 
