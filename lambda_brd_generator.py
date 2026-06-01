@@ -8,13 +8,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 # Environment-specific LLM and S3 (local: direct Bedrock + plain S3 | VDI: Gateway + KMS S3)
-from environment import chat_completion, s3_put_object
+from environment import (
+    chat_completion,
+    s3_put_object,
+    DEFAULT_AGENTCORE_MEMORY_ID,
+    DEFAULT_AGENTCORE_ACTOR_ID,
+)
 
 # Phase 6 imports — cacheable per-section prompts. The single source of
 # truth for the 16-section structure lives in brd_section_definitions.
 from prompts.brd_section_definitions import (
     BRD_SECTIONS,
     SECTION_FORMATS,
+    SECTION_RAG_QUERIES,
     section_title as _section_title,
 )
 from prompts.brd_section_prompts import (
@@ -40,9 +46,47 @@ TEMPERATURE = float(os.environ["BEDROCK_TEMPERATURE"])
 # so prod and dev can bound gateway concurrency independently. Per-section
 # token budget is tighter than the monolithic path's BEDROCK_MAX_TOKENS
 # because each call only produces one section's content.
-BRD_SECTION_PARALLELISM    = int(os.getenv("BRD_SECTION_PARALLELISM", "5"))
+# Concurrency lowered 5→3: the DLX gateway returns 502 "Unexpected error
+# calling model" under burst load (verified — a single section call succeeds
+# but 5 concurrent + the embedding burst overwhelms it). 3 eases pressure;
+# the per-section backoff retry below handles the residual transient 502s.
+BRD_SECTION_PARALLELISM    = int(os.getenv("BRD_SECTION_PARALLELISM", "3"))
 BRD_SECTION_MAX_TOKENS     = int(os.getenv("BRD_SECTION_MAX_TOKENS", "4000"))
 BRD_SECTION_TEMPERATURE    = float(os.getenv("BRD_SECTION_TEMPERATURE", "0.3"))
+# Per-section attempts. Transient gateway errors (502/429/5xx/timeout) get an
+# exponential backoff between attempts so the gateway can recover; parse/format
+# errors get an immediate "JSON-only" nudge retry instead.
+BRD_SECTION_MAX_ATTEMPTS   = int(os.getenv("BRD_SECTION_MAX_ATTEMPTS", "4"))
+
+# Phase 1 RAG: per-section retrieval so each section call gets only its
+# relevant chunks instead of the whole (possibly 450K-token) corpus — the
+# fix for the gateway 502s on large transcripts. Ephemeral + isolated: the
+# index lives in this Lambda's memory for one generation, never the shared
+# pgvector store.
+BRD_USE_RAG_CONTEXT        = os.getenv("BRD_USE_RAG_CONTEXT", "true").strip().lower() in ("1", "true", "yes")
+BRD_RAG_TOP_K              = int(os.getenv("BRD_RAG_TOP_K", "10"))
+# Gap-heavy sections (stakeholders, ROI, assumptions, KPIs, timeline, risks,
+# glossary/dependencies) get more chunks because the coverage audit showed
+# embedding-similarity retrieval undercounts these. Surface facts (dates,
+# names, vendors, metrics) flow through the facts-ledger path, not RAG.
+BRD_RAG_TOP_K_HIGH         = int(os.getenv("BRD_RAG_TOP_K_HIGH", "15"))
+HIGH_K_SECTIONS: set = {4, 6, 10, 12, 13, 14, 16}
+# Below this corpus size, skip chunk/embed and inline the source material as
+# before — no point indexing a small transcript (and it keeps tiny inputs fast).
+# Default ~120k chars ≈ 30k tokens (~4 chars/tok): inputs above this fire
+# per-section RAG so each section call stays narrow; smaller inputs are
+# inlined into the cached prefix and reused across all 16 section calls.
+# Both paths use the parallel 16-section worker fan-out — the difference is
+# only what each worker sees in its user message (RAG chunks vs. the full
+# inlined transcript in the cached prefix).
+BRD_RAG_MIN_CHARS          = int(os.getenv("BRD_RAG_MIN_CHARS", "120000"))
+# Facts-ledger extraction (RAG path only): regex pass always runs; spaCy NER
+# (en_core_web_sm, bundled in the Lambda zip) runs when BRD_USE_FACT_EXTRACTION
+# is true to catch PERSON/ORG/DATE entities the regex layer misses. Routed to
+# gap-heavy sections to compensate for embedding-similarity's blind spot on
+# surface facts (dates, names, vendors, metrics, status assertions).
+BRD_USE_FACTS_LEDGER       = os.getenv("BRD_USE_FACTS_LEDGER", "true").strip().lower() in ("1", "true", "yes")
+BRD_USE_FACT_EXTRACTION    = os.getenv("BRD_USE_FACT_EXTRACTION", "true").strip().lower() in ("1", "true", "yes")
 
 
 # Deluxe BRD template section list — kept in lock-step with
@@ -69,6 +113,148 @@ BRD_SECTION_TITLES: List[Tuple[int, str]] = [
 ]
 
 # ============================================================================
+# Unified context-bundle sources.
+#
+# The single generation path accepts content from three optional sources,
+# any combination of which feeds one cached context bundle:
+#   - transcript      (uploaded doc, via inline text or S3 key)
+#   - chat history    (the gathering conversation, via chat_session_id)
+#   - existing BRD     (for regeneration, via existing_brd_id — each
+#                       section's current content is passed to its worker
+#                       as a "current draft" so regen merges, not overwrites)
+#   - long-term facts (resolved by the orchestrator, passed inline)
+#
+# Chat history is fetched here (not passed inline) so a long gathering
+# conversation never bloats the 1MB async-invoke payload. The memory ID
+# comes from environment.DEFAULT_AGENTCORE_MEMORY_ID (the same source the
+# legacy from-history Lambda used) so this works without an extra env var.
+# ============================================================================
+
+AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
+AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
+
+_memory_client = None
+
+
+def _get_memory_client():
+    global _memory_client
+    if _memory_client is None:
+        _memory_client = boto3.client("bedrock-agentcore", region_name=BEDROCK_REGION)
+    return _memory_client
+
+
+def get_conversation_history(
+    session_id: str,
+    max_messages: int = 99,
+    user_id: Optional[str] = None,
+) -> List[Dict[str, str]]:
+    """Read chat history from AgentCore Memory using the DUAL-ACTOR read
+    pattern (per-user actor + legacy 'analyst-session' actor).
+
+    The orchestrator writes USER/ASSISTANT events under `user-{user_id}`;
+    older sessions have events under the legacy shared actor. Reading only
+    one actor misses events written under the other. Returns events from
+    both actors merged by eventTimestamp ascending.
+    """
+    if not AGENTCORE_MEMORY_ID or not session_id:
+        return []
+
+    client = _get_memory_client()
+
+    actors: List[str] = []
+    if user_id:
+        actor_prefix = os.getenv("BRD_AGENTCORE_ACTOR_PREFIX", "user-")
+        actors.append(f"{actor_prefix}{user_id}")
+    legacy_actor = os.getenv("BRD_AGENTCORE_LEGACY_ACTOR", AGENTCORE_ACTOR_ID)
+    if legacy_actor not in actors:
+        actors.append(legacy_actor)
+
+    logger.info(
+        f"[BRD-gen] fetching chat history session={session_id} "
+        f"actors={actors} max_messages={max_messages}"
+    )
+
+    merged: List[Tuple[int, int, Dict[str, str]]] = []
+    for priority, actor in enumerate(actors):
+        try:
+            response = client.list_events(
+                memoryId=AGENTCORE_MEMORY_ID,
+                sessionId=session_id,
+                actorId=actor,
+                includePayloads=True,
+                maxResults=min(max_messages, 99),
+            )
+        except Exception as e:
+            logger.warning(f"[BRD-gen] list_events failed actor={actor} session={session_id}: {e}")
+            continue
+
+        for event in response.get("events", []):
+            ts_raw = event.get("eventTimestamp")
+            if ts_raw is None:
+                ts_ms = 0
+            elif hasattr(ts_raw, "timestamp"):
+                ts_ms = int(ts_raw.timestamp() * 1000)
+            else:
+                try:
+                    ts_ms = int(ts_raw)
+                except (TypeError, ValueError):
+                    ts_ms = 0
+            for payload_item in event.get("payload", []):
+                conv_data = payload_item.get("conversational")
+                if not conv_data:
+                    continue
+                text_content = conv_data.get("content", {}).get("text")
+                if not text_content:
+                    continue
+                role = conv_data.get("role", "assistant").lower()
+                merged.append((ts_ms, priority, {"role": role, "content": text_content}))
+
+    merged.sort(key=lambda t: (t[0], t[1]))
+    messages = [m[2] for m in merged[-max_messages:]]
+    logger.info(f"[BRD-gen] retrieved {len(messages)} chat messages (merged from {len(actors)} actors)")
+    return messages
+
+
+def format_conversation(messages: List[Dict[str, str]]) -> str:
+    """Format chat history as readable transcript text."""
+    lines = []
+    for msg in messages:
+        role = "USER" if msg.get("role") == "user" else "ANALYST"
+        lines.append(f"{role}: {msg.get('content', '')}")
+    return "\n\n".join(lines)
+
+
+def _read_existing_brd_sections(existing_brd_id: str) -> Dict[int, List[Dict[str, Any]]]:
+    """Read brds/{existing_brd_id}/brd_structure.json and return a map of
+    {section_number: content_blocks} for regeneration merge. Each section
+    worker receives its current draft so regen carries forward prior
+    content (incl. user edits) instead of overwriting it.
+
+    Best-effort: failures return {} (regen behaves like a fresh generate).
+    """
+    if not existing_brd_id:
+        return {}
+    key = f"brds/{existing_brd_id}/brd_structure.json"
+    bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+    try:
+        s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+        obj = s3.get_object(Bucket=bucket, Key=key)
+        data = json.loads(obj["Body"].read().decode("utf-8"))
+    except Exception as e:
+        logger.warning(f"[BRD-gen] could not read existing BRD {existing_brd_id} for regen-merge: {e}")
+        return {}
+
+    out: Dict[int, List[Dict[str, Any]]] = {}
+    for sec in data.get("sections", []) or []:
+        n = sec.get("number") or sec.get("section_number")
+        content = sec.get("content")
+        if isinstance(n, int) and isinstance(content, list) and content:
+            out[n] = content
+    logger.info(f"[BRD-gen] loaded {len(out)} existing sections from {existing_brd_id} for regen-merge")
+    return out
+
+
+# ============================================================================
 # Parallel section generation — opt-in path (event["parallel"] == True).
 # Mirrors lambda_sad_orchestrator.py:1526 ThreadPoolExecutor pattern.
 #
@@ -85,6 +271,23 @@ BRD_SECTION_TITLES: List[Tuple[int, str]] = [
 #                  "status": "llm_generated", "last_updated_ts": "..."}]}
 # ============================================================================
 
+_TRANSIENT_ERROR_MARKERS = (
+    "502", "503", "500", "429", "bad gateway", "service unavailable",
+    "unexpected error calling model", "internal server error", "timeout",
+    "timed out", "throttl", "too many requests", "connection reset",
+    "connection aborted", "rate limit",
+)
+
+
+def _is_transient_gateway_error(exc: Exception) -> bool:
+    """True if the exception looks like a retry-worthy transient gateway/model
+    error (502/429/5xx/timeout/throttle) rather than a parse/validation
+    failure. Transient errors get an exponential-backoff retry; format errors
+    get the immediate 'JSON-only' nudge instead."""
+    msg = str(exc).lower()
+    return any(m in msg for m in _TRANSIENT_ERROR_MARKERS)
+
+
 def _generate_one_section(
     *,
     section_number: int,
@@ -92,6 +295,9 @@ def _generate_one_section(
     user_id: Optional[str],
     brd_id: str,
     gen_start_ts: float,
+    current_draft: Optional[List[Dict[str, Any]]] = None,
+    rag_chunks: Optional[List[Dict[str, Any]]] = None,
+    facts_ledger: Optional[List[str]] = None,
 ) -> Tuple[int, Dict[str, Any]]:
     """Phase 6 section worker — cached-prefix flow.
 
@@ -112,7 +318,29 @@ def _generate_one_section(
     CloudWatch.
     """
     title = _section_title(section_number)
-    user_msg = build_section_user_message(section_number)
+    # Per-section RAG: when chunks were retrieved for this section, they ride
+    # in the user message (not the cached prefix) so each call stays small.
+    # Facts ledger: surface facts (dates, names, vendors, metrics) routed to
+    # this section by the deterministic extractor — additive to RAG, used to
+    # fill the gaps the audit identified in embedding-similarity retrieval.
+    section_ctx: Dict[str, Any] = {}
+    if rag_chunks:
+        section_ctx["rag_chunks"] = rag_chunks
+    if facts_ledger:
+        section_ctx["facts_ledger"] = facts_ledger
+    user_msg = build_section_user_message(section_number, section_ctx or None)
+
+    # Regeneration: hand the worker its current draft so it merges (carries
+    # forward prior content + user edits) instead of overwriting. The
+    # merge RULES live in SHARED_SYSTEM_PROMPT; this just supplies the draft.
+    if current_draft:
+        user_msg += (
+            "\n\nCurrent draft of this section (regeneration — MERGE, do not "
+            "overwrite; carry forward everything below unless the source "
+            "input directly contradicts it):\n"
+            + json.dumps(current_draft, ensure_ascii=False)
+        )
+    final_status = "llm_regenerated" if current_draft else "llm_generated"
 
     # Log start of this section relative to generation start. CloudWatch
     # shows multiple workers logging START within ~100ms of each other
@@ -134,12 +362,14 @@ def _generate_one_section(
     last_raw = ""
     last_err: Optional[Exception] = None
     last_usage: Dict[str, int] = {}
-    for attempt in (1, 2):
+    base_delay = 2.0
+    nudge_next = False  # set after a parse/format failure → JSON-only nudge
+    for attempt in range(1, BRD_SECTION_MAX_ATTEMPTS + 1):
         try:
             res = chat_completion(
                 messages=[{
                     "role": "user",
-                    "content": user_msg + (retry_suffix if attempt == 2 else ""),
+                    "content": user_msg + (retry_suffix if nudge_next else ""),
                 }],
                 system_prompt=system_blocks,
                 temperature=BRD_SECTION_TEMPERATURE,
@@ -172,7 +402,7 @@ def _generate_one_section(
                 "number": section_number,
                 "title": title,
                 "content": content,
-                "status": "llm_generated",
+                "status": final_status,
                 "last_updated_ts": int(time.time()),
                 "previous_versions": [],
                 "_usage": last_usage,        # stripped before final write
@@ -182,15 +412,28 @@ def _generate_one_section(
             return section_number, section_dict
         except Exception as e:
             last_err = e
+            transient = _is_transient_gateway_error(e)
+            # Transient gateway errors (502/429/5xx) are NOT a JSON problem —
+            # back off and retry the same request. Parse/format errors get the
+            # immediate JSON-only nudge next attempt.
+            nudge_next = not transient
             logger.warning(
-                f"[BRD-gen] §{section_number} attempt {attempt} failed: {e} "
-                f"raw[:300]={(last_raw or '')[:300]!r}"
+                f"[BRD-gen] §{section_number} attempt {attempt}/{BRD_SECTION_MAX_ATTEMPTS} "
+                f"failed ({'transient' if transient else 'format'}): {e} "
+                f"raw[:200]={(last_raw or '')[:200]!r}"
             )
+            if attempt < BRD_SECTION_MAX_ATTEMPTS and transient:
+                # Exponential backoff + jitter so concurrent workers don't all
+                # retry in lockstep and re-overwhelm the gateway.
+                import random
+                delay = base_delay * (2 ** (attempt - 1)) + random.uniform(0, 1.0)
+                logger.info(f"[BRD-gen] §{section_number} transient backoff {delay:.1f}s before retry")
+                time.sleep(delay)
 
     section_end = time.time()
     logger.error(
         f"[BRD-gen] §{section_number:>2} FAIL  @ +{section_end - gen_start_ts:0.2f}s "
-        f"after 2 attempts: {last_err}"
+        f"after {BRD_SECTION_MAX_ATTEMPTS} attempts: {last_err}"
     )
     failed = {
         "number": section_number,
@@ -337,9 +580,15 @@ def _write_generation_status(
     error_message: Optional[str] = None,
     missing_sections: Optional[List[int]] = None,
     session_id: Optional[str] = None,
+    embedding_progress: Optional[int] = None,
+    embedding_total: Optional[int] = None,
 ) -> None:
     """Write brds/{brd_id}/_generation_status.json — the SSE endpoint's
     terminal-state signal. `status` is one of: running, complete, failed.
+
+    `embedding_progress`/`embedding_total` are heartbeat fields written during
+    the long pre-section embedding step so the SSE stream has fresh bytes to
+    forward to the client. The SSE endpoint surfaces these as progress events.
     """
     body = {
         "brd_id": brd_id,
@@ -352,6 +601,10 @@ def _write_generation_status(
         body["error_message"] = error_message
     if missing_sections:
         body["missing_sections"] = missing_sections
+    if embedding_progress is not None:
+        body["embedding_progress"] = int(embedding_progress)
+    if embedding_total is not None:
+        body["embedding_total"] = int(embedding_total)
     try:
         s3_put_object(
             key=f"brds/{brd_id}/_generation_status.json",
@@ -436,16 +689,105 @@ def _estimate_cost_usd(
     )
 
 
+def _build_rag_index(
+    transcript_text: str,
+    chat_history_text: str,
+    progress_callback=None,
+) -> Optional[Dict[str, Any]]:
+    """Chunk + embed the input corpus into an IN-MEMORY vector index for
+    per-section retrieval. Reuses services.embedding_service (the configured
+    splitter + batched embeddings). Returns
+    {"texts": [...], "tags": [...], "mat": np.ndarray (L2-normalized)} or
+    None if RAG is unavailable (missing dep / embed failure) — the caller then
+    falls back to the inline full-context path.
+
+    Ephemeral + isolated: nothing is persisted here; BRD chunks never touch
+    the shared pgvector store.
+    """
+    try:
+        from services.embedding_service import embedding_service
+        import numpy as np
+    except Exception as e:
+        logger.warning(f"[BRD-gen RAG] embedding_service/numpy unavailable — inline fallback: {e}")
+        return None
+
+    sources: List[Tuple[str, str]] = []
+    if transcript_text:
+        sources.append(("uploaded document", transcript_text))
+    if chat_history_text:
+        sources.append(("gathering conversation", chat_history_text))
+
+    chunks: List[Tuple[str, str]] = []  # (chunk_text, source_tag)
+    for tag, text in sources:
+        try:
+            pieces = embedding_service.recursive_splitter.split_text(text)
+        except Exception as e:
+            logger.warning(f"[BRD-gen RAG] split failed for {tag}: {e}; using whole text as one chunk")
+            pieces = [text]
+        for p in pieces:
+            p = (p or "").strip()
+            if len(p) > 50:
+                chunks.append((p, tag))
+
+    if not chunks:
+        return None
+
+    try:
+        vecs = embedding_service.generate_embeddings_batch(
+            [c[0] for c in chunks],
+            progress_callback=progress_callback,
+        )
+    except Exception as e:
+        logger.warning(f"[BRD-gen RAG] embedding failed — inline fallback: {e}")
+        return None
+    if not vecs or len(vecs) != len(chunks):
+        logger.warning(
+            f"[BRD-gen RAG] embedding count mismatch ({len(vecs) if vecs else 0} vs "
+            f"{len(chunks)}) — inline fallback"
+        )
+        return None
+
+    mat = np.asarray(vecs, dtype="float32")
+    norms = np.linalg.norm(mat, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    mat = mat / norms
+    logger.info(f"[BRD-gen RAG] built in-memory index: {len(chunks)} chunks, dim={mat.shape[1]}")
+    return {"texts": [c[0] for c in chunks], "tags": [c[1] for c in chunks], "mat": mat}
+
+
+def _retrieve_for_section(index: Dict[str, Any], query_vec: List[float], k: int) -> List[Dict[str, str]]:
+    """Top-k cosine retrieval from the in-memory index for one section.
+    Returns [{"title": source_tag, "content": chunk_text}]."""
+    import numpy as np
+    q = np.asarray(query_vec, dtype="float32")
+    qn = np.linalg.norm(q)
+    if qn == 0:
+        return []
+    q = q / qn
+    sims = index["mat"] @ q
+    top = np.argsort(-sims)[: max(1, k)]
+    return [{"title": index["tags"][i], "content": index["texts"][i]} for i in top]
+
+
 def _build_context_bundle(
     *,
     template_text: str,
-    transcript_text: str,
+    transcript_text: str = "",
+    chat_history_text: str = "",
+    long_term_facts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Assemble the context bundle that goes into the cached system
-    prefix. Same shape used by both docs-path and history-path so the
-    section workers don't need to branch on origin."""
-    return {
-        "transcript": transcript_text,
+    """Assemble the unified context bundle that goes into the cached system
+    prefix. Every generation considers ALL available sources; the section
+    workers don't branch on origin. Only non-empty sources are included so
+    the cached prefix stays as small as the inputs allow.
+
+      transcript        — uploaded doc text (docs path)
+      chat_history      — formatted gathering conversation (history path)
+      long_term_facts   — facts retrieved from prior sessions on this
+                          project (opt-in; marked [from prior session] so
+                          the model treats them as Tier-2 supporting context)
+    """
+    bundle: Dict[str, Any] = {
         "template_text": template_text,
         "style_constraints": (
             "Formal, professional tone. No first-person ('we'/'I'). "
@@ -453,6 +795,15 @@ def _build_context_bundle(
             "sections by number ('§4') not by content."
         ),
     }
+    if transcript_text:
+        bundle["transcript"] = transcript_text
+    if chat_history_text:
+        bundle["chat_history"] = chat_history_text
+    if long_term_facts:
+        # Marker mirrors the Tier-3 [assumption] convention: content sourced
+        # from prior sessions is supporting context, not a fresh Tier-1 fact.
+        bundle["long_term_facts"] = [f"{f} [from prior session]" for f in long_term_facts]
+    return bundle
 
 
 def _generate_brd_parallel(
@@ -460,8 +811,11 @@ def _generate_brd_parallel(
     brd_id: str,
     session_id: Optional[str],
     template_text: str,
-    transcript_text: str,
-    user_id: Optional[str],
+    transcript_text: str = "",
+    chat_history_text: str = "",
+    long_term_facts: Optional[List[str]] = None,
+    existing_sections: Optional[Dict[int, List[Dict[str, Any]]]] = None,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Phase 6 parallel generation: prime cache → fan out 16 → assemble.
 
@@ -488,10 +842,123 @@ def _generate_brd_parallel(
     # Mark generation as started so the SSE endpoint can confirm in-flight.
     _write_generation_status(brd_id, "running", sections_complete=[], session_id=session_id)
 
-    # Build cached system blocks ONCE; every section worker reuses them.
+    existing_sections = existing_sections or {}
+
+    # ── Per-section RAG (Phase 1): index the corpus ONCE, retrieve per section.
+    # When active, the full transcript/chat are NOT placed in the cached prefix
+    # — each section only sees its retrieved slice, which keeps every call small
+    # and avoids the ~450K-token gateway 502 on large inputs.
+    #
+    # Hybrid coverage (post-audit): embedding-similarity retrieval undercounts
+    # SURFACE facts (dates, names, vendors, metrics) because they don't
+    # contribute to semantic similarity. The facts-ledger pass extracts those
+    # deterministically and routes them to gap-heavy sections. Runs in parallel
+    # with embedding so the user-visible latency is max(embed, regex), not sum.
+    corpus_chars = len(transcript_text or "") + len(chat_history_text or "")
+    rag_index = None
+    section_chunks: Dict[int, List[Dict[str, str]]] = {}
+    section_facts: Dict[int, List[str]] = {}
+    if BRD_USE_RAG_CONTEXT and corpus_chars >= BRD_RAG_MIN_CHARS:
+        logger.info(
+            f"[BRD-gen RAG] corpus={corpus_chars} chars >= {BRD_RAG_MIN_CHARS} "
+            f"— building per-section index + facts ledger"
+        )
+
+        # Throttled heartbeat: write _generation_status.json every ~10s with
+        # embedding_progress so the SSE endpoint has fresh bytes to forward.
+        # Without this, large corpora (>1 MB) can sit silent for 2+ minutes
+        # during the embedding-only phase and the browser drops the SSE
+        # connection before any section completes.
+        _emb_hb_state = {"last": 0.0}
+        def _embedding_progress_cb(processed: int, total: int) -> None:
+            now = time.time()
+            if now - _emb_hb_state["last"] < 10.0:
+                return
+            _emb_hb_state["last"] = now
+            try:
+                _write_generation_status(
+                    brd_id, "running",
+                    sections_complete=[],
+                    session_id=session_id,
+                    embedding_progress=processed,
+                    embedding_total=total,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[BRD-gen] embedding heartbeat write failed (non-fatal): {e}"
+                )
+
+        def _build_index_job():
+            return _build_rag_index(
+                transcript_text,
+                chat_history_text,
+                progress_callback=_embedding_progress_cb,
+            )
+
+        def _build_facts_job():
+            if not BRD_USE_FACTS_LEDGER:
+                return {}
+            corpus = (transcript_text or "") + ("\n\n" + chat_history_text if chat_history_text else "")
+            try:
+                from services.facts_extractor import extract_facts, route_facts_to_sections
+                t0 = time.time()
+                # spaCy NER is opt-in via BRD_USE_FACT_EXTRACTION. When OFF
+                # we run regex-only (always free, always available). When ON
+                # we also try spaCy — falls back gracefully if the package or
+                # en_core_web_sm model isn't bundled into the Lambda zip.
+                facts = extract_facts(corpus, use_spacy=BRD_USE_FACT_EXTRACTION)
+                routed = route_facts_to_sections(facts)
+                logger.info(
+                    f"[BRD-gen FACTS] extracted in {time.time()-t0:0.2f}s — "
+                    f"{sum(len(v) for v in facts.values())} raw facts across "
+                    f"{len(facts)} categories; routed to {len(routed)} sections "
+                    f"(spacy={'on' if BRD_USE_FACT_EXTRACTION else 'off'})"
+                )
+                return routed
+            except Exception as e:
+                logger.warning(f"[BRD-gen FACTS] extractor failed — continuing without ledger: {e}")
+                return {}
+
+        with ThreadPoolExecutor(max_workers=2) as ex_idx:
+            f_idx = ex_idx.submit(_build_index_job)
+            f_fct = ex_idx.submit(_build_facts_job)
+            rag_index = f_idx.result()
+            section_facts = f_fct.result()
+
+        if rag_index:
+            try:
+                from services.embedding_service import embedding_service
+                seeds = [SECTION_RAG_QUERIES[n] for n, _t, _s in BRD_SECTIONS]
+                seed_vecs = embedding_service.generate_embeddings_batch(seeds)
+                for i, (n, _t, _s) in enumerate(BRD_SECTIONS):
+                    # Gap-heavy sections (4,6,10,12,13,14,16) get more chunks
+                    # because the coverage audit showed embedding-similarity
+                    # under-retrieves the facts those sections need.
+                    k = BRD_RAG_TOP_K_HIGH if n in HIGH_K_SECTIONS else BRD_RAG_TOP_K
+                    section_chunks[n] = _retrieve_for_section(rag_index, seed_vecs[i], k)
+                logger.info(
+                    f"[BRD-gen RAG] retrieved chunks: default_k={BRD_RAG_TOP_K} "
+                    f"high_k={BRD_RAG_TOP_K_HIGH} (sections {sorted(HIGH_K_SECTIONS)}) "
+                    f"for {len(section_chunks)} sections"
+                )
+            except Exception as e:
+                logger.warning(f"[BRD-gen RAG] section retrieval failed — inline fallback: {e}")
+                rag_index = None
+                section_chunks = {}
+    elif BRD_USE_RAG_CONTEXT:
+        logger.info(
+            f"[BRD-gen RAG] corpus={corpus_chars} chars < {BRD_RAG_MIN_CHARS} "
+            f"— small input, inlining full context (no RAG)"
+        )
+    rag_active = bool(rag_index and section_chunks)
+
+    # Build cached system blocks ONCE; every section worker reuses them. When
+    # RAG is active, omit the bulky transcript/chat from the cached prefix.
     context_bundle = _build_context_bundle(
         template_text=template_text,
-        transcript_text=transcript_text,
+        transcript_text="" if rag_active else transcript_text,
+        chat_history_text="" if rag_active else chat_history_text,
+        long_term_facts=long_term_facts,
     )
     system_blocks = build_cached_system_blocks(context_bundle)
     logger.info(
@@ -519,6 +986,9 @@ def _generate_brd_parallel(
                 user_id=user_id,
                 brd_id=brd_id,
                 gen_start_ts=start_ts,
+                current_draft=existing_sections.get(n),
+                rag_chunks=section_chunks.get(n),
+                facts_ledger=section_facts.get(n),
             )
             for n, _title, _slug in BRD_SECTIONS
         ]
@@ -873,6 +1343,259 @@ def _invoke_bedrock(prompt: str, max_tokens: int = None, user_id: Optional[str] 
     return brd_text
 
 
+# ============================================================================
+# Fix 2 — post-generation BRD-to-AgentCore-memory push
+#
+# After a successful generation, we serialize each section into one or more
+# DECLARATIVE facts and write them as AgentCore Memory conversational events
+# under a SEPARATE sessionId ("_brd_snapshot_<brd_id>"). The registered
+# SEMANTIC strategy then extracts those facts into namespace
+# "user-{user_id}:project-{project_id}" so a future session in the same
+# project can retrieve them via get_long_term_facts.
+#
+# Decomposition is SECTION-AWARE so we don't over-flood retrieval with 87
+# atomic "the system shall…" FR facts. See plan §"Files to modify > 4. lambda_brd_generator.py".
+# ============================================================================
+
+# Per-section decomposition strategy.
+_SECTION_STRATEGY = {
+    1:  "paragraph",   # Document Overview
+    2:  "paragraph",   # Purpose
+    3:  "paragraph",   # Background / Context
+    4:  "per_row",     # Stakeholders
+    5:  "per_bullet",  # Scope (In/Out)
+    6:  "per_row",     # Business Objectives
+    7:  "summary",     # Functional Requirements (~87 rows -> 1-3 facts)
+    8:  "summary",     # NFR
+    9:  "summary",     # User Stories
+    10: "per_bullet",  # Assumptions
+    11: "per_bullet",  # Constraints
+    12: "summary",     # Acceptance Criteria / KPIs
+    13: "per_row",     # Timeline / Milestones
+    14: "per_row",     # Risks & Dependencies
+    15: "per_row",     # Approval & Review
+    16: "per_row",     # Glossary
+}
+
+_FACT_MAX_CHARS = 1500
+
+
+def _trunc_fact(s: str) -> str:
+    """Cap each fact at _FACT_MAX_CHARS with an ellipsis marker."""
+    s = (s or "").strip()
+    if len(s) > _FACT_MAX_CHARS:
+        return s[:_FACT_MAX_CHARS].rstrip() + " …"
+    return s
+
+
+def _section_to_memory_facts(
+    sec: Dict[str, Any],
+    *,
+    project_name: str,
+    brd_id: str,
+) -> List[str]:
+    """Section-aware declarative fact builder. See plan for the per-section
+    decomposition rationale. Returns a list of fact strings; caller writes
+    each as an ASSISTANT event in the snapshot session.
+
+    Skips:
+      - blank / dash / [TBD] rows (those are gaps, not facts)
+      - empty paragraphs
+      - sections without a recognized strategy (no facts emitted)
+    """
+    try:
+        from services.brd_orchestrator_utils import _row_is_blank_or_tbd
+    except Exception:
+        # Fallback if utils not bundled in this Lambda
+        def _row_is_blank_or_tbd(row):  # type: ignore
+            return not any(str(c or "").strip() for c in (row or []))
+
+    n = sec.get("number")
+    title = (sec.get("title") or "").strip()
+    strategy = _SECTION_STRATEGY.get(n)
+    if not strategy:
+        return []
+
+    p = project_name
+    facts: List[str] = []
+
+    if strategy == "paragraph":
+        for block in sec.get("content") or []:
+            if (block.get("type") or "").lower() != "paragraph":
+                continue
+            text = (block.get("text") or "").strip()
+            if not text:
+                continue
+            facts.append(_trunc_fact(f"BRD for project {p}, {title}: {text}"))
+
+    elif strategy == "per_bullet":
+        for block in sec.get("content") or []:
+            btype = (block.get("type") or "").lower()
+            if btype not in ("bullet_list", "bullet", "glossary"):
+                continue
+            heading = (block.get("text") or "").strip()  # e.g. "In Scope" sub-header
+            label = f"{title} ({heading})" if heading else title
+            for item in block.get("items") or []:
+                s = str(item or "").strip()
+                if not s:
+                    continue
+                facts.append(_trunc_fact(f"BRD for project {p}, {label}: {s}"))
+
+    elif strategy == "per_row":
+        for block in sec.get("content") or []:
+            if (block.get("type") or "").lower() != "table":
+                continue
+            headers = [str(h or "").strip() for h in (block.get("headers") or [])]
+            for row in block.get("rows") or []:
+                if _row_is_blank_or_tbd(row):
+                    continue
+                cells = [str(c or "").strip() for c in row]
+                # Render as "Header: cell; Header: cell; …"
+                pairs = [f"{h}: {c}" for h, c in zip(headers, cells) if c]
+                fact = f"BRD for project {p}, {title} — " + "; ".join(pairs)
+                facts.append(_trunc_fact(fact))
+
+    elif strategy == "summary":
+        total = 0
+        first_id = ""
+        last_id = ""
+        sample_descs: List[str] = []
+        for block in sec.get("content") or []:
+            if (block.get("type") or "").lower() != "table":
+                continue
+            rows = [r for r in (block.get("rows") or []) if not _row_is_blank_or_tbd(r)]
+            total += len(rows)
+            if rows and not first_id:
+                first_id = str(rows[0][0] or "").strip()
+            if rows:
+                last_id = str(rows[-1][0] or "").strip()
+            # Collect up to 5 row "description" cells (second column conventionally)
+            for r in rows[:5]:
+                if len(r) >= 2:
+                    desc = str(r[1] or "").strip()
+                    if desc and len(sample_descs) < 5:
+                        sample_descs.append(desc[:120])
+        if total > 0:
+            id_range = ""
+            if first_id and last_id and first_id != last_id:
+                id_range = f" (IDs {first_id}..{last_id})"
+            elif first_id:
+                id_range = f" (ID {first_id})"
+            main = (
+                f"BRD for project {p}, {title}: {total} entries{id_range}"
+            )
+            if sample_descs:
+                main += ". Examples: " + " | ".join(sample_descs[:3])
+            facts.append(_trunc_fact(main))
+            # Up to two additional verbatim-row highlights for high-value
+            # subjects (first two non-empty rows beyond the summary line)
+            for desc in sample_descs[:2]:
+                facts.append(_trunc_fact(f"BRD for project {p}, {title} — {desc}"))
+
+    return facts
+
+
+def _resolve_project_name(structure: Dict[str, Any], project_id: Optional[str]) -> str:
+    """Try to recover a human-readable project name for the fact prefix.
+    Falls back to project_id, then "<unknown>" if nothing helpful exists.
+
+    Looks in §1 Document Overview's Document Name row, if present.
+    """
+    for sec in structure.get("sections") or []:
+        if sec.get("number") != 1:
+            continue
+        for block in sec.get("content") or []:
+            if (block.get("type") or "").lower() != "table":
+                continue
+            for row in block.get("rows") or []:
+                if len(row) >= 2 and str(row[0] or "").strip().lower() == "document name":
+                    name = str(row[1] or "").strip()
+                    if name and name not in ("TBD", "-", "—"):
+                        return name
+    return project_id or "<unknown>"
+
+
+def _push_brd_to_memory(
+    *,
+    brd_id: str,
+    structure: Dict[str, Any],
+    user_id: Optional[str],
+    project_id: Optional[str],
+    session_id: Optional[str],
+) -> None:
+    """Inline serial push of every section's facts into AgentCore Memory.
+
+    Writes to a SEPARATE sessionId ("_brd_snapshot_<brd_id>") so
+    read_memory_history (which queries by real chat sessionId) never
+    sees these — they're for SEMANTIC extraction only.
+
+    Failures are logged at WARNING and continue — bad memory writes
+    NEVER fail BRD generation.
+    """
+    t0 = time.time()
+    if not (user_id and project_id and session_id):
+        logger.info(
+            f"[BRD-mem] skipping memory push: user_id={bool(user_id)} "
+            f"project_id={bool(project_id)} session_id={bool(session_id)}"
+        )
+        return
+
+    try:
+        from services.brd_orchestrator_utils import (
+            write_memory_event,
+            BRD_SNAPSHOT_SESSION_PREFIX,
+        )
+    except Exception as e:
+        logger.warning(f"[BRD-mem] brd_orchestrator_utils unavailable — skip push: {e}")
+        return
+
+    snapshot_sid = f"{BRD_SNAPSHOT_SESSION_PREFIX}{brd_id}"
+    project_name = _resolve_project_name(structure, project_id)
+    sections = structure.get("sections") or []
+
+    logger.info(
+        f"[BRD-mem] push start brd_id={brd_id} snapshot_sid={snapshot_sid} "
+        f"project_name={project_name!r} section_count={len(sections)}"
+    )
+
+    fact_count = 0
+    failed_writes = 0
+    for sec in sections:
+        if not isinstance(sec, dict):
+            continue
+        n = sec.get("number")
+        if sec.get("status") == "generation_failed":
+            logger.info(f"[BRD-mem] skip §{n} (status=generation_failed)")
+            continue
+        section_facts = _section_to_memory_facts(
+            sec, project_name=project_name, brd_id=brd_id,
+        )
+        if not section_facts:
+            continue
+        for i, fact_text in enumerate(section_facts):
+            try:
+                write_memory_event(
+                    session_id=snapshot_sid,
+                    user_id=user_id,
+                    role="ASSISTANT",
+                    content=fact_text,
+                )
+                fact_count += 1
+            except Exception as e:
+                failed_writes += 1
+                logger.warning(
+                    f"[BRD-mem] write_memory_event failed §{n} fact#{i}: {e}"
+                )
+        logger.info(f"[BRD-mem] §{n} ({sec.get('title','')!r}) -> {len(section_facts)} facts")
+
+    elapsed = time.time() - t0
+    logger.info(
+        f"[BRD-mem] push DONE sections={len(sections)} facts_written={fact_count} "
+        f"failed_writes={failed_writes} elapsed={elapsed:0.1f}s "
+        f"sessionId={snapshot_sid}"
+    )
+
+
 def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
     """Phase 6 entry point: prime-then-fan-out section generation.
 
@@ -897,15 +1620,35 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
     session_id = evt.get("session_id")
     user_id    = evt.get("user_id")
 
+    # Unified context bundle. The orchestrator passes everything available
+    # under event["context"]; legacy/test callers may still pass the same
+    # fields at the top level, so read context first then fall back.
+    ctx = evt.get("context") or {}
+
+    def _src(*keys: str):
+        for k in keys:
+            if ctx.get(k):
+                return ctx.get(k)
+            if evt.get(k):
+                return evt.get(k)
+        return None
+
+    default_bucket = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
+
     # Pull template + transcript — supports both inline-text and
     # S3-key payload shapes (matches the existing monolithic input contract).
-    template_text   = evt.get("template")   or evt.get("template_text")
-    transcript_text = evt.get("transcript") or evt.get("transcript_text")
+    template_text   = _src("template", "template_text")
+    transcript_text = _src("transcript", "transcript_text")
 
-    template_s3_bucket   = evt.get("template_s3_bucket")
-    template_s3_key      = evt.get("template_s3_key")
-    transcript_s3_bucket = evt.get("transcript_s3_bucket")
-    transcript_s3_key    = evt.get("transcript_s3_key")
+    template_s3_bucket   = _src("template_s3_bucket")
+    template_s3_key      = _src("template_s3_key")
+    transcript_s3_bucket = _src("transcript_s3_bucket") or (default_bucket if _src("transcript_s3_key") else None)
+    transcript_s3_key    = _src("transcript_s3_key")
+
+    # Additional unified sources.
+    chat_session_id  = _src("chat_session_id") or session_id
+    existing_brd_id  = _src("existing_brd_id")
+    long_term_facts  = ctx.get("long_term_facts") or evt.get("long_term_facts") or []
 
     if not template_text and template_s3_bucket and template_s3_key:
         try:
@@ -955,11 +1698,33 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
             logger.error(f"[BRD-gen parallel] transcript S3 fetch failed: {e}")
             return _parallel_error_response(brd_id, f"transcript fetch failed: {e}", session_id)
 
-    if not transcript_text:
+    # Chat history — the gathering conversation. Fetched here (not passed
+    # inline) so a long conversation never bloats the async-invoke payload.
+    chat_history_text = ""
+    if chat_session_id:
+        try:
+            messages = get_conversation_history(chat_session_id, user_id=user_id)
+            chat_history_text = format_conversation(messages)
+            logger.info(f"[BRD-gen parallel] chat history: {len(chat_history_text)} chars")
+        except Exception as e:
+            logger.warning(f"[BRD-gen parallel] chat history fetch failed (continuing): {e}")
+
+    # Existing BRD — for regeneration, each section's current content is
+    # handed to its worker so regen merges instead of overwriting.
+    existing_sections: Dict[int, List[Dict[str, Any]]] = {}
+    if existing_brd_id:
+        existing_sections = _read_existing_brd_sections(existing_brd_id)
+
+    if long_term_facts:
+        logger.info(f"[BRD-gen parallel] long-term facts: {len(long_term_facts)} fact(s)")
+
+    # Every generation uses all available sources. Require at least one
+    # content source — the template alone produces an empty-shell BRD.
+    if not (transcript_text or chat_history_text or existing_sections):
         return _parallel_error_response(
             brd_id,
-            "transcript is required (the template is auto-fetched from S3; "
-            "the transcript must be supplied by the caller)",
+            "no content source: provide a transcript, a chat_session_id with "
+            "conversation history, or an existing_brd_id to regenerate",
             session_id,
         )
 
@@ -970,7 +1735,10 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
             brd_id=brd_id,
             session_id=session_id,
             template_text=template_text,
-            transcript_text=transcript_text,
+            transcript_text=transcript_text or "",
+            chat_history_text=chat_history_text,
+            long_term_facts=long_term_facts,
+            existing_sections=existing_sections,
             user_id=user_id,
         )
     except Exception as e:
@@ -1024,7 +1792,13 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
         )
         return _parallel_error_response(brd_id, f"S3 write failed: {e}", session_id)
 
-    # Final status write — the SSE endpoint reads this for terminal-state.
+    # ORDER MATTERS: write terminal status FIRST so the frontend SSE sees
+    # generation as complete IMMEDIATELY. Then push BRD content into AgentCore
+    # Memory after — that adds 6-10s to lambda billed time but is INVISIBLE
+    # to the user. Previously this was reversed; the [BRD-mem] delay left
+    # the SSE stream in a "running" state for 6-10s after S3 already had all
+    # section partials, which manifested as late-fan-out sections (§13/§14/§16)
+    # appearing stuck in the UI.
     _write_generation_status(
         brd_id,
         terminal_status,
@@ -1033,6 +1807,26 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
         error_message=error_msg,
         session_id=session_id,
     )
+
+    # Fix 2: push BRD content into AgentCore Memory as declarative facts
+    # under a "brdsnap-<brd_id>" sessionId (AgentCore's sessionId regex
+    # rejects leading underscores) so cross-session recall surfaces prior-
+    # session BRD content. Runs AFTER terminal_status so the user already
+    # sees their BRD as complete.
+    if terminal_status in ("complete", "partial"):
+        project_id = evt.get("project_id") or (evt.get("context") or {}).get("project_id")
+        try:
+            _push_brd_to_memory(
+                brd_id=brd_id,
+                structure=structure_payload,
+                user_id=user_id,
+                project_id=project_id,
+                session_id=session_id,
+            )
+        except Exception as e:
+            logger.warning(f"[BRD-gen parallel] memory push failed (non-fatal): {e}")
+    else:
+        logger.info(f"[BRD-gen parallel] skipping memory push (terminal_status={terminal_status})")
 
     return {
         "statusCode": 200,

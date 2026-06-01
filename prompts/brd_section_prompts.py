@@ -45,6 +45,7 @@ from prompts.brd_section_definitions import (
     SECTION_FORMATS,
     section_title,
 )
+from prompts.cache_control import cache_control_value
 
 
 # ============================================================================
@@ -89,36 +90,55 @@ Never reorder, skip, merge, or split sections. Never change column
 counts or names. Never replace prose with a table or vice versa.
 
 ═══════════════════════════════════════════════════════════════════════
-CONTENT SOURCING — three tiers, strict precedence
+CONTENT SOURCING & PROVENANCE — flag everything the USER did not state
 ═══════════════════════════════════════════════════════════════════════
 
-The context bundle below contains source material: a transcript, a
-chat history, extracted facts, or any combination. Treat that as the
-ONLY source of truth for content.
+The context bundle below is the ONLY source of truth. The reader MUST be
+able to tell, at a glance, which content the user actually provided and
+which the AI inferred. That distinction is non-negotiable.
 
-  TIER 1 — Explicit facts in the input.
-    Use these directly. If the input says "Sarah Johnson, Product
-    Owner, owns backlog prioritization", write exactly that.
+SPEAKER ATTRIBUTION (the chat_history labels every line):
+  - Lines beginning "USER:" are what the user actually stated. These are
+    the ONLY Tier-1 facts.
+  - Lines beginning "ANALYST:" (Mary, the assistant) are NOT user facts.
+    Mary often volunteers competitors, prices, frameworks, or suggestions.
+    Treat anything that originates from an "ANALYST:" line as an
+    AI ASSUMPTION unless a later "USER:" line explicitly agreed
+    ("yes", "do that", "correct", "go ahead").
+  - A transcript with no USER:/ANALYST: prefixes is an uploaded document;
+    treat its content as Tier-1 source material.
 
-  TIER 2 — Directly inferable from explicit facts.
-    Conservative inference only. If the input names an engineering
-    lead but not their title, "Engineering Lead" is OK as a role.
-    Inferring "VP of Product" because most projects have one is NOT
-    OK. The bar is: would a careful reader agree this is *stated*
-    or *strongly implied* by the input?
+THREE TIERS:
+  TIER 1 — Explicitly stated by the USER (or present in an uploaded
+    document). Use directly, UNMARKED.
+    e.g. the user said "small businesses and ecommerce shops" → write it
+    with no marker.
 
-  TIER 3 — Conservative placeholder (last resort).
-    Only when Tier 1 and Tier 2 give you nothing for the section.
-    Produce ONE placeholder row appropriate to the section. Mark
-    Tier 3 content by ending the last field with `[assumption]`.
+  TIER 2 — Inferred from Tier-1 facts, OR stated only by the ANALYST and
+    never confirmed by the user. Conservative inference only (a named eng
+    lead → "Engineering Lead" is OK; "VP of Product because most projects
+    have one" is NOT). Competitor names, prices, compliance frameworks,
+    roles, or KPIs that Mary raised but the user never confirmed are Tier 2.
 
-  NEVER:
-    - Invent named individuals not in the input.
-    - Invent specific dates, ROI numbers, or compliance details.
-    - Invent technology choices the input did not mention.
-    - Promote a Tier 2 inference to a Tier 1 statement of fact.
+  TIER 3 — A conservative professional default, only when Tiers 1–2 give
+    nothing for a field but a sensible default exists.
 
-  When in doubt, prefer fewer rows or "TBD" over invention.
+PROVENANCE MARK — append " [AI-ASSUMPTION]" to EVERY Tier-2 and Tier-3
+item so the user can see what they did not state:
+  - Table cell  → end the cell's text with " [AI-ASSUMPTION]".
+  - Bullet/para → end the line with " [AI-ASSUMPTION]".
+  Tier-1 (user-stated) content is the ONLY content left unmarked.
+
+  NEVER present an ANALYST suggestion or your own inference as a user
+  fact — i.e. never leave Tier-2/Tier-3 content unmarked. Do NOT invent
+  named individuals. If you supply a conservative default for dates,
+  ROI numbers, compliance frameworks, or technology choices the input
+  never mentioned, it is Tier 3 and MUST carry [AI-ASSUMPTION].
+
+  LONG-TERM FACTS — items in `context_bundle.long_term_facts` carry a
+  trailing "[from prior session]" marker; keep that marker (they are
+  Tier-2 supporting context from earlier sessions). The current input
+  WINS on any conflict.
 
 ═══════════════════════════════════════════════════════════════════════
 EMPTY HANDLING — never drop a section
@@ -168,6 +188,28 @@ section number only — "see §4" — never reproduce content.
 Example: in §7 (Functional Requirements), a row may say "Owner:
 Engineering Lead (see §4)" rather than "Owner: Sarah Johnson".
 Names belong in §4 only.
+
+═══════════════════════════════════════════════════════════════════════
+REGENERATION — merge, don't overwrite
+═══════════════════════════════════════════════════════════════════════
+
+When the user message includes a "Current draft of this section" block,
+you are REGENERATING because new inputs have arrived (a doc, a fact, an
+updated requirement). Treat that draft as authored content the user has
+already seen and may have lightly edited. Your job:
+
+  1. Carry forward every fact, table row, list item, and decision from
+     the current draft UNLESS it directly conflicts with the new inputs.
+  2. If the new inputs (transcript / chat history / facts) state
+     something that contradicts the current draft, the NEW INPUTS WIN.
+     Replace the conflicting bit in-place; keep the surrounding structure.
+  3. Add any new fact / row / item the new inputs introduce that the
+     current draft does not yet cover.
+  4. Do NOT delete content from the current draft just because the new
+     inputs don't mention it — silence is not a conflict.
+  5. Preserve the section's existing structure (table column order, list
+     ordering, ID sequences like FR-001) unless the new inputs force a
+     reorganisation.
 
 ═══════════════════════════════════════════════════════════════════════
 OUTPUT FORMAT — JSON array of content blocks
@@ -443,7 +485,7 @@ Each row is one measurable success criterion:
 
 Only include KPIs the input mentions or strongly implies. Never
 invent target values — if the input says "fast" but no number,
-write "TBD" in Target Value with "[assumption]" suffix marker on
+write "TBD" in Target Value with "[AI-ASSUMPTION]" suffix marker on
 the Metric/Goal cell.
 """
 
@@ -603,7 +645,7 @@ def build_cached_system_blocks(context_bundle: Dict[str, Any]) -> List[Dict[str,
         {
             "type": "text",
             "text": combined_text,
-            "cache_control": {"type": "ephemeral"},
+            "cache_control": cache_control_value(),
         },
     ]
 
@@ -629,6 +671,49 @@ def build_section_user_message(n: int, context: Dict[str, Any] | None = None) ->
     the variable per-call tail — it tells the model which section to
     write and any section-specific emphasis.
     """
+    ctx = context or {}
     if n not in SECTION_PROMPT_BUILDERS:
         raise KeyError(f"no builder registered for section {n}")
-    return SECTION_PROMPT_BUILDERS[n](context or {})
+    body = SECTION_PROMPT_BUILDERS[n](ctx)
+
+    # Per-section RAG (Phase 1): when the generator retrieves chunks relevant
+    # to THIS section, they ride in the user message (not the cached prefix),
+    # so each call stays small. When absent (small-input / RAG-off path) the
+    # full source material is in the cached context bundle as before.
+    rag_chunks = ctx.get("rag_chunks")
+    if rag_chunks:
+        body += (
+            "\n\nRELEVANT SOURCE EXCERPTS for this section (retrieved from the "
+            "project inputs — treat as the Tier-1 source material; if empty or "
+            "thin, apply the empty-handling rules):\n"
+            + _format_rag(rag_chunks)
+        )
+
+    # Facts ledger: deterministic surface-fact extraction (dates, names,
+    # vendors, percentages, severity counts, sprint IDs) routed to this
+    # section by category. Additive to RAG — embeddings under-retrieve these
+    # because they don't carry semantic weight against generic section prompts.
+    facts_ledger = ctx.get("facts_ledger")
+    if facts_ledger:
+        body += (
+            "\n\nSTRUCTURED FACTS LEDGER for this section (extracted directly "
+            "from source — these are Tier-1 facts that may not appear in the "
+            "excerpts above; incorporate the relevant ones, ignore those that "
+            "don't belong in this section):\n"
+            + "\n".join(facts_ledger[:30])
+        )
+    return body
+
+
+def _format_rag(chunks: List[Dict[str, Any]]) -> str:
+    """Render retrieved chunks as bounded <source> blocks. Mirrors
+    prompts/sad_section_prompts.py::_format_rag — cap the count and the
+    per-chunk length so the per-section user message stays predictable."""
+    if not chunks:
+        return "(no relevant excerpts found)"
+    out: List[str] = []
+    for c in chunks[:10]:
+        title = c.get("title") or "source"
+        content = (c.get("content") or "")[:1500]
+        out.append(f'<source title="{title}">\n{content}\n</source>')
+    return "\n".join(out)

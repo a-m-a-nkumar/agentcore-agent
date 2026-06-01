@@ -59,6 +59,15 @@ BRD_FACTS_NAMESPACE_TEMPLATE  = os.getenv(
 )
 BRD_FACTS_TOP_K               = int(os.getenv("BRD_FACTS_TOP_K", "10"))
 
+# Sessions that hold BRD-snapshot events written by the generator post-
+# finalization. Kept separate from real chat sessions so list_events for
+# chat history never returns them. AgentCore's sessionId validator rejects
+# anything not matching `[a-zA-Z0-9][a-zA-Z0-9-_]*` — so the leading char
+# MUST be alphanumeric. We use the "brdsnap-" prefix: still visually
+# distinct from real chat sessions (which look like "brd-{32hex}"), still
+# prefix-matchable by the leak guard, but now passes validation.
+BRD_SNAPSHOT_SESSION_PREFIX   = "brdsnap-"
+
 
 # ============================================================================
 # AWS clients (lazy — reuse across invocations in the same container)
@@ -89,6 +98,16 @@ def _memory():
 def per_user_actor(user_id: str) -> str:
     """Compose the per-user actor_id for AgentCore Memory writes.
     Empty user_id is rejected — would silently land events under "user-".
+
+    NOTE on project scoping: this is per-USER, NOT per-(user, project).
+    Project isolation lives in the SEMANTIC strategy's namespace template
+    (`BRD_FACTS_NAMESPACE_TEMPLATE = "user-{user_id}:project-{project_id}"`),
+    not in actor_id. Chat-history reads happen per-sessionId, and each
+    session belongs to exactly one project, so cross-project chat-history
+    leak isn't possible today either. If you ever add a "list events
+    across user's sessions" path, you'll need to add project_id to the
+    actor_id OR filter the listing. Do NOT change this in place without
+    a migration plan — every existing event lives under user-{uid}.
     """
     if not user_id:
         raise ValueError("per_user_actor: user_id is required")
@@ -219,6 +238,211 @@ def brd_structure_key(brd_id: str) -> str:
 
 
 # ============================================================================
+# BRD chat-context renderer
+#
+# Used by Mary's chat handler (lambda_brd_orchestrator._build_mary_followup
+# and the ASK_QUESTION path) to fold the current BRD's state into the LLM
+# user message so Mary stops asking about content already documented.
+#
+# Three tiers of truncation keep the output within ~5k tokens even on a
+# fully-populated BRD:
+#
+#   Tier 1 (raw ≤ 12000 chars):
+#       full content, every section, every row.
+#   Tier 2 (12000 < raw ≤ 20000):
+#       truncate paragraphs > 400 chars, cap table rows at 15, cap
+#       bullet lists at 20.
+#   Tier 3 (still > 12000 after Tier 2):
+#       collapse §7 / §8 / §9 to a one-line synopsis (count + ID range).
+#       Other sections stay at Tier 2.
+#
+# 🚨 DETERMINISM CONTRACT: the SAME `structure` dict in MUST yield
+# byte-identical output across calls. The BRD chat block ships with
+# `cache_control: ephemeral` so Anthropic's prompt cache only hits when
+# the rendered bytes are stable. No timestamps. Stable iteration order.
+# A unit test asserts `render_brd_for_chat(s) == render_brd_for_chat(s)`.
+# If a future contributor adds a timestamp or unstable sort here, that
+# test fails BEFORE the cache silently goes to 0% hit rate.
+# ============================================================================
+
+_BRD_GAP_RE = re.compile(
+    r"\[(?:TBD|TO\s+BE\s+CONFIRMED|AWAITING\s+INPUT|TBA)\]",
+    re.IGNORECASE,
+)
+
+# Sections collapsed in Tier 3. Counts in IDP-scale BRDs:
+#   §7 Functional Requirements (~87 FRs)
+#   §8 Non-Functional Requirements (~18 NFRs)
+#   §9 User Stories (~15 stories)
+_TIER3_COLLAPSE_SECTIONS = {7, 8, 9}
+
+_RENDER_TIER1_CEIL = 12_000   # chars below which we keep everything
+_RENDER_HARD_CEIL  = 20_000   # absolute output ceiling
+_TIER2_PARA_MAX    = 400
+_TIER2_TABLE_ROWS  = 15
+_TIER2_BULLETS     = 20
+
+
+def _row_is_blank_or_tbd(row: List[Any]) -> bool:
+    """True if every cell in `row` is empty/dash/[TBD]-style placeholder.
+    Used both for gap detection (yes -> add to gaps) and for fact
+    extraction (yes -> skip; not a real fact)."""
+    if not row:
+        return True
+    for cell in row:
+        s = str(cell or "").strip()
+        if not s or s in ("-", "—", "–"):
+            continue
+        if _BRD_GAP_RE.search(s):
+            continue
+        # Found a real cell with content.
+        return False
+    return True
+
+
+def _render_block(block: Dict[str, Any], *, tier: int) -> str:
+    """Render one content block to a string. Tier 1 = full, Tier 2 = capped."""
+    btype = (block.get("type") or "").lower()
+    if btype == "paragraph":
+        text = (block.get("text") or "").strip()
+        if tier >= 2 and len(text) > _TIER2_PARA_MAX:
+            text = text[:_TIER2_PARA_MAX].rstrip() + " …"
+        return text
+    if btype == "heading":
+        return f"**{(block.get('text') or '').strip()}**"
+    if btype in ("bullet_list", "bullet", "glossary"):
+        items = list(block.get("items") or [])
+        if tier >= 2 and len(items) > _TIER2_BULLETS:
+            items = items[:_TIER2_BULLETS] + [f"…and {len(block.get('items') or []) - _TIER2_BULLETS} more"]
+        return "\n".join(f"- {str(i).strip()}" for i in items if str(i or "").strip())
+    if btype == "table":
+        headers = list(block.get("headers") or [])
+        rows = list(block.get("rows") or [])
+        if tier >= 2 and len(rows) > _TIER2_TABLE_ROWS:
+            rows = rows[:_TIER2_TABLE_ROWS]
+            tail = f"…and {len(block.get('rows') or []) - _TIER2_TABLE_ROWS} more rows"
+        else:
+            tail = ""
+        lines = []
+        if headers:
+            lines.append("| " + " | ".join(str(h) for h in headers) + " |")
+        for row in rows:
+            lines.append("| " + " | ".join(str(c or "").strip() for c in row) + " |")
+        if tail:
+            lines.append(tail)
+        return "\n".join(lines)
+    return ""
+
+
+def _section_synopsis(sec: Dict[str, Any]) -> str:
+    """Tier 3 one-line collapse for high-row-count sections. Pure-Python,
+    deterministic — finds the first ID prefix in the first table block
+    and the row count. Used only for §7/§8/§9."""
+    title = sec.get("title") or ""
+    total = 0
+    first_id = ""
+    last_id  = ""
+    for block in sec.get("content") or []:
+        if (block.get("type") or "").lower() != "table":
+            continue
+        rows = block.get("rows") or []
+        total += len(rows)
+        if rows and not first_id:
+            # First column conventionally holds the ID (FR-001, NFR-001, US-001…)
+            first_id = str(rows[0][0] or "").strip()
+        if rows:
+            last_id = str(rows[-1][0] or "").strip()
+    if total == 0:
+        return f"({title} — empty)"
+    if first_id and last_id and first_id != last_id:
+        return f"{total} entries ({first_id}..{last_id})"
+    return f"{total} entries"
+
+
+def render_brd_for_chat(structure: Dict[str, Any]) -> Tuple[str, List[str]]:
+    """Serialize a `brd_structure.json` into a compact text block + gap list
+    for injection into Mary's chat context.
+
+    Returns:
+      brd_text — plain-text rendering of every populated section, suitable
+                 for embedding in the user message of a Mary chat call.
+      gaps     — ordered list of "§{n} {title}: {hint}" strings extracted
+                 from `[TBD]`/`[TO BE CONFIRMED]`/`Awaiting input` markers
+                 and blank table rows. Capped at 50 entries.
+
+    🚨 Determinism: same `structure` in -> byte-identical `brd_text` out.
+    No timestamps, no random IDs, stable iteration order. The cache
+    breakpoint after this block depends on this contract.
+    """
+    sections = list(structure.get("sections") or [])
+    sections.sort(key=lambda s: int(s.get("number") or 0))
+    section_count = len(sections)
+
+    gaps: List[str] = []
+    # First pass: collect gaps deterministically, in (section_number, order)
+    for sec in sections:
+        n = sec.get("number")
+        title = (sec.get("title") or "").strip()
+        for blk_idx, block in enumerate(sec.get("content") or []):
+            btype = (block.get("type") or "").lower()
+            if btype == "paragraph":
+                text = (block.get("text") or "")
+                if _BRD_GAP_RE.search(text):
+                    snippet = text.strip().replace("\n", " ")[:120]
+                    gaps.append(f"§{n} {title}: {snippet}")
+            elif btype == "table":
+                for row_idx, row in enumerate(block.get("rows") or []):
+                    if _row_is_blank_or_tbd(row):
+                        # Surface the first non-empty cell as a hint;
+                        # if all are blank, label by row index.
+                        hint = next(
+                            (str(c).strip() for c in row if str(c or "").strip()),
+                            f"row {row_idx + 1} all empty/TBD",
+                        )
+                        gaps.append(f"§{n} {title}: row '{hint}' missing data")
+    if len(gaps) > 50:
+        gaps = gaps[:50]
+
+    # Tier-1 pass: render everything fully
+    def _render_at_tier(tier: int, collapse_sections: set) -> str:
+        out_lines: List[str] = []
+        for sec in sections:
+            n = sec.get("number")
+            title = (sec.get("title") or "").strip()
+            header = f"### §{n} {title}"
+            if n in collapse_sections:
+                out_lines.append(header)
+                out_lines.append(_section_synopsis(sec))
+                out_lines.append("")
+                continue
+            out_lines.append(header)
+            for block in sec.get("content") or []:
+                rendered = _render_block(block, tier=tier)
+                if rendered:
+                    out_lines.append(rendered)
+            out_lines.append("")  # blank line between sections
+        return "\n".join(out_lines).rstrip() + "\n"
+
+    text = _render_at_tier(tier=1, collapse_sections=set())
+    raw_len = len(text)
+    final_tier = 1
+    if raw_len > _RENDER_TIER1_CEIL:
+        text = _render_at_tier(tier=2, collapse_sections=set())
+        final_tier = 2
+        if len(text) > _RENDER_TIER1_CEIL:
+            text = _render_at_tier(tier=2, collapse_sections=_TIER3_COLLAPSE_SECTIONS)
+            final_tier = 3
+    if len(text) > _RENDER_HARD_CEIL:
+        text = text[:_RENDER_HARD_CEIL].rstrip() + "\n…[truncated to hard ceiling]\n"
+
+    logger.info(
+        f"[BRD-render] sections={section_count} gaps={len(gaps)} "
+        f"tier={final_tier} raw_chars={raw_len} final_chars={len(text)}"
+    )
+    return text, gaps
+
+
+# ============================================================================
 # AgentCore Memory — dual-actor I/O for short-term chat history
 # ============================================================================
 
@@ -273,7 +497,21 @@ def read_memory_history(
     `max_messages` total. The cap is applied AFTER merging so users
     don't see a fragmented view when one actor has more events than
     the other.
+
+    🚨 LEAK GUARD: this function MUST NEVER be called with a BRD-snapshot
+    sessionId (prefix `_brd_snapshot_`). Those sessions hold synthetic
+    BRD-derived events written by the generator for cross-session memory
+    retrieval — if they leak into chat-history rendering, the user sees
+    generator output as if Mary said it. A `raise` (not `assert`, which
+    `python -O` strips) makes accidental misuse a loud crash, not a
+    silent UX bug.
     """
+    if session_id and session_id.startswith(BRD_SNAPSHOT_SESSION_PREFIX):
+        raise ValueError(
+            f"read_memory_history called with BRD-snapshot sessionId="
+            f"{session_id!r}; this would leak generator-pushed BRD events "
+            f"into chat history. Code bug — fix the caller."
+        )
     if not AGENTCORE_MEMORY_ID or not session_id:
         return []
 
@@ -391,7 +629,47 @@ def get_long_term_facts(
         elif isinstance(content, str):
             if content.strip():
                 facts.append(content.strip())
+    logger.info(
+        f"[brd_utils] get_long_term_facts namespace={namespace} "
+        f"query_len={len(safe_query)} returned={len(facts)}"
+    )
     return facts[:k]
+
+
+# Default broad query used by get_recent_facts. Chosen to match the SEMANTIC
+# extractor's likely fact categories (purpose, stakeholders, scope, requirements)
+# so retrieval surfaces a representative cross-section of project context.
+_RECENT_FACTS_QUERY = (
+    "project overview goals stakeholders requirements scope objectives"
+)
+
+
+def get_recent_facts(
+    user_id: str,
+    project_id: str,
+    top_k: int = None,
+) -> List[str]:
+    """Retrieve a broad sample of long-term facts for this (user, project)
+    when there's no specific query — e.g. session-start "use existing
+    memory" context preview before the user has said anything.
+
+    Pragmatic workaround for AgentCore's empty-query short-circuit (the
+    SEMANTIC API requires a non-empty `searchQuery`; passing empty bails
+    early at :357-359, see git-blame). A broad multi-topic query yields
+    a reasonable "give me the highlights" cross-section.
+
+    Returns a flat list of fact strings, same shape as get_long_term_facts.
+    """
+    logger.info(
+        f"[brd_utils] get_recent_facts user_id_set={bool(user_id)} "
+        f"project_id_set={bool(project_id)} top_k={top_k}"
+    )
+    return get_long_term_facts(
+        user_id=user_id,
+        project_id=project_id,
+        query=_RECENT_FACTS_QUERY,
+        top_k=top_k,
+    )
 
 
 def _format_structured_fact(obj: Dict[str, Any]) -> List[str]:

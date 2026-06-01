@@ -469,6 +469,52 @@ def list_confluence_pages(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/confluence/space-pages")
+def list_all_confluence_space_pages(
+    space_key: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    List EVERY page in a Confluence space (no 200-page cap).
+
+    Uses the same v2 cursor-paginated fetch the RAG ingestion flow uses
+    (ConfluenceService.get_space_pages with max_pages=None) so large spaces
+    return in full. Metadata only (with_body=False) — page bodies are fetched
+    on demand per selection via /confluence/pages/{page_id}.
+    """
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first.",
+        )
+    try:
+        confluence_service = ConfluenceService(
+            credentials["atlassian_domain"],
+            credentials["atlassian_email"],
+            credentials["atlassian_api_token"],
+        )
+        pages = confluence_service.get_space_pages(
+            space_key=space_key, max_pages=None, with_body=False
+        )
+        results = [
+            {
+                "id": p.get("id"),
+                "title": p.get("title"),
+                "webui": (p.get("_links") or {}).get("webui", ""),
+            }
+            for p in pages
+            if p.get("id") and p.get("title")
+        ]
+        logger.info(
+            f"[confluence/space-pages] space={space_key} returned {len(results)} pages"
+        )
+        return {"results": results, "space_key": space_key, "count": len(results)}
+    except Exception as e:
+        logger.error(f"Error fetching all Confluence pages for space '{space_key}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/confluence/pages-by-label")
 def list_confluence_pages_by_label(
     space_key: str,
@@ -551,6 +597,95 @@ def get_confluence_page(
     except Exception as e:
         logger.error(f"Error fetching Confluence page {page_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class ConfluencePagesBulkRequest(BaseModel):
+    page_ids: List[str]
+    # Whether to strip HTML server-side and return plain text (cheaper for the
+    # client to consume; matches the BRD pipeline's needs). When False the raw
+    # storage HTML is returned and the client strips it.
+    plain_text: bool = True
+
+
+def _strip_confluence_html(html: str) -> str:
+    """Best-effort HTML -> plain text. Mirrors the recipe the design flow uses
+    (`<[^>]+>` strip + entity replace + whitespace collapse)."""
+    import re
+    txt = re.sub(r"<[^>]+>", " ", html or "")
+    txt = (
+        txt.replace("&nbsp;", " ")
+           .replace("&amp;", "&")
+           .replace("&lt;", "<")
+           .replace("&gt;", ">")
+    )
+    return re.sub(r"\s+", " ", txt).strip()
+
+
+@router.post("/confluence/pages-bulk")
+def get_confluence_pages_bulk(
+    body: ConfluencePagesBulkRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Fetch many Confluence pages' bodies in PARALLEL server-side.
+
+    The frontend used to fan out one HTTP round-trip per page (Promise.all over
+    the per-page endpoint), which is rate-limited by single-page latency × N.
+    This endpoint fetches up to 10 pages concurrently against Confluence and
+    returns them in input order. Failures don't kill the batch — the failing
+    page comes back with an `error` field and the rest succeed.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    credentials = get_user_atlassian_credentials(current_user["id"])
+    if not credentials or not credentials.get("atlassian_api_token"):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first.",
+        )
+
+    confluence_service = ConfluenceService(
+        credentials["atlassian_domain"],
+        credentials["atlassian_email"],
+        credentials["atlassian_api_token"],
+    )
+
+    page_ids = list(body.page_ids or [])
+    if not page_ids:
+        return {"results": [], "count": 0}
+
+    def _one(pid: str) -> Dict:
+        try:
+            p = confluence_service.get_content_page_by_id(
+                page_id=pid, expand="body.storage,version"
+            )
+            title = p.get("title") or pid
+            html = ((p.get("body") or {}).get("storage") or {}).get("value") or ""
+            text = _strip_confluence_html(html) if body.plain_text else ""
+            return {
+                "id": pid,
+                "title": title,
+                "html": "" if body.plain_text else html,
+                "text": text if body.plain_text else "",
+            }
+        except Exception as e:
+            return {"id": pid, "title": pid, "html": "", "text": "", "error": str(e)[:300]}
+
+    by_id: Dict[str, Dict] = {}
+    # 10 workers is a sensible default for Confluence (servers tolerate it
+    # comfortably and the gain plateaus beyond ~8-12 concurrent fetches).
+    with ThreadPoolExecutor(max_workers=10) as ex:
+        futs = {ex.submit(_one, pid): pid for pid in page_ids}
+        for fut in as_completed(futs):
+            res = fut.result()
+            by_id[res["id"]] = res
+
+    ordered = [by_id[pid] for pid in page_ids if pid in by_id]
+    errors = sum(1 for r in ordered if r.get("error"))
+    logger.info(
+        f"[confluence/pages-bulk] fetched {len(ordered)}/{len(page_ids)} pages "
+        f"({errors} errors) plain_text={body.plain_text}"
+    )
+    return {"results": ordered, "count": len(ordered), "errors": errors}
 
 
 @router.get("/jira/issues/{project_key}")

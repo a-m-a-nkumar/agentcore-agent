@@ -1,7 +1,7 @@
 """
 BRD Intent Router prompt.
 
-Classifies one user chat-box submission into one of 12 intents and
+Classifies one user chat-box submission into one of 11 intents and
 extracts the parameters each handler needs. Single LLM call per turn,
 JSON-only output, deterministic (T=0.0).
 
@@ -36,8 +36,7 @@ BRD_INTENTS: List[str] = [
     "ADD_INFO",
     "EDIT_SECTION",
     "GATHER_REQUIREMENTS",
-    "GENERATE_FROM_DOCS",
-    "GENERATE_FROM_HISTORY",
+    "GENERATE_BRD",
     "AUDIT",
     "REGENERATE_SECTION",
     "INGEST_DOC",
@@ -55,8 +54,7 @@ INTENT_VALID_STAGES: Dict[str, frozenset] = {
     "ADD_INFO":              frozenset({"NEW", "GATHERING", "DRAFTED", "REFINING"}),
     "EDIT_SECTION":          frozenset({"DRAFTED", "REFINING"}),
     "GATHER_REQUIREMENTS":   frozenset({"NEW", "GATHERING", "DRAFTED", "REFINING"}),
-    "GENERATE_FROM_DOCS":    frozenset({"NEW", "GATHERING"}),
-    "GENERATE_FROM_HISTORY": frozenset({"GATHERING"}),
+    "GENERATE_BRD":          frozenset({"NEW", "GATHERING", "DRAFTED", "REFINING"}),
     "AUDIT":                 frozenset({"DRAFTED", "REFINING"}),
     "REGENERATE_SECTION":    frozenset({"DRAFTED", "REFINING"}),
     "INGEST_DOC":            frozenset({"NEW", "GATHERING", "DRAFTED", "REFINING"}),
@@ -127,12 +125,14 @@ Available intents and when each fires:
       (c) Hesitation that invites probing.
     Distinct from ADD_INFO (user volunteered a definite fact) and
     ASK_QUESTION (user asked about existing BRD content).
-  • GENERATE_FROM_DOCS — template + transcript present in payload OR
-    user explicitly says "use this doc/transcript to generate the
-    BRD." Runs the full BRD generator.
-  • GENERATE_FROM_HISTORY — "generate the BRD now", "I'm done", "let's
-    draft it" with NO doc attached. Uses accumulated chat history.
-    Only fires when stage is GATHERING.
+  • GENERATE_BRD — produce (or fully re-produce) the BRD. Fires on
+    "generate the BRD now", "draft it", "I'm done", "create the
+    document", OR when a template+transcript is attached and the user
+    asks to generate from it. ONE generator considers every available
+    source — uploaded docs, the gathering conversation, the existing
+    BRD (regeneration MERGES, it does not overwrite), and prior-session
+    facts. The user no longer chooses "from docs" vs "from history".
+    Distinct from REGENERATE_SECTION, which redoes ONE section only.
   • AUDIT — quality review. "Audit the BRD", "score it", "what's
     missing", "find issues." Returns per-section badges + issue list.
   • REGENERATE_SECTION — explicit redo of one section OR a "yes"-style
@@ -142,16 +142,17 @@ Available intents and when each fires:
     explicitly ask for full generation. Summarises doc into facts.
 
 Disambiguation rules — apply in order, first match wins:
-  1. payload.template AND payload.transcript both present → GENERATE_FROM_DOCS.
+  1. payload.template AND payload.transcript both present → GENERATE_BRD.
   2. file_attached AND message says "use this to generate/create the BRD" /
-     "regenerate from this doc" → GENERATE_FROM_DOCS.
+     "regenerate from this doc" → GENERATE_BRD.
   3. file_attached AND message DOES NOT request full generation → INGEST_DOC.
   4. No BRD exists AND user description is declarative (not a question) →
      GATHER_REQUIREMENTS.
-  5. No BRD exists AND "generate" / "draft" / "I'm done" → GENERATE_FROM_HISTORY.
+  5. "generate" / "draft" / "create the BRD" / "regenerate the BRD" /
+     "I'm done" with NO single-section reference → GENERATE_BRD.
   6. Section reference (number OR topic name) + imperative verb →
      EDIT_SECTION.
-  7. "Redo" / "regenerate" + section reference, OR confirmation
+  7. "Redo" / "regenerate" + a SPECIFIC section reference, OR confirmation
      ("yes"/"go ahead") to a prior fact_saved with regen_proposed=true
      → REGENERATE_SECTION.
   8. "Audit" / "score" / "find issues" / "what's missing" → AUDIT.
@@ -188,7 +189,7 @@ Safety fallback — if confidence < 0.5:
 
 OUTPUT FORMAT — return ONLY this JSON, with NO surrounding text:
 {
-  "intent": "<one of the 12 intents>",
+  "intent": "<one of the 11 intents>",
   "target_section": <integer or null>,
   "target_title": "<section title string or empty>",
   "fact": "<extracted fact for ADD_INFO/GATHER, else empty>",
@@ -234,7 +235,7 @@ def build_router_prompt(
             resolve "this" / "here" references.
         file_attached: True if `file` is present this turn.
         template_attached / transcript_attached: True when both are
-            present we route to GENERATE_FROM_DOCS without LLM.
+            present we route to GENERATE_BRD without LLM.
         last_assistant_card_type / last_assistant_proposed_section:
             Context for resolving "yes"-style confirmations to prior
             cards (drives REGENERATE_SECTION when applicable).

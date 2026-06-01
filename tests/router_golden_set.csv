@@ -51,14 +51,14 @@ au001,Audit the BRD,REFINING,true,false,false,false,,,AUDIT,explicit audit verb
 au002,Score the quality,REFINING,true,false,false,false,,,AUDIT,score request
 au003,What's missing in this BRD?,DRAFTED,true,false,false,false,,,AUDIT,gap audit (whole BRD scope)
 au004,Find issues,REFINING,true,false,false,false,,,AUDIT,issue-finding ask
-# ==================== GENERATE_FROM_DOCS ====================
-gd001,Use this transcript to generate the BRD,GATHERING,false,true,true,true,,,GENERATE_FROM_DOCS,template+transcript present
-gd002,Generate the BRD from this doc,GATHERING,false,true,true,true,,,GENERATE_FROM_DOCS,explicit doc-generation
-gd003,Build the BRD from these files,NEW,false,true,true,true,,,GENERATE_FROM_DOCS,multi-step phrasing
-# ==================== GENERATE_FROM_HISTORY ====================
-gh001,Generate the BRD now,GATHERING,false,false,false,false,,,GENERATE_FROM_HISTORY,explicit generate
-gh002,Let's draft it,GATHERING,false,false,false,false,,,GENERATE_FROM_HISTORY,draft synonym
-gh003,I'm done — create the BRD,GATHERING,false,false,false,false,,,GENERATE_FROM_HISTORY,completion signal
+# ==================== GENERATE_BRD (from docs) ====================
+gd001,Use this transcript to generate the BRD,GATHERING,false,true,true,true,,,GENERATE_BRD,template+transcript present
+gd002,Generate the BRD from this doc,GATHERING,false,true,true,true,,,GENERATE_BRD,explicit doc-generation
+gd003,Build the BRD from these files,NEW,false,true,true,true,,,GENERATE_BRD,multi-step phrasing
+# ==================== GENERATE_BRD (from history) ====================
+gh001,Generate the BRD now,GATHERING,false,false,false,false,,,GENERATE_BRD,explicit generate
+gh002,Let's draft it,GATHERING,false,false,false,false,,,GENERATE_BRD,draft synonym
+gh003,I'm done — create the BRD,GATHERING,false,false,false,false,,,GENERATE_BRD,completion signal
 # ==================== INGEST_DOC ====================
 id001,Here's our existing API spec,GATHERING,false,true,false,false,,,INGEST_DOC,file attached, no generate verb
 id002,Read this spec doc for context,REFINING,true,true,false,false,,,INGEST_DOC,file + context cue

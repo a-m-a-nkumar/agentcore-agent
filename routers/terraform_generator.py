@@ -954,8 +954,9 @@ _PARSE_FIX_RULES = (
 
 
 @router.post("/scan-fix")
-async def scan_and_fix_terraform(req: ScanFixRequest, _=Depends(verify_azure_token)):
+async def scan_and_fix_terraform(req: ScanFixRequest, token_data: dict = Depends(verify_azure_token)):
     """Scan → fix parse errors → fix Checkov failures → re-scan. Loops up to max_iterations."""
+    user_id = token_data.get("oid") or token_data.get("sub")
     files = dict(req.files)
     history = []
     max_iter = min(req.max_iterations or 3, 5)
@@ -1009,7 +1010,7 @@ Requirements:
 - Keep ALL resources/variables that are already present — do not remove anything"""
 
             try:
-                fixed_content = invoke_claude(parse_fix_prompt, max_tokens=6000, temperature=0)
+                fixed_content = invoke_claude(parse_fix_prompt, max_tokens=6000, temperature=0, user_id=user_id)
                 files[rel_path] = strip_fences(fixed_content)
             except Exception as e:
                 logger.error(f"Parse fix failed for {rel_path}: {e}")
@@ -1036,7 +1037,7 @@ Return every file (changed and unchanged) using this exact format:
 ===END==="""
 
             try:
-                raw = invoke_claude(fix_prompt, max_tokens=8000, temperature=0)
+                raw = invoke_claude(fix_prompt, max_tokens=8000, temperature=0, user_id=user_id)
                 fixed = parse_delimited_files(raw)
                 for path, content in fixed.items():
                     if path in files:

@@ -25,9 +25,9 @@ Endpoints (all under /api/brd) — scaffolded across Phase 3 commits:
   POST    /save-section                 → direct (no LLM) save (commit 4)
   POST    /revert-section               → pop previous_versions entry
                                           (commit 4)
-  POST    /generate-from-docs           → template + transcript path
-                                          (commit 5)
-  POST    /generate-from-history        → chat-history path (commit 5)
+  POST    /generate                     → unified BRD generation: docs +
+                                          chat history + existing BRD +
+                                          long-term facts (one generator)
   POST    /cancel-generation            → ack + record cancelled brd_id
                                           (commit 5)
   POST    /audit                        → per-section parallel audit
@@ -68,6 +68,7 @@ from db_helper import (
     increment_message_count,
     update_brd_session_on_completion,
     update_brd_session_stage,
+    update_session,
 )
 
 # Reuse the projects-router auth dependency (DB user row keyed by "id").
@@ -237,10 +238,17 @@ class WarmupResponse(BaseModel):
 
 
 @router.post("/warmup", response_model=WarmupResponse)
-def warmup(current_user: dict = Depends(get_current_user)):
+def warmup(
+    source: str = "module",
+    current_user: dict = Depends(get_current_user),
+):
     """Pre-warm orchestrator + worker Lambdas so the user's first real
     submit doesn't pay cold-start cost. Idempotent: safe to call on
-    every chat-panel mount.
+    every chat-panel mount AND on login success.
+
+    `source` is a free-text tag ("module" on chat-panel mount, "login"
+    on auth success) used only to distinguish warmup origins in the
+    logs — it does not change behaviour.
 
     Fires three async {"action": "ping"} invocations in parallel —
     the orchestrator and both workers warm up independently. Per-
@@ -253,7 +261,10 @@ def warmup(current_user: dict = Depends(get_current_user)):
         BRD_GENERATOR_LAMBDA,
         BRD_FROM_HISTORY_LAMBDA,
     ]
-    ping_payload = {"action": "ping", "request_id": uuid.uuid4().hex[:8]}
+    req_id = uuid.uuid4().hex[:8]
+    logger.info(f"[BRD warmup] source={source} req={req_id} → pinging {len(targets)} Lambdas: {targets}")
+    ping_payload = {"action": "ping", "request_id": req_id}
+    fired = []
     for fn in targets:
         try:
             _lambda().invoke(
@@ -261,8 +272,10 @@ def warmup(current_user: dict = Depends(get_current_user)):
                 InvocationType="Event",
                 Payload=json.dumps(ping_payload).encode("utf-8"),
             )
+            fired.append(fn)
         except Exception as e:
-            logger.warning(f"[BRD warmup] async invoke of {fn} failed (non-fatal): {e}")
+            logger.warning(f"[BRD warmup] source={source} req={req_id} async invoke of {fn} failed (non-fatal): {e}")
+    logger.info(f"[BRD warmup] source={source} req={req_id} ✓ fired {len(fired)}/{len(targets)} pings")
     return WarmupResponse(accepted=True, targets=targets)
 
 
@@ -297,14 +310,25 @@ def _load_long_term_facts_for_router(
     Failures return [] so the UI degrades gracefully -- the
     session-creation modal still works (just shows "no facts yet")
     when the memory store is misconfigured or down.
+
+    Empty query -> route through get_recent_facts (broad seed query).
+    The session-create modal / context-preview endpoints pass query=""
+    meaning "give me what you know about this project" — without this
+    dispatch, get_long_term_facts's safe_query short-circuit returns []
+    and the UI shows "no facts yet" even when long-term facts exist.
     """
     try:
-        from services.brd_orchestrator_utils import get_long_term_facts
-        return get_long_term_facts(
-            user_id=user_id,
-            project_id=project_id,
-            query=query,
-            top_k=top_k,
+        from services.brd_orchestrator_utils import (
+            get_long_term_facts,
+            get_recent_facts,
+        )
+        q = (query or "").strip()
+        if q:
+            return get_long_term_facts(
+                user_id=user_id, project_id=project_id, query=q, top_k=top_k,
+            )
+        return get_recent_facts(
+            user_id=user_id, project_id=project_id, top_k=top_k,
         )
     except Exception as e:
         logger.warning(f"[BRD facts] load failed for user={user_id} project={project_id}: {e}")
@@ -633,6 +657,11 @@ async def brd_turn(
     """
     user_id = current_user["id"]
     session = _ensure_session_owned(session_id, user_id)
+    logger.info(
+        f"[BRD /turn] session={session_id} stage={session.get('stage')} "
+        f"viewing=§{viewing_section} msg={message[:80]!r}"
+        + (f" file={file.filename!r}" if file is not None else "")
+    )
 
     # --- Single file upload (multi-file via Confluence URL is wired in
     #     a later commit -- file= takes priority over any future
@@ -689,6 +718,40 @@ async def brd_turn(
     _apply_stage_hint(session, next_stage_hint)
     _bump_message_count(session_id)
 
+    # --- BUG FIX: persist brd_id when generation kicks off from chat ----
+    # When the user types "generate the BRD" the router classifies as
+    # GENERATE_BRD and the orchestrator returns a generation_starting card
+    # whose payload contains the newly-minted brd_id. The dedicated
+    # /api/brd/generate endpoint stamps that brd_id via
+    # _generation_kickoff_response, but /turn previously dropped it on the
+    # floor — leaving session.brd_id NULL, /sections 404-ing forever, and
+    # the progress card silently giving up. Mirror that here.
+    for c in cards:
+        if not isinstance(c, dict):
+            continue
+        if c.get("type") == "generation_starting":
+            new_brd_id = (c.get("payload") or {}).get("brd_id")
+            if new_brd_id and not session.get("brd_id"):
+                try:
+                    update_session(session_id=session_id, brd_id=new_brd_id)
+                    session["brd_id"] = new_brd_id
+                    logger.info(f"[BRD /turn] stamped brd_id={new_brd_id} on session {session_id}")
+                except Exception as e:
+                    logger.warning(
+                        f"[BRD /turn] failed to stamp brd_id {new_brd_id} on session {session_id}: {e}"
+                    )
+            _enter_generating(session)
+            break
+        if c.get("type") == "generation_failed":
+            revert_to = (c.get("payload") or {}).get("stage_reverted_to")
+            _revert_generation_stage(session, fallback=revert_to or "GATHERING")
+            break
+
+    card_types = [c.get("type") for c in cards if isinstance(c, dict)]
+    logger.info(
+        f"[BRD /turn] ✓ session={session_id} → {len(cards)} card(s) "
+        f"{card_types} next_stage_hint={next_stage_hint}"
+    )
     return {"cards": cards}
 
 
@@ -747,6 +810,10 @@ def brd_save_section(
     """
     user_id = current_user["id"]
     session = _ensure_session_owned(body.session_id, user_id)
+    logger.info(
+        f"[BRD /save-section] session={body.session_id} §{body.section_number} "
+        f"blocks={len(body.content)}"
+    )
 
     result = _invoke_brd_lambda({
         "action": "save_section",
@@ -759,6 +826,10 @@ def brd_save_section(
     })
 
     _maybe_promote_to_refining(session, result)
+    logger.info(
+        f"[BRD /save-section] ✓ session={body.session_id} §{body.section_number} "
+        f"→ {result.get('type') if isinstance(result, dict) else type(result).__name__}"
+    )
     return result
 
 
@@ -899,24 +970,21 @@ def get_section(
 #   • On cancel, sets stage back to prior_stage.
 # ============================================
 
-class BRDGenerateFromDocsRequest(BaseModel):
+class BRDGenerateRequest(BaseModel):
     session_id: str
     project_id: Optional[str] = None
-    # Inline text (for short inputs from the chat composer) OR S3 keys
-    # (preferred for any input > 1MB; matches the lambda_brd_generator
-    # input contract). At least one of each pair must be present;
-    # validation deferred to the Lambda.
+    # Optional uploaded docs. Inline text (short inputs from the chat
+    # composer) OR S3 keys (preferred for any input > 1MB). When BOTH the
+    # transcript and template are omitted, generation falls back to chat
+    # history + the existing BRD + long-term facts — the single generator
+    # considers whatever sources are available. Validation deferred to
+    # the orchestrator (needs at least one content source).
     template: Optional[str] = None
     transcript: Optional[str] = None
     template_s3_bucket: Optional[str] = None
     template_s3_key: Optional[str] = None
     transcript_s3_bucket: Optional[str] = None
     transcript_s3_key: Optional[str] = None
-
-
-class BRDGenerateFromHistoryRequest(BaseModel):
-    session_id: str
-    project_id: Optional[str] = None
 
 
 class BRDCancelGenerationRequest(BaseModel):
@@ -941,6 +1009,10 @@ class BRDIngestDocRequest(BaseModel):
     # populate `files` server-side without touching this endpoint.
     file: Optional[Dict[str, Any]] = None
     files: Optional[List[Dict[str, Any]]] = None
+    # When true, fire-and-forget: async-invoke the orchestrator and return
+    # 202 immediately instead of waiting for fact extraction. Used for large
+    # multi-page Confluence ingests that would otherwise block the request.
+    async_mode: bool = False
 
 
 def _enter_generating(session: Dict[str, Any]) -> None:
@@ -989,6 +1061,22 @@ def _generation_kickoff_response(
         return lambda_result
     card_type = lambda_result.get("type")
     if card_type == "generation_starting":
+        # Persist the minted brd_id onto the session row. The orchestrator
+        # mints brd_id inside the worker payload; without stamping it here
+        # the SSE stream's warm-up loop never resolves a brd_id (spins to
+        # timeout) and /sections + /section/{n} 404 forever, because both
+        # read session["brd_id"]. This is the bridge between the worker's
+        # S3 output prefix (brds/{brd_id}/) and the session the frontend polls.
+        new_brd_id = (lambda_result.get("payload") or {}).get("brd_id")
+        if new_brd_id and not session.get("brd_id"):
+            try:
+                update_session(session_id=session["id"], brd_id=new_brd_id)
+                session["brd_id"] = new_brd_id
+            except Exception as e:
+                logger.warning(
+                    f"[BRD gen] failed to stamp brd_id {new_brd_id} on session "
+                    f"{session.get('id')}: {e}"
+                )
         _enter_generating(session)
     elif card_type == "generation_failed":
         revert_to = (lambda_result.get("payload") or {}).get("stage_reverted_to")
@@ -1053,84 +1141,95 @@ def _offload_large_text_to_s3(
     return bucket, key
 
 
-@router.post("/generate-from-docs")
-def brd_generate_from_docs(
-    body: BRDGenerateFromDocsRequest,
-    current_user: dict = Depends(get_current_user),
+@router.post("/generate")
+async def brd_generate(
+    session_id: str                     = Form(...),
+    project_id: Optional[str]           = Form(None),
+    transcript: Optional[str]           = Form(None),
+    template: Optional[str]             = Form(None),
+    transcript_s3_bucket: Optional[str] = Form(None),
+    transcript_s3_key: Optional[str]    = Form(None),
+    template_s3_bucket: Optional[str]   = Form(None),
+    template_s3_key: Optional[str]      = Form(None),
+    transcript_file: Optional[UploadFile] = File(None),
+    template_file: Optional[UploadFile]    = File(None),
+    current_user: dict                  = Depends(get_current_user),
 ):
-    """Template + transcript -> full BRD. Orchestrator async-invokes
-    the lambda_brd_generator worker with parallel=true (Phase 6) and
-    returns generation_starting immediately.
+    """Unified full-BRD generation. ONE generator Lambda considers every
+    available source — uploaded docs (if attached), the gathering
+    conversation, the existing BRD (regeneration merges), and opt-in
+    long-term facts.
 
-    Large transcripts (>256 KB) are uploaded to S3 first so the Lambda
-    Event-type payload stays under the 1 MB hard cap. The worker reads
-    from S3 when transcript_s3_bucket / transcript_s3_key are set.
+    Multipart form. Uploaded files (transcript_file / template_file) are
+    extracted to text SERVER-SIDE via the same PDF/DOCX/TXT extractor the
+    chat path uses. This is the fix for the .docx-read-as-binary bug: a
+    .docx is a ZIP, so the frontend must send the RAW file here, not text
+    it read with FileReader.readAsText (which yields ~MBs of zip garbage).
+    Text fields (transcript/template) are still accepted for the
+    history-only path (no files) and for already-extracted callers.
+
+    Orchestrator async-invokes lambda_brd_generator with parallel=true and
+    returns generation_starting immediately. Large inline text (>256 KB)
+    spills to S3 so the Event-invoke payload stays under the 1 MB cap.
     """
     user_id = current_user["id"]
-    session = _ensure_session_owned(body.session_id, user_id)
+    session = _ensure_session_owned(session_id, user_id)
+    logger.info(
+        f"[BRD /generate] session={session_id} stage={session.get('stage')} "
+        f"transcript_file={transcript_file.filename if transcript_file else None} "
+        f"template_file={template_file.filename if template_file else None} "
+        f"inline_transcript={len(transcript) if transcript else 0}ch"
+    )
 
-    # If the caller inlined a large transcript/template, spill to S3
-    # before forwarding to the orchestrator. Lambda Event-type invokes
-    # cap at 1 MB; we need to stay below that with headroom for the
-    # session dict + envelope.
-    transcript_text = body.transcript
-    transcript_s3_bucket = body.transcript_s3_bucket
-    transcript_s3_key    = body.transcript_s3_key
-    if transcript_text and not transcript_s3_key:
+    # Extract uploaded files server-side (PDF/DOCX/TXT) and persist the raw
+    # source to S3 for reference. Overrides any text field of the same name.
+    if transcript_file is not None:
+        raw = await transcript_file.read()
+        fname = transcript_file.filename or "transcript"
+        transcript = _extract_uploaded_text(raw, fname)
+        _persist_source_file(session_id, fname, raw, transcript_file.content_type)
+        logger.info(f"[BRD /generate] extracted transcript {fname}: {len(transcript)} chars")
+    if template_file is not None:
+        raw = await template_file.read()
+        fname = template_file.filename or "template"
+        template = _extract_uploaded_text(raw, fname)
+        logger.info(f"[BRD /generate] extracted template {fname}: {len(template)} chars")
+
+    # Spill large inline text to S3 so the async-invoke payload stays < 1 MB.
+    if transcript and not transcript_s3_key:
         spill = _offload_large_text_to_s3(
-            transcript_text, purpose="transcript",
-            session_id=body.session_id, user_id=user_id,
+            transcript, purpose="transcript", session_id=session_id, user_id=user_id,
         )
         if spill is not None:
             transcript_s3_bucket, transcript_s3_key = spill
-            transcript_text = None  # drop inline so payload stays small
+            transcript = None  # drop inline so payload stays small
 
-    template_text = body.template
-    template_s3_bucket = body.template_s3_bucket
-    template_s3_key    = body.template_s3_key
-    if template_text and not template_s3_key:
+    if template and not template_s3_key:
         spill = _offload_large_text_to_s3(
-            template_text, purpose="template",
-            session_id=body.session_id, user_id=user_id,
+            template, purpose="template", session_id=session_id, user_id=user_id,
         )
         if spill is not None:
             template_s3_bucket, template_s3_key = spill
-            template_text = None
+            template = None
 
     payload = {
-        "action": "generate_from_docs",
-        "session_id": body.session_id,
+        "action": "generate",
+        "session_id": session_id,
         "user_id": user_id,
-        "project_id": body.project_id or session.get("project_id"),
-        "template": template_text,
-        "transcript": transcript_text,
+        "project_id": project_id or session.get("project_id"),
+        "template": template,
+        "transcript": transcript,
         "template_s3_bucket": template_s3_bucket,
         "template_s3_key": template_s3_key,
         "transcript_s3_bucket": transcript_s3_bucket,
         "transcript_s3_key": transcript_s3_key,
         "session": _serialize_session_for_event(session),
     }
-    return _generation_kickoff_response(session, _invoke_brd_lambda(payload))
-
-
-@router.post("/generate-from-history")
-def brd_generate_from_history(
-    body: BRDGenerateFromHistoryRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    """"Generate the BRD" with no docs attached -- worker reads chat
-    history from AgentCore Memory + the long-term facts buffer."""
-    user_id = current_user["id"]
-    session = _ensure_session_owned(body.session_id, user_id)
-
-    payload = {
-        "action": "generate_from_history",
-        "session_id": body.session_id,
-        "user_id": user_id,
-        "project_id": body.project_id or session.get("project_id"),
-        "session": _serialize_session_for_event(session),
-    }
-    return _generation_kickoff_response(session, _invoke_brd_lambda(payload))
+    resp = _generation_kickoff_response(session, _invoke_brd_lambda(payload))
+    if isinstance(resp, dict):
+        kicked_brd_id = (resp.get("payload") or {}).get("brd_id") or session.get("brd_id")
+        logger.info(f"[BRD /generate] ✓ kickoff session={session_id} card={resp.get('type')} brd_id={kicked_brd_id}")
+    return resp
 
 
 @router.post("/cancel-generation")
@@ -1174,6 +1273,8 @@ def brd_audit(
     calls fanned out via ThreadPoolExecutor in the Lambda)."""
     user_id = current_user["id"]
     session = _ensure_session_owned(body.session_id, user_id)
+    scope = f"§{body.section_number}" if body.section_number else "whole-BRD"
+    logger.info(f"[BRD /audit] session={body.session_id} scope={scope}")
 
     result = _invoke_brd_lambda({
         "action": "audit",
@@ -1186,6 +1287,10 @@ def brd_audit(
     # An audit IS a refinement action -- bump DRAFTED -> REFINING
     # per the canonical state machine table.
     _maybe_promote_to_refining(session, result)
+    logger.info(
+        f"[BRD /audit] ✓ session={body.session_id} scope={scope} "
+        f"→ {result.get('type') if isinstance(result, dict) else type(result).__name__}"
+    )
     return result
 
 
@@ -1196,11 +1301,14 @@ def brd_ingest_doc(
 ):
     """Ingest one or more docs as fact source. Single-file -> two LLM
     calls (relevance classifier + fact extraction). Multi-file -> loop
-    each through the same body, only the last gets auto_regen=true."""
+    each through the same body, only the last gets auto_regen=true.
+
+    When `async_mode` is set, the orchestrator is fire-and-forget invoked and
+    we return 202 immediately — fact extraction continues in the background."""
     user_id = current_user["id"]
     session = _ensure_session_owned(body.session_id, user_id)
-
-    return _invoke_brd_lambda({
+    n_items = len(body.files or []) + (1 if body.file else 0)
+    payload = {
         "action": "ingest_doc",
         "session_id": body.session_id,
         "user_id": user_id,
@@ -1208,7 +1316,65 @@ def brd_ingest_doc(
         "file": body.file,
         "files": body.files,
         "session": _serialize_session_for_event(session),
-    })
+    }
+    if body.async_mode:
+        logger.info(f"[BRD /ingest-doc] session={body.session_id} items={n_items} → async (Event)")
+        _invoke_brd_lambda(payload, invocation_type="Event")
+        return {"accepted": True, "count": n_items, "async": True}
+
+    logger.info(f"[BRD /ingest-doc] session={body.session_id} items={n_items} (sync)")
+    return _invoke_brd_lambda(payload)
+
+
+@router.post("/ingest-files")
+async def brd_ingest_files(
+    session_id: str = Form(...),
+    project_id: Optional[str] = Form(None),
+    files: List[UploadFile] = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    """Ingest multiple uploaded documents (PDF/DOCX/TXT) as BRD context.
+
+    Extracts each file's text SERVER-SIDE (same extractor as /generate and
+    /turn — never trust client-side .docx text), persists the raw source to
+    S3, then fire-and-forget invokes the orchestrator ingest so the request
+    returns immediately even for many/large files. Fact extraction runs in
+    the background and folds into the session's long-term context."""
+    user_id = current_user["id"]
+    session = _ensure_session_owned(session_id, user_id)
+
+    extracted: List[Dict[str, Any]] = []
+    for uf in files:
+        raw = await uf.read()
+        fname = uf.filename or "uploaded"
+        text = _extract_uploaded_text(raw, fname)
+        s3_key = _persist_source_file(session_id, fname, raw, uf.content_type)
+        item: Dict[str, Any] = {"filename": fname, "extracted_text": text}
+        if s3_key:
+            item["s3_key"] = s3_key
+        extracted.append(item)
+
+    logger.info(
+        f"[BRD /ingest-files] session={session_id} files={len(extracted)} "
+        f"({', '.join(e['filename'] for e in extracted)}) → async ingest"
+    )
+    _invoke_brd_lambda(
+        {
+            "action": "ingest_doc",
+            "session_id": session_id,
+            "user_id": user_id,
+            "project_id": project_id or session.get("project_id"),
+            "files": extracted,
+            "session": _serialize_session_for_event(session),
+        },
+        invocation_type="Event",
+    )
+    return {
+        "accepted": True,
+        "count": len(extracted),
+        "filenames": [e["filename"] for e in extracted],
+        "async": True,
+    }
 
 
 @router.post("/revert-section")
@@ -1226,6 +1392,7 @@ def brd_revert_section(
     """
     user_id = current_user["id"]
     session = _ensure_session_owned(body.session_id, user_id)
+    logger.info(f"[BRD /revert-section] session={body.session_id} §{body.section_number}")
 
     result = _invoke_brd_lambda({
         "action": "revert_section",
@@ -1237,6 +1404,10 @@ def brd_revert_section(
     })
 
     _maybe_promote_to_refining(session, result)
+    logger.info(
+        f"[BRD /revert-section] ✓ session={body.session_id} §{body.section_number} "
+        f"→ {result.get('type') if isinstance(result, dict) else type(result).__name__}"
+    )
     return result
 
 
@@ -1538,7 +1709,16 @@ async def brd_turn_stream(
 # ============================================
 
 BRD_STREAM_POLL_INTERVAL_S = float(os.getenv("BRD_STREAM_POLL_INTERVAL_S", "0.5"))
-BRD_STREAM_HARD_TIMEOUT_S  = int(os.getenv("BRD_STREAM_HARD_TIMEOUT_S", "120"))
+# 600s = 10 min, matches the BRD generator Lambda's hard timeout. The previous
+# 120s default would kill the SSE before the pre-section embedding step
+# finished on any corpus >1 MB (~150s embed-only), stranding the frontend on
+# the spinner even though the Lambda kept generating in the background.
+BRD_STREAM_HARD_TIMEOUT_S  = int(os.getenv("BRD_STREAM_HARD_TIMEOUT_S", "600"))
+# Inactivity threshold for emitting an SSE keepalive comment. Proxies and
+# browsers drop idle SSE connections after ~30-60s of silence; 15s keeps
+# them happy with margin. Comment-only frames (lines starting ':') are
+# ignored by EventSource per the spec — they cost no JS work on the client.
+BRD_STREAM_KEEPALIVE_S     = float(os.getenv("BRD_STREAM_KEEPALIVE_S", "15"))
 BRD_S3_BUCKET              = os.getenv("S3_BUCKET_NAME", "sdlc-orch-dev-us-east-1-app-data")
 
 _s3_client = None
@@ -1608,6 +1788,26 @@ def brd_generation_stream(
 
         deadline = time.time() + BRD_STREAM_HARD_TIMEOUT_S
         seen: set = set()
+        # Track the most recent embedding heartbeat we've forwarded so we
+        # only emit a new SSE event when the generator publishes a fresh
+        # (processed, total) tuple. Otherwise the keepalive comment alone
+        # is enough to hold the connection open.
+        last_emb_progress: Optional[tuple] = None
+        # Wall-clock of the last *real* SSE frame we yielded — used to
+        # decide when to emit a `: keepalive` comment.
+        last_emit = time.time()
+
+        async def _maybe_keepalive():
+            """Emit a comment-only SSE frame if we've been silent for
+            >= BRD_STREAM_KEEPALIVE_S. EventSource ignores comment frames
+            on the client side; they exist solely to keep proxies and the
+            browser from closing the connection during long quiet phases
+            (e.g. embedding-only wait on large corpora)."""
+            nonlocal last_emit
+            if time.time() - last_emit >= BRD_STREAM_KEEPALIVE_S:
+                last_emit = time.time()
+                return ": keepalive\n\n"
+            return None
 
         # If the session doesn't have a brd_id yet, wait briefly for the
         # orchestrator to mint and persist one. The orchestrator's
@@ -1618,6 +1818,9 @@ def brd_generation_stream(
             await asyncio.sleep(BRD_STREAM_POLL_INTERVAL_S)
             refreshed = get_brd_session(session_id)
             brd_id = (refreshed or {}).get("brd_id")
+            ka = await _maybe_keepalive()
+            if ka:
+                yield ka
 
         if not brd_id:
             yield _stream_sse(
@@ -1629,6 +1832,7 @@ def brd_generation_stream(
         # Acknowledge we're now listening on this brd_id so the frontend
         # can confirm the SSE channel is alive.
         yield _stream_sse("subscribed", brd_id=brd_id)
+        last_emit = time.time()
 
         # Poll loop: surface every new partial as it appears, plus the
         # terminal status when it lands. Stops on terminal or timeout.
@@ -1648,10 +1852,29 @@ def brd_generation_stream(
                     status=partial.get("status", "llm_generated"),
                     row_count=row_count,
                 )
+                last_emit = time.time()
 
-            # 2. Check terminal status.
+            # 2. Check terminal status / embedding heartbeat.
             status_doc = _read_s3_json(f"brds/{brd_id}/_generation_status.json")
             if status_doc:
+                # 2a. Surface embedding progress while the generator is in
+                # the pre-section embedding phase. The generator writes
+                # embedding_progress / embedding_total into the same status
+                # doc; we forward each new value so the frontend can show
+                # "Embedding 47/1381" instead of an inert spinner.
+                emb_p = status_doc.get("embedding_progress")
+                emb_t = status_doc.get("embedding_total")
+                if emb_p is not None and emb_t is not None:
+                    tup = (int(emb_p), int(emb_t))
+                    if tup != last_emb_progress:
+                        last_emb_progress = tup
+                        yield _stream_sse(
+                            "embedding_progress",
+                            processed=tup[0],
+                            total=tup[1],
+                        )
+                        last_emit = time.time()
+
                 terminal = status_doc.get("status")
                 if terminal == "complete":
                     # Promote stage to DRAFTED + persist brd_id on the row.
@@ -1687,6 +1910,11 @@ def brd_generation_stream(
                         missing_sections=status_doc.get("missing_sections") or [],
                     )
                     return
+
+            # 3. Emit a keepalive comment if we've been silent too long.
+            ka = await _maybe_keepalive()
+            if ka:
+                yield ka
 
             await asyncio.sleep(BRD_STREAM_POLL_INTERVAL_S)
 

@@ -7,7 +7,7 @@ import asyncio
 import time
 import boto3
 from botocore.exceptions import ClientError
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header, Query
 from pydantic import BaseModel
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -56,6 +56,48 @@ load_dotenv(override=True)
 if os.getenv("AWS_PROFILE"):
     for key in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
         os.environ.pop(key, None)
+
+# Raise the Starlette multipart parser per-part ceiling from the 1 MB default
+# to 50 MB. The /api/brd/generate endpoint accepts a `transcript` form field
+# that can hold the plain-text concatenation of dozens-to-hundreds of fetched
+# Confluence pages — a 278-page bulk-fetch easily exceeds 1 MB. The handler
+# already spills any transcript > 256 KB to S3 before invoking the Lambda
+# (see routers/brd.py:_offload_large_text_to_s3), but Starlette rejects at
+# the multipart boundary before that code runs.
+#
+# An earlier attempt set `MultiPartParser.max_part_size = 50MB` at the class
+# level. That had ZERO effect because Starlette's `Request.form()` passes
+# `max_part_size=1024*1024` EXPLICITLY (its own default) into the parser
+# constructor — the class default is never consulted on that code path.
+# Verified empirically: 400 still said "Part exceeded maximum size of 1024KB."
+#
+# Real fix: monkey-patch the parser's __init__ to clamp the value UP when
+# Starlette passes its 1 MB default. This intercepts every caller (FastAPI's
+# Form() dependency, direct request.form() calls, future routes) without
+# touching FastAPI internals. Override via BRD_MAX_FORM_PART_MB env var.
+from starlette.formparsers import MultiPartParser as _StarletteMPP
+_BRD_MAX_FORM_PART_BYTES = int(os.getenv("BRD_MAX_FORM_PART_MB", "50")) * 1024 * 1024
+_STARLETTE_DEFAULT_PART = 1024 * 1024
+_orig_mpp_init = _StarletteMPP.__init__
+
+
+def _bumped_mpp_init(self, headers, stream, *, max_files=1000, max_fields=1000, max_part_size=None):
+    # If the caller explicitly asked for a custom limit ABOVE our minimum,
+    # respect that. If they passed Starlette's 1 MB default (or None), bump
+    # to our configured ceiling.
+    if max_part_size is None or max_part_size <= _STARLETTE_DEFAULT_PART:
+        max_part_size = _BRD_MAX_FORM_PART_BYTES
+    return _orig_mpp_init(
+        self, headers, stream,
+        max_files=max_files, max_fields=max_fields, max_part_size=max_part_size,
+    )
+
+
+_StarletteMPP.__init__ = _bumped_mpp_init
+# Belt-and-braces: also set the class attr so any code that reads it sees the
+# bumped value. Doesn't fix the original bug (Request.form passes explicitly),
+# but covers any future Starlette version that consults the class default.
+_StarletteMPP.max_part_size = _BRD_MAX_FORM_PART_BYTES
 
 app = FastAPI(root_path=os.getenv("ROOT_PATH", ""))
 
@@ -597,38 +639,66 @@ def render_brd_json_to_docx(brd_data) -> bytes:
                             if cleaned_text:
                                 doc.add_paragraph(cleaned_text)
                 
-                elif block_type == "bullet":
-                    # Add bullet list (preserve markdown formatting)
+                elif block_type == "heading":
+                    # Sub-heading within a section (e.g. "In Scope" /
+                    # "Out of Scope" inside §5 Scope). Was previously dropped
+                    # because only the section title was emitted as a heading.
+                    htext = clean_markdown_text(block.get("text", "").strip())
+                    if htext:
+                        try:
+                            lvl = int(block.get("level", 2))
+                        except (TypeError, ValueError):
+                            lvl = 2
+                        doc.add_heading(htext, level=min(max(lvl, 2), 4))
+
+                elif block_type in ("bullet_list", "bullet"):
+                    # Bullet list. The generator emits "bullet_list"; "bullet"
+                    # is kept as a back-compat alias for any older stored
+                    # content. Previously only "bullet" was matched, so every
+                    # "bullet_list" block (e.g. §5 Scope, §10, §11) was silently
+                    # dropped from the DOCX.
                     items = block.get("items", [])
                     if items:
                         for item in items:
                             cleaned_item = clean_markdown_text(str(item))
                             if cleaned_item:
                                 doc.add_paragraph(cleaned_item, style='List Bullet')
-                
+
+                elif block_type == "ordered_list":
+                    items = block.get("items", [])
+                    if items:
+                        for item in items:
+                            cleaned_item = clean_markdown_text(str(item))
+                            if cleaned_item:
+                                doc.add_paragraph(cleaned_item, style='List Number')
+
                 elif block_type == "table":
-                    # Add table
-                    rows = block.get("rows", [])
-                    if rows:
-                        # Create table with appropriate dimensions
-                        table = doc.add_table(rows=len(rows), cols=len(rows[0]))
+                    # The generator emits `headers` as its own key separate
+                    # from `rows`. Previously only `rows` was rendered, so the
+                    # header row (e.g. "Name | Role | Responsibility") was
+                    # dropped from every table. Combine them, header first.
+                    headers = block.get("headers", []) or []
+                    body_rows = block.get("rows", []) or []
+                    all_rows = ([headers] if headers else []) + body_rows
+                    if all_rows:
+                        max_cols = max(len(r) for r in all_rows)
+                        table = doc.add_table(rows=len(all_rows), cols=max_cols)
                         table.style = 'Light Grid Accent 1'
-                        
+
                         # Populate table
-                        for row_idx, row_data in enumerate(rows):
+                        for row_idx, row_data in enumerate(all_rows):
                             for col_idx, cell_data in enumerate(row_data):
                                 if col_idx < len(table.rows[row_idx].cells):
                                     cell = table.rows[row_idx].cells[col_idx]
                                     # Clean markdown from cell text
                                     cell.text = clean_markdown_text(str(cell_data))
-                        
-                        # Make header row bold if it's the first row
-                        if len(rows) > 0:
-                            header_cells = table.rows[0].cells
-                            for cell in header_cells:
-                                for paragraph in cell.paragraphs:
-                                    for run in paragraph.runs:
-                                        run.bold = True
+
+                        # Make the first row (the header row when present) bold.
+                        header_cells = table.rows[0].cells
+                        for cell in header_cells:
+                            for paragraph in cell.paragraphs:
+                                for run in paragraph.runs:
+                                    run.bold = True
             
             # Add spacing between sections
             doc.add_paragraph("")
@@ -1552,9 +1622,12 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
 @app.get("/api/download-brd/{brd_id}")
 async def download_brd(
     brd_id: str,
+    download_format: str = Query("docx", alias="format"),
     current_user: dict = Depends(get_current_user)
 ):
-    """Download a generated BRD document as DOCX - fetches from S3 and converts to DOCX"""
+    """Download a generated BRD. `format=docx` (default) converts the stored
+    structure to a Word document; `format=json` returns the raw
+    brd_structure.json (the full content, not just section metadata)."""
     try:
         print(f"\n[DOWNLOAD-BRD] ========== START ==========")
         print(f"[DOWNLOAD-BRD] BRD ID: {brd_id}")
@@ -1601,6 +1674,18 @@ async def download_brd(
                 except json.JSONDecodeError as je:
                     print(f"[DOWNLOAD] ⚠️ Error parsing BRD JSON: {je}")
                     raise je
+
+                # format=json — return the full structure (with content) as-is.
+                if download_format == "json":
+                    from fastapi.responses import Response
+                    print(f"[DOWNLOAD-BRD] ✅ Returning raw structure JSON ({len(json_body)} bytes)")
+                    return Response(
+                        content=json_body,
+                        media_type="application/json",
+                        headers={
+                            "Content-Disposition": f'attachment; filename="BRD_{brd_id}.json"'
+                        }
+                    )
 
                 # Convert JSON to DOCX
                 docx_bytes = render_brd_json_to_docx(brd_data)
@@ -1980,6 +2065,8 @@ async def get_my_usage(current_user: dict = Depends(get_current_user)):
             "created_at": None,
             "last_login": None,
             "token_usage": 0,
+            "sonnet_equivalent_input_tokens": 0,
+            "sonnet_equivalent_output_tokens": 0,
             "access_role": "NONE",
             "modules": modules,
             "recent_events": recent_events,
@@ -1991,6 +2078,8 @@ async def get_my_usage(current_user: dict = Depends(get_current_user)):
         "created_at": row["created_at"].isoformat() if row.get("created_at") else None,
         "last_login": row["last_login"].isoformat() if row.get("last_login") else None,
         "token_usage": int(row.get("token_usage") or 0),
+        "sonnet_equivalent_input_tokens": int(row.get("sonnet_equivalent_input_tokens") or 0),
+        "sonnet_equivalent_output_tokens": int(row.get("sonnet_equivalent_output_tokens") or 0),
         "access_role": row.get("access_role") or "NONE",
         "modules": modules,
         "recent_events": recent_events,
@@ -2021,6 +2110,8 @@ async def get_organization_usage(current_user: dict = Depends(get_current_user))
             "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
             "last_login": r["last_login"].isoformat() if r.get("last_login") else None,
             "token_usage": int(r.get("token_usage") or 0),
+            "sonnet_equivalent_input_tokens": int(r.get("sonnet_equivalent_input_tokens") or 0),
+            "sonnet_equivalent_output_tokens": int(r.get("sonnet_equivalent_output_tokens") or 0),
             "is_active": bool(r.get("is_active", True)),
             "access_role": r.get("access_role") or "NONE",
             "modules": get_user_module_rollup(uid),
@@ -2030,6 +2121,8 @@ async def get_organization_usage(current_user: dict = Depends(get_current_user))
         "users": users_payload,
         "total_users": len(rows),
         "total_tokens": sum(int(r.get("token_usage") or 0) for r in rows),
+        "total_sonnet_equivalent_input_tokens": sum(int(r.get("sonnet_equivalent_input_tokens") or 0) for r in rows),
+        "total_sonnet_equivalent_output_tokens": sum(int(r.get("sonnet_equivalent_output_tokens") or 0) for r in rows),
     })
 
 
@@ -2335,6 +2428,11 @@ class RecordTokensRequest(BaseModel):
     user_id: str
     tokens: int
     source: Optional[str] = None  # e.g. "lambda_brd_generator", "pm_agent"
+    # Sonnet-equivalent (cost-normalized) breakdown computed by the caller's
+    # llm_gateway. Default 0 so older Lambda payloads (raw-only) still work.
+    effective_input: int = 0
+    effective_output: int = 0
+    model: Optional[str] = None
 
 
 @app.post("/api/internal/record-tokens", status_code=204)
@@ -2342,8 +2440,9 @@ async def record_tokens(
     body: RecordTokensRequest,
     x_api_key: str = Header(alias="X-API-Key"),
 ):
-    """Increment users.token_usage from Lambda/agent call sites that can't talk
-    to RDS directly. Validates X-API-Key against INTERNAL_API_KEYS env."""
+    """Increment users.token_usage (+ sonnet-equivalent cols + daily row) from
+    Lambda/agent call sites that can't talk to RDS directly. Validates
+    X-API-Key against INTERNAL_API_KEYS env."""
     from routers.internal_utils import validate_api_key
     from db_helper import increment_user_token_usage as _bump
 
@@ -2353,8 +2452,12 @@ async def record_tokens(
         return  # 204 — silently no-op for invalid inputs
 
     try:
-        _bump(body.user_id, body.tokens)
-        print(f"[record-tokens] user={body.user_id} tokens={body.tokens} source={body.source or '?'}")
+        _bump(body.user_id, body.tokens, body.effective_input, body.effective_output)
+        print(
+            f"[record-tokens] user={body.user_id} tokens={body.tokens} "
+            f"eff_in={body.effective_input} eff_out={body.effective_output} "
+            f"model={body.model or '?'} source={body.source or '?'}"
+        )
     except Exception as e:
         # Log but don't surface — token accounting must never break callers
         print(f"[record-tokens] FAILED user={body.user_id} tokens={body.tokens}: {e}")

@@ -58,12 +58,14 @@ def test_router_intents_match_valid_stages_map() -> None:
 
 
 def test_intent_count_matches_documentation() -> None:
-    """The plan and the prompt module both reference '12 intents'. If
-    we change the count we must update both — this test catches drift."""
+    """The plan and the prompt module both reference '11 intents' (the
+    unified GENERATE_BRD replaced the old GENERATE_FROM_DOCS /
+    GENERATE_FROM_HISTORY split). If we change the count we must update
+    both — this test catches drift."""
     from prompts.brd_intent_router import BRD_INTENTS
 
-    assert len(BRD_INTENTS) == 12, (
-        f"Expected 12 intents per plan; got {len(BRD_INTENTS)}. "
+    assert len(BRD_INTENTS) == 11, (
+        f"Expected 11 intents per plan; got {len(BRD_INTENTS)}. "
         f"Update tests/test_dispatch_coverage.py AND the plan AND the "
         f"intent router docstring."
     )
@@ -114,7 +116,7 @@ def test_orchestrator_action_map_is_well_formed() -> None:
     actions = getattr(_ORCH, "ACTION_HANDLER_MAP", None)
     assert isinstance(actions, dict), "ACTION_HANDLER_MAP missing or wrong type"
     expected_actions = {
-        "ping", "turn", "generate_from_docs", "generate_from_history",
+        "ping", "turn", "generate",
         "audit", "revert_section", "save_section", "cancel_generation",
         "ingest_doc",
     }

@@ -164,6 +164,29 @@ def _run_migrations(db_params: dict, sslmode: str):
                 END $$;
             """)
 
+            # Sonnet-equivalent (cost-normalized) cumulative counters + per-day
+            # aggregate. Primary creation is migrations/add_effective_token_columns.py
+            # (run once before deploy); this is an idempotent backstop. See
+            # llm_gateway._effective_tokens for the re-valuation formula.
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS sonnet_equivalent_input_tokens BIGINT NOT NULL DEFAULT 0
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS sonnet_equivalent_output_tokens BIGINT NOT NULL DEFAULT 0
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_token_usage_daily (
+                    user_id                          TEXT   NOT NULL,
+                    usage_date                       DATE   NOT NULL,
+                    raw_tokens                       BIGINT NOT NULL DEFAULT 0,
+                    sonnet_equivalent_input_tokens   BIGINT NOT NULL DEFAULT 0,
+                    sonnet_equivalent_output_tokens  BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, usage_date)
+                )
+            """)
+
             # Add access_role column to users table — derived from Azure AD group
             # membership and refreshed on every authenticated request. Acceptable
             # values: 'BOTH', 'TECH', 'BUSINESS', 'NONE'. See auth.py
@@ -1707,21 +1730,47 @@ def update_user_access_role(
         return False
 
 
-def increment_user_token_usage(user_id: str, tokens: int) -> None:
-    """Atomically add `tokens` to users.token_usage for the given user_id.
+def increment_user_token_usage(
+    user_id: str,
+    tokens: int,
+    eff_in: int = 0,
+    eff_out: int = 0,
+) -> None:
+    """Atomically add usage for `user_id`:
+      - `tokens`  -> users.token_usage (raw, unchanged semantics)
+      - `eff_in`  -> users.sonnet_equivalent_input_tokens
+      - `eff_out` -> users.sonnet_equivalent_output_tokens
+    and upsert the same into user_token_usage_daily for today (time-windowed
+    rollups). All in one transaction.
 
     Silently skips if user_id is missing or tokens <= 0. Never raises — token
     accounting must not break user-facing flows.
     """
     if not user_id or not tokens or tokens <= 0:
         return
+    eff_in = max(int(eff_in or 0), 0)
+    eff_out = max(int(eff_out or 0), 0)
     try:
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE users SET token_usage = token_usage + %s WHERE id = %s",
-                    (int(tokens), user_id),
+                    "UPDATE users SET token_usage = token_usage + %s, "
+                    "sonnet_equivalent_input_tokens = sonnet_equivalent_input_tokens + %s, "
+                    "sonnet_equivalent_output_tokens = sonnet_equivalent_output_tokens + %s "
+                    "WHERE id = %s",
+                    (int(tokens), eff_in, eff_out, user_id),
+                )
+                cursor.execute(
+                    "INSERT INTO user_token_usage_daily "
+                    "(user_id, usage_date, raw_tokens, sonnet_equivalent_input_tokens, "
+                    " sonnet_equivalent_output_tokens) "
+                    "VALUES (%s, CURRENT_DATE, %s, %s, %s) "
+                    "ON CONFLICT (user_id, usage_date) DO UPDATE SET "
+                    "raw_tokens = user_token_usage_daily.raw_tokens + EXCLUDED.raw_tokens, "
+                    "sonnet_equivalent_input_tokens = user_token_usage_daily.sonnet_equivalent_input_tokens + EXCLUDED.sonnet_equivalent_input_tokens, "
+                    "sonnet_equivalent_output_tokens = user_token_usage_daily.sonnet_equivalent_output_tokens + EXCLUDED.sonnet_equivalent_output_tokens",
+                    (user_id, int(tokens), eff_in, eff_out),
                 )
                 conn.commit()
         finally:
@@ -1740,6 +1789,8 @@ def get_user_usage(user_id: str) -> Optional[Dict[str, Any]]:
                 """
                 SELECT id, email, name, created_at, last_login,
                        COALESCE(token_usage, 0) AS token_usage,
+                       COALESCE(sonnet_equivalent_input_tokens, 0) AS sonnet_equivalent_input_tokens,
+                       COALESCE(sonnet_equivalent_output_tokens, 0) AS sonnet_equivalent_output_tokens,
                        COALESCE(access_role, 'NONE') AS access_role
                 FROM users
                 WHERE id = %s
@@ -1892,6 +1943,8 @@ def list_all_users_usage() -> List[Dict[str, Any]]:
                 """
                 SELECT id, email, name, created_at, last_login,
                        COALESCE(token_usage, 0) AS token_usage,
+                       COALESCE(sonnet_equivalent_input_tokens, 0) AS sonnet_equivalent_input_tokens,
+                       COALESCE(sonnet_equivalent_output_tokens, 0) AS sonnet_equivalent_output_tokens,
                        COALESCE(is_active, TRUE) AS is_active,
                        COALESCE(access_role, 'NONE') AS access_role
                 FROM users

@@ -41,6 +41,20 @@ Issue code vocabulary (use EXACTLY these strings):
   TRACEABILITY_GAP           — implementation choice not tied to a stated requirement
   TABLE_INCOMPLETE           — table row with empty required columns
 
+PROVENANCE MARKERS — DO NOT FLAG:
+  The generator deliberately tags content with bracketed provenance
+  markers so readers can see how each item was sourced. These are
+  INTENTIONAL system annotations, NOT defects, and NEVER undefined terms:
+    [AI-ASSUMPTION]      — content inferred by the AI, not stated by the user
+    [from prior session] — carried over from earlier project context
+    [Awaiting input]     — a deliberate placeholder for a field to be filled
+  NEVER raise UNDEFINED_TERM (or any issue) for these markers themselves —
+  do not treat "AI-ASSUMPTION" as an acronym needing a definition. Judge
+  the surrounding content on its own merits, but the marker is expected
+  and must be ignored when scoring. (A row whose ONLY content is
+  "[Awaiting input]" may still be flagged EMPTY_OR_PLACEHOLDER — that's
+  about the empty content, not the marker.)
+
 Scoring:
   • Start at 100.
   • Subtract 10 per issue.

@@ -10,8 +10,9 @@ endpoint.
 Action dispatch on `event["action"]`:
 
   turn                    -> intent router + per-intent handler (handle_turn)
-  generate_from_docs      -> invoke lambda_brd_generator worker
-  generate_from_history   -> invoke lambda_brd_from_history worker
+  generate                -> invoke the single lambda_brd_generator worker
+                             with a unified context (docs + chat history +
+                             existing BRD + long-term facts)
   audit                   -> per-section parallel quality audit
   revert_section          -> pop the previous_versions stack on a section
   save_section            -> direct (no LLM) section save with version push
@@ -54,6 +55,9 @@ import boto3
 # Prompt modules are imported lazily inside handlers so cold-start of
 # a single action doesn't pull every prompt module's bytes.
 # (lambda_sad_orchestrator.py:42-43 makes the same call.)
+# Exception: the cache-control helper is tiny (os + typing only) and is
+# used by nearly every handler, so it's imported eagerly here.
+from prompts.cache_control import cached_system_blocks
 
 
 # ============================================
@@ -106,6 +110,15 @@ BRD_PREVIOUS_VERSIONS_CAP        = int(os.getenv("BRD_PREVIOUS_VERSIONS_CAP", "5
 # Parallel section generation budget.
 BRD_SECTION_PARALLELISM          = int(os.getenv("BRD_SECTION_PARALLELISM", "5"))
 
+# Ingest-time chunking. A single uploaded/Confluence doc whose extracted text
+# exceeds BRD_INGEST_MAX_CHARS is split into ~BRD_INGEST_CHUNK_CHARS pieces and
+# fact-extracted per chunk (bounded parallel), then the facts are merged. This
+# keeps each extraction call well within the model context and avoids
+# lost-in-the-middle on very long docs. ~4 chars/token, so 40k chars ~= 10k tok.
+BRD_INGEST_MAX_CHARS             = int(os.getenv("BRD_INGEST_MAX_CHARS",   "40000"))
+BRD_INGEST_CHUNK_CHARS           = int(os.getenv("BRD_INGEST_CHUNK_CHARS", "40000"))
+BRD_INGEST_CHUNK_OVERLAP         = int(os.getenv("BRD_INGEST_CHUNK_OVERLAP", "1000"))
+
 # Phase 6 feature flag — controls whether generation Lambdas take the
 # prime-then-fan-out parallel path with prompt caching. Default ON since
 # the path has been verified end-to-end (gateway cache pass-through
@@ -121,7 +134,6 @@ BRD_USE_PARALLEL_GENERATION      = _flag("BRD_USE_PARALLEL_GENERATION", True)
 # Worker Lambda names (kept Lambdas — orchestrator invokes them for
 # the heavy generation paths).
 BRD_GENERATOR_LAMBDA             = os.getenv("BRD_GENERATOR_LAMBDA",   "sdlc-dev-brd-generator")
-BRD_FROM_HISTORY_LAMBDA          = os.getenv("BRD_FROM_HISTORY_LAMBDA", "sdlc-dev-brd-from-history")
 
 
 # ============================================
@@ -399,11 +411,17 @@ def handle_turn(event: Dict[str, Any]) -> Dict[str, Any]:
         )
 
     # ── 10. Persist ASSISTANT event + return cards envelope ──────────
-    summary = _summarize_card_for_memory(result_card)
+    # A handler may return a single card OR a list of cards (e.g. the
+    # whole-BRD SUGGEST fans out one suggestions card per section).
+    cards_out = result_card if isinstance(result_card, list) else [result_card]
+    if len(cards_out) > 1:
+        summary = f"[{len(cards_out)} cards]"
+    else:
+        summary = _summarize_card_for_memory(cards_out[0]) if cards_out else "[empty]"
     write_memory_event(session_id, user_id, "ASSISTANT", summary)
 
     return {
-        "cards": [result_card],
+        "cards": cards_out,
         "intent": intent,
         "next_stage_hint": _next_stage_hint(intent, stage),
     }
@@ -458,7 +476,7 @@ def _call_intent_router(
         from llm_gateway import chat_completion
         raw = chat_completion(
             messages=[{"role": "user", "content": user_content}],
-            system_prompt=get_router_system_prompt(),
+            system_prompt=cached_system_blocks(get_router_system_prompt()),
             model=BRD_ROUTER_MODEL,
             temperature=BRD_ROUTER_TEMPERATURE,
             max_tokens=BRD_ROUTER_MAX_TOKENS,
@@ -548,7 +566,7 @@ def _next_stage_hint(intent: str, current_stage: str) -> Optional[str]:
     session stage. None means "leave stage alone"; the actual flip
     happens in routers/brd.py (Phase 3) since the Lambda doesn't
     touch RDS."""
-    if intent in ("GENERATE_FROM_DOCS", "GENERATE_FROM_HISTORY"):
+    if intent == "GENERATE_BRD":
         return "GENERATING"
     if intent == "ADD_INFO" and current_stage in ("NEW",):
         return "GATHERING"
@@ -557,6 +575,30 @@ def _next_stage_hint(intent: str, current_stage: str) -> Optional[str]:
     if intent in ("EDIT_SECTION", "REGENERATE_SECTION", "AUDIT") and current_stage == "DRAFTED":
         return "REFINING"
     return None
+
+
+def apply_stage_transition(
+    *,
+    current_stage: str,
+    event: str,
+    prior_stage: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the next stage for a (current_stage, event) pair using the
+    canonical BRD_STAGE_TRANSITIONS table in db_helper — the single source
+    of truth the FastAPI router commits against.
+
+    A table value of None means "revert to the prior stage" (generation
+    failure / cancellation); the caller supplies prior_stage. A pair not
+    in the table is a no-op (returns current_stage unchanged).
+
+    Events: generate_accepted, generation_success, generation_failure,
+    generation_cancel, generation_in_progress, first_refinement_action.
+    """
+    from db_helper import BRD_STAGE_TRANSITIONS
+    if (current_stage, event) not in BRD_STAGE_TRANSITIONS:
+        return current_stage
+    to_stage = BRD_STAGE_TRANSITIONS[(current_stage, event)]
+    return prior_stage if to_stage is None else to_stage
 
 
 # ============================================
@@ -787,7 +829,7 @@ def _do_ask_question(
     try:
         raw = chat_completion(
             messages=[{"role": "user", "content": user_content}],
-            system_prompt=QA_SYSTEM_PROMPT,
+            system_prompt=cached_system_blocks(QA_SYSTEM_PROMPT),
             model=BRD_HANDLER_MODEL,
             temperature=0.3,
             max_tokens=BRD_QA_MAX_TOKENS,
@@ -823,29 +865,89 @@ def _do_ask_question(
     )
 
 
+def _suggest_one_section(
+    section: Dict[str, Any],
+    *,
+    user_id: Optional[str],
+    project_id: Optional[str],
+    use_long_term: bool,
+) -> Dict[str, Any]:
+    """Build a `suggestions` card for ONE section. One LLM call with the
+    brd_suggest prompt; reuses any prior audit findings on the section and
+    optionally seeds long-term project facts. Reused by the single-section
+    path and the whole-BRD parallel fan-out. Never raises — on failure it
+    returns a suggestions card with an empty items list."""
+    from prompts.brd_suggest_prompts import SUGGEST_SYSTEM_PROMPT, build_suggest_prompt
+    from services.brd_orchestrator_utils import extract_json, get_long_term_facts
+    from llm_gateway import chat_completion
+
+    section_number = section.get("number")
+    audit_issues = (section.get("audit") or {}).get("issues") or []
+
+    known_facts: List[str] = []
+    if use_long_term:
+        try:
+            known_facts = get_long_term_facts(
+                user_id=user_id,
+                project_id=project_id,
+                query=section.get("title") or f"section {section_number}",
+            )
+        except Exception as e:
+            logger.warning(f"[BRD] suggest §{section_number} facts load failed (non-fatal): {e}")
+
+    user_content = build_suggest_prompt(
+        section_number=section_number,
+        section_title=section.get("title") or "",
+        current_content=section.get("content") or [],
+        audit_issues=audit_issues,
+        known_facts=known_facts,
+    )
+
+    items: List[Dict[str, Any]] = []
+    try:
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=cached_system_blocks(SUGGEST_SYSTEM_PROMPT),
+            model=BRD_HANDLER_MODEL,
+            temperature=0.4,
+            max_tokens=BRD_SUGGEST_MAX_TOKENS,
+            user_id=user_id,
+            token_source=f"lambda_brd_orchestrator:suggest_{section_number}",
+        )
+        parsed = extract_json(raw)
+        got = parsed.get("items") if isinstance(parsed, dict) else []
+        if isinstance(got, list):
+            items = got
+    except Exception as e:
+        logger.warning(f"[BRD] _suggest_one_section §{section_number} failed: {e}")
+
+    for i, it in enumerate(items):
+        if isinstance(it, dict) and "id" not in it:
+            it["id"] = f"sugg-{section_number}-{i}"
+
+    return card(
+        "suggestions",
+        target_section=section_number,
+        title=section.get("title"),
+        items=items,
+    )
+
+
 def _do_suggest(
     event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
-) -> Dict[str, Any]:
-    """3-5 concrete improvements for one section. One LLM call with the
-    brd_suggest prompt. Reuses any prior audit findings on the section
-    as the primary signal and optionally seeds long-term project facts
-    so suggestions can cite established context.
+):
+    """Concrete improvements per section.
 
-    Target resolution order:
-      1. router.target_section (int) — explicit pick.
-      2. router.target_title (str)   — fuzzy match.
-      3. Neither — pick the section with the lowest stored audit score
-         (or section 1 if no audits run yet). Fallback mirrors SAD's
-         _do_suggest pattern so a bare "give me suggestions" works.
+    Target resolution:
+      1. router.target_section / target_title → suggestions for THAT section
+         (single `suggestions` card).
+      2. No specific section ("Suggest improvements for this BRD") → run
+         suggest for EVERY section in bounded parallel and return one
+         `suggestions` card per section (a list of cards), preceded by a
+         short intro text card. This is the whole-BRD, section-wise mode.
     """
-    from services.brd_orchestrator_utils import (
-        brd_structure_key,
-        extract_json,
-        get_long_term_facts,
-        s3_get_json_with_etag,
-    )
-    from prompts.brd_suggest_prompts import SUGGEST_SYSTEM_PROMPT, build_suggest_prompt
-    from llm_gateway import chat_completion
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from services.brd_orchestrator_utils import brd_structure_key, s3_get_json_with_etag
 
     user_id    = (event or {}).get("user_id")
     project_id = (event or {}).get("project_id") or session.get("project_id")
@@ -863,6 +965,7 @@ def _do_suggest(
                     message="BRD structure malformed", retryable=False)
 
     sections = structure["sections"]
+    use_long_term = session.get("use_long_term_context", True)
     section, section_number = _resolve_target_section(
         sections=sections,
         target_number=router.get("target_section"),
@@ -874,68 +977,48 @@ def _do_suggest(
             candidates=[{"number": s.get("number"), "title": s.get("title")} for s in section_number],
             original_intent="SUGGEST",
         )
-    if section is None:
-        # Fall back to the lowest-scored section, or §1 if no audits yet.
-        worst: Optional[Tuple[int, Dict[str, Any]]] = None
-        for s in sections:
-            score = int((s.get("audit") or {}).get("score", 100))
-            if worst is None or score < worst[0]:
-                worst = (score, s)
-        section = worst[1] if worst else sections[0]
-        section_number = section.get("number")
 
-    audit_issues = (section.get("audit") or {}).get("issues") or []
-
-    known_facts: List[str] = []
-    if session.get("use_long_term_context", True):
-        try:
-            known_facts = get_long_term_facts(
-                user_id=user_id,
-                project_id=project_id,
-                query=section.get("title") or f"section {section_number}",
-            )
-        except Exception as e:
-            logger.warning(f"[BRD] suggest long-term facts load failed (non-fatal): {e}")
-
-    user_content = build_suggest_prompt(
-        section_number=section_number,
-        section_title=section.get("title") or "",
-        current_content=section.get("content") or [],
-        audit_issues=audit_issues,
-        known_facts=known_facts,
-    )
-
-    try:
-        raw = chat_completion(
-            messages=[{"role": "user", "content": user_content}],
-            system_prompt=SUGGEST_SYSTEM_PROMPT,
-            model=BRD_HANDLER_MODEL,
-            temperature=0.4,
-            max_tokens=BRD_SUGGEST_MAX_TOKENS,
-            user_id=user_id,
-            token_source=f"lambda_brd_orchestrator:suggest_{section_number}",
+    # Single-section path — explicit "what's missing from §7".
+    if section is not None:
+        logger.info(f"[BRD] suggest single-section §{section_number} brd={brd_id}")
+        return _suggest_one_section(
+            section, user_id=user_id, project_id=project_id, use_long_term=use_long_term,
         )
-        parsed = extract_json(raw)
-        items = parsed.get("items") if isinstance(parsed, dict) else []
-        if not isinstance(items, list):
-            items = []
-    except Exception as e:
-        logger.warning(f"[BRD] _do_suggest LLM/parse failed: {e}")
-        items = []
 
-    # Stamp a stable id per item so the frontend's "Apply" button can
-    # round-trip an opaque handle back to the orchestrator without
-    # leaking the LLM's exact wording into a URL.
-    for i, it in enumerate(items):
-        if isinstance(it, dict) and "id" not in it:
-            it["id"] = f"sugg-{section_number}-{i}"
-
-    return card(
-        "suggestions",
-        target_section=section_number,
-        title=section.get("title"),
-        items=items,
+    # Whole-BRD path — suggestions for EVERY section, bounded parallel so we
+    # don't overwhelm the gateway (mirrors the audit fan-out).
+    targets = [s for s in sections if s.get("number") is not None]
+    logger.info(
+        f"[BRD] suggest whole-BRD fan-out: {len(targets)} sections, "
+        f"parallelism={BRD_SECTION_PARALLELISM} brd={brd_id}"
     )
+    results: Dict[int, Dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=BRD_SECTION_PARALLELISM) as ex:
+        futs = {
+            ex.submit(
+                _suggest_one_section,
+                s, user_id=user_id, project_id=project_id, use_long_term=use_long_term,
+            ): s.get("number")
+            for s in targets
+        }
+        for fut in as_completed(futs):
+            n = futs[fut]
+            try:
+                results[n] = fut.result()
+            except Exception as e:
+                logger.warning(f"[BRD] whole-BRD suggest §{n} failed: {e}")
+
+    ordered = [results[s.get("number")] for s in targets if s.get("number") in results]
+    logger.info(
+        f"[BRD] suggest whole-BRD ✓ {len(ordered)}/{len(targets)} section cards produced"
+    )
+    intro = card(
+        "text",
+        text="Here are suggestions for each section — apply or edit any item "
+             "from its section card below.",
+        kind="info",
+    )
+    return [intro, *ordered]
 
 
 def _do_add_info(
@@ -986,6 +1069,7 @@ def _do_add_info(
         user_message=fact_text,
         use_long_term=session.get("use_long_term_context", True),
         token_source="lambda_brd_orchestrator:add_info_followup",
+        brd_id=session.get("brd_id"),
     )
 
     return card(
@@ -1006,20 +1090,42 @@ def _build_mary_followup(
     user_message: str,
     use_long_term: bool,
     token_source: str,
+    brd_id: Optional[str] = None,
 ) -> str:
     """Shared Mary follow-up builder used by ADD_INFO and GATHER.
 
     Returns the LLM's text response, or "" on any failure (the caller
     decides how to handle a missing follow-up — ADD_INFO surfaces an
     empty follow_up gracefully; GATHER falls back to a generic prompt).
+
+    Cache structure (two ephemeral breakpoints):
+      [system: MARY_REQUIREMENTS_PROMPT, cache_control]        <- breakpoint #1
+      [user content[0]: <current_brd>...</current_brd>, cache_control]  <- breakpoint #2 (only when brd_id given)
+      [user content[1]: conversation history + current user message]    <- volatile
+    The BRD block stays byte-stable as long as the underlying
+    brd_structure.json doesn't change, so within an active 5-minute
+    Mary conversation every turn after the first reads both prefixes
+    from cache instead of paying full input price.
     """
     from prompts.requirements_gathering_prompts import (
         MARY_REQUIREMENTS_PROMPT,
         get_requirements_gathering_prompt,
     )
-    from services.brd_orchestrator_utils import get_long_term_facts, read_memory_history
+    from prompts.cache_control import cache_control_value
+    from services.brd_orchestrator_utils import (
+        get_long_term_facts,
+        get_recent_facts,
+        read_memory_history,
+    )
     from llm_gateway import chat_completion
 
+    logger.info(
+        f"[BRD-mary] follow-up start session={session_id} brd_id={brd_id} "
+        f"use_long_term={use_long_term} user_msg_len={len(user_message)} "
+        f"token_source={token_source}"
+    )
+
+    # ── 1. Short-term chat history (last 12 turns from AgentCore Memory) ───
     history_lines: List[str] = []
     if session_id and user_id:
         try:
@@ -1027,42 +1133,119 @@ def _build_mary_followup(
             for m in history[-12:]:
                 role = (m.get("role") or "assistant").upper()
                 history_lines.append(f"{role}: {m.get('content', '')}")
+            logger.info(f"[BRD-mary] history loaded turns={len(history_lines)}")
         except Exception as e:
-            logger.warning(f"[BRD] mary history load failed (non-fatal): {e}")
+            logger.warning(f"[BRD-mary] history load failed (non-fatal): {e}")
 
+    # ── 2. Long-term project facts (when session opted in) ────────────────
     facts_block = ""
     if use_long_term:
         try:
-            facts = get_long_term_facts(
-                user_id=user_id,
-                project_id=project_id,
-                query=user_message,
-            )
+            q = (user_message or "").strip()
+            if q:
+                facts = get_long_term_facts(
+                    user_id=user_id,
+                    project_id=project_id,
+                    query=q,
+                )
+            else:
+                facts = get_recent_facts(user_id=user_id, project_id=project_id)
             if facts:
                 facts_block = (
                     "\n\nKNOWN PROJECT CONTEXT (do not contradict; cite when relevant):\n"
                     + "\n".join(f"  - {f}" for f in facts)
                 )
+            logger.info(f"[BRD-mary] long-term facts loaded count={len(facts)}")
         except Exception as e:
-            logger.warning(f"[BRD] mary long-term facts load failed (non-fatal): {e}")
+            logger.warning(f"[BRD-mary] long-term facts load failed (non-fatal): {e}")
+    else:
+        logger.info("[BRD-mary] long-term facts SKIPPED (use_long_term=False)")
 
     conversation_context = "Conversation so far:\n" + (
         "\n".join(history_lines) if history_lines else "(this is the first message)"
     ) + facts_block
 
+    # ── 3. Current BRD state (Fix 1 — the in-session redundancy fix) ──────
+    brd_block_text = ""
+    if brd_id:
+        try:
+            from services.brd_orchestrator_utils import (
+                brd_structure_key,
+                s3_get_json_with_etag,
+                render_brd_for_chat,
+            )
+            structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+            if structure and isinstance(structure.get("sections"), list):
+                brd_text, gaps = render_brd_for_chat(structure)
+                parts = [f"<current_brd>\n{brd_text}\n</current_brd>"]
+                if gaps:
+                    parts.append(
+                        "<brd_gaps>\n"
+                        + "\n".join(f"  - {g}" for g in gaps[:20])
+                        + "\n</brd_gaps>"
+                    )
+                brd_block_text = "\n\n".join(parts)
+                logger.info(
+                    f"[BRD-mary] BRD context loaded brd_id={brd_id} "
+                    f"sections={len(structure.get('sections') or [])} "
+                    f"gaps={len(gaps)} chars={len(brd_block_text)}"
+                )
+            else:
+                logger.info(f"[BRD-mary] BRD structure empty/malformed for brd_id={brd_id}")
+        except Exception as e:
+            logger.warning(f"[BRD-mary] BRD load failed (non-fatal): {e}")
+    else:
+        logger.info("[BRD-mary] no brd_id — skipping BRD context injection")
+
+    # ── 4. Build messages with caching-friendly structure ─────────────────
+    if brd_block_text:
+        # Two content blocks: cached BRD prefix + volatile tail. cache_control
+        # on the FIRST block means the prefix [system, BRD] caches together.
+        user_content: Any = [
+            {
+                "type": "text",
+                "text": brd_block_text,
+                "cache_control": cache_control_value(),
+            },
+            {
+                "type": "text",
+                "text": (
+                    conversation_context
+                    + "\n\nUser's latest message: "
+                    + user_message
+                    + "\n\nRespond as Mary. Acknowledge their response and ask a "
+                      "relevant follow-up question. Reference BRD sections by "
+                      "number when content is already documented."
+                ),
+            },
+        ]
+        logger.info(
+            f"[BRD-mary] LLM call WITH BRD cache block "
+            f"brd_chars={len(brd_block_text)} ctx_chars={len(conversation_context)}"
+        )
+    else:
+        # No BRD yet — fall back to today's single-string format (no second
+        # cache breakpoint; only the system prefix caches).
+        user_content = get_requirements_gathering_prompt(conversation_context, user_message)
+        logger.info(
+            f"[BRD-mary] LLM call WITHOUT BRD (no brd_id) "
+            f"prompt_chars={len(user_content)}"
+        )
+
     try:
-        prompt = get_requirements_gathering_prompt(conversation_context, user_message)
-        return chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            system_prompt=MARY_REQUIREMENTS_PROMPT,
+        text = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=cached_system_blocks(MARY_REQUIREMENTS_PROMPT),
             model=BRD_HANDLER_MODEL,
             temperature=0.6,
             max_tokens=BRD_GATHER_MAX_TOKENS,
             user_id=user_id,
             token_source=token_source,
         ).strip()
+        logger.info(f"[BRD-mary] LLM response len={len(text)}")
+        return text
     except Exception as e:
-        logger.warning(f"[BRD] mary follow-up failed (non-fatal): {e}")
+        logger.warning(f"[BRD-mary] follow-up LLM failed (non-fatal): {e}")
         return ""
 
 
@@ -1141,7 +1324,7 @@ def _do_edit_section(
     try:
         raw = chat_completion(
             messages=[{"role": "user", "content": user_content}],
-            system_prompt=EDIT_SYSTEM_PROMPT,
+            system_prompt=cached_system_blocks(EDIT_SYSTEM_PROMPT),
             model=BRD_HANDLER_MODEL,
             temperature=0.2,
             max_tokens=BRD_EDIT_MAX_TOKENS,
@@ -1341,6 +1524,7 @@ def _do_gather(
         user_message=message,
         use_long_term=session.get("use_long_term_context", True),
         token_source="lambda_brd_orchestrator:gather",
+        brd_id=session.get("brd_id"),
     )
 
     if not text:
@@ -1352,71 +1536,85 @@ def _do_gather(
     return card("text", text=text)
 
 
-def _do_generate_from_docs(
+def _build_generation_context(
+    event: Dict[str, Any], session: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Assemble the unified generation context the single generator
+    Lambda consumes. Every generation considers ALL available sources;
+    the user no longer chooses "from docs" vs "from history".
+
+      - chat_session_id : always set — the worker reads dual-actor chat
+                          history for this session.
+      - transcript/template (inline or S3 keys) : only when a doc was
+                          uploaded this turn.
+      - existing_brd_id : set when the session already has a BRD, so a
+                          re-generation merges with prior content (incl.
+                          user edits) instead of overwriting it.
+      - long_term_facts : resolved here (the orchestrator has working
+                          memory access + knows project_id) and passed
+                          inline, gated on the session's opt-in flag.
+    """
+    user_id    = (event or {}).get("user_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+
+    context: Dict[str, Any] = {"chat_session_id": session_id}
+
+    # Uploaded docs (if any this turn). FastAPI offloads large text to S3
+    # and passes keys; small inline text passes through verbatim.
+    for k in (
+        "template", "template_text", "transcript", "transcript_text",
+        "template_s3_bucket", "template_s3_key",
+        "transcript_s3_bucket", "transcript_s3_key",
+    ):
+        v = (event or {}).get(k)
+        if v:
+            context[k] = v
+
+    # Existing BRD → regeneration merge.
+    existing_brd_id = session.get("brd_id") or (event or {}).get("brd_id")
+    if existing_brd_id:
+        context["existing_brd_id"] = existing_brd_id
+
+    # Long-term facts — opt-in, best-effort enrichment (Resolved Q#5).
+    if session.get("use_long_term_context", True) and user_id and project_id:
+        try:
+            from services.brd_orchestrator_utils import get_long_term_facts
+            query = ((event or {}).get("message") or session.get("title") or "").strip()
+            facts = get_long_term_facts(user_id, project_id, query=query) if query else []
+            if facts:
+                context["long_term_facts"] = facts
+        except Exception as e:
+            logger.warning(f"[BRD] long-term facts for generation failed (continuing): {e}")
+
+    return context
+
+
+def _do_generate_brd(
     event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """User attached a template + transcript and triggered full BRD
-    generation. Pipeline:
+    """Unified full-BRD generation. Replaces the old from-docs / from-
+    history split — one generator Lambda accepts any combination of
+    (uploaded docs, chat history, existing BRD, long-term facts).
 
-      1. Pull template + transcript out of event (router doesn't
-         carry them; FastAPI puts them on the event directly).
-      2. Mint a brd_id if the session doesn't have one yet (first
-         generation). The FastAPI router persists this onto the
-         analyst_sessions row in its post-Lambda step.
-      3. Fire lambda_brd_generator ASYNCHRONOUSLY (InvocationType=
-         'Event') -- the user-blocking path returns immediately;
-         worker runs in background and writes results to S3.
-      4. Return a generation_starting card so the frontend can
-         render a skeleton/loader. handle_turn's caller bumps stage
-         to GENERATING via _next_stage_hint.
+    Fires lambda_brd_generator ASYNCHRONOUSLY (InvocationType='Event');
+    the user-blocking path returns a generation_starting card immediately
+    while the worker writes per-section partials + brd_structure.json to
+    S3. The FastAPI router bumps stage to GENERATING via _next_stage_hint.
     """
     return _start_generation(
         event=event,
         session=session,
         worker_lambda=BRD_GENERATOR_LAMBDA,
         worker_payload_extras={
-            "template": (event or {}).get("template") or (event or {}).get("template_text"),
-            "transcript": (event or {}).get("transcript") or (event or {}).get("transcript_text"),
-            "template_s3_bucket": (event or {}).get("template_s3_bucket"),
-            "template_s3_key":    (event or {}).get("template_s3_key"),
-            "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
-            "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
+            "context": _build_generation_context(event, session),
             # Phase 6: prime-then-fan-out with prompt caching. Env flag
             # BRD_USE_PARALLEL_GENERATION gates the parallel path so
             # operators can roll back without redeploying the worker.
             "parallel": BRD_USE_PARALLEL_GENERATION,
         },
         expected_seconds=40 if BRD_USE_PARALLEL_GENERATION else 90,
-        source="docs",
-    )
-
-
-def _do_generate_from_history(
-    event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
-) -> Dict[str, Any]:
-    """User said "generate the BRD" -- worker reads chat history from
-    AgentCore Memory and the long-term facts buffer. No file payload
-    needed.
-
-    Same async-invoke + generation_starting pattern as
-    _do_generate_from_docs; the worker Lambda is different
-    (lambda_brd_from_history).
-    """
-    return _start_generation(
-        event=event,
-        session=session,
-        worker_lambda=BRD_FROM_HISTORY_LAMBDA,
-        worker_payload_extras={
-            # lambda_brd_from_history needs the session_id to pull chat
-            # history; pass it explicitly so the worker doesn't have to
-            # know about the orchestrator's dual-actor read pattern.
-            "session_id": (event or {}).get("session_id") or session.get("session_id"),
-            # Phase 6 feature flag — same gate as the docs path so both
-            # generation entry points flip together.
-            "parallel": BRD_USE_PARALLEL_GENERATION,
-        },
-        expected_seconds=45 if BRD_USE_PARALLEL_GENERATION else 60,
-        source="history",
+        source="unified",
     )
 
 
@@ -1475,12 +1673,31 @@ def _start_generation(
             source=source,
         )
 
+    # Pre-flight RAG estimate for the UI. The generator makes the
+    # authoritative decision (logged as `[BRD-gen RAG]` in CloudWatch); this
+    # is what the user sees on the progress card so they know whether their
+    # inputs triggered per-section RAG. We can only measure the inline
+    # transcript here — chat history is hydrated by the generator from
+    # memory — so this is an estimate, not the final decision.
+    ctx_bundle = (worker_payload_extras or {}).get("context") or {}
+    transcript_text = (
+        ctx_bundle.get("transcript")
+        or ctx_bundle.get("transcript_text")
+        or ""
+    )
+    transcript_chars = len(transcript_text) if isinstance(transcript_text, str) else 0
+    rag_threshold_chars = 120000  # mirror lambda_brd_generator.BRD_RAG_MIN_CHARS default (~30k tokens)
+    rag_mode = "rag" if transcript_chars >= rag_threshold_chars else "inline"
+
     return card(
         "generation_starting",
         session_id=session_id,
         brd_id=brd_id,
         expected_seconds=expected_seconds,
         source=source,
+        rag_mode=rag_mode,
+        corpus_chars=transcript_chars,
+        rag_threshold_chars=rag_threshold_chars,
     )
 
 
@@ -1573,6 +1790,10 @@ def _do_regenerate_section(
         except Exception as e:
             logger.warning(f"[BRD] regen long-term facts load failed (non-fatal): {e}")
 
+    logger.info(
+        f"[BRD] regenerate §{section_number} brd={brd_id} "
+        f"facts={len(known_facts)} reason={regen_reason[:60]!r}"
+    )
     user_content = _build_regenerate_prompt(
         section_number=section_number,
         section_title=section.get("title") or "",
@@ -1584,7 +1805,7 @@ def _do_regenerate_section(
     try:
         raw = chat_completion(
             messages=[{"role": "user", "content": user_content}],
-            system_prompt=_REGENERATE_SYSTEM_PROMPT,
+            system_prompt=cached_system_blocks(_REGENERATE_SYSTEM_PROMPT),
             model=BRD_HANDLER_MODEL,
             temperature=0.3,
             max_tokens=BRD_SECTION_MAX_TOKENS,
@@ -1609,6 +1830,7 @@ def _do_regenerate_section(
     section["content"] = new_content
     section["status"] = "llm_regenerated"
     section["last_updated_ts"] = _now_iso()
+    logger.info(f"[BRD] regenerate §{section_number} ✓ {len(new_content)} block(s) written")
     if isinstance(parsed.get("title"), str) and parsed["title"].strip():
         section["title"] = parsed["title"].strip()
 
@@ -1675,6 +1897,25 @@ Rules:
   • Preserve every measurable / numeric value from the current content.
   • If the section is already strong, return it largely unchanged
     rather than rewriting for the sake of rewriting.
+
+CONTENT SOURCING & PROVENANCE (must match the generator's markers):
+  • PRESERVE existing provenance markers. If the current content already
+    tags an item "[AI-ASSUMPTION]", "[from prior session]", or
+    "[Awaiting input]", keep that tag — UNLESS the regeneration request
+    supplies a real fact that resolves it, in which case drop the tag.
+  • If you ADD any content that is inferred (not stated in the current
+    content, the known project context, or the regeneration request),
+    tag it inline with "[AI-ASSUMPTION]" so the reader can distinguish
+    inferred content from grounded content.
+  • If you ADD content sourced ONLY from the known project context
+    (carried across sessions, not in this section's current content),
+    tag it "[from prior session]".
+  • Content the user explicitly provided in the regeneration request, or
+    already-grounded current content, needs NO marker.
+  • Place the marker at the end of the affected field/sentence/cell, e.g.
+    a table cell "VP of Product [AI-ASSUMPTION]" or a bullet ending
+    "... within 2 weeks [AI-ASSUMPTION]". Never fabricate just to fill a
+    table; prefer fewer rows or "(to be confirmed)".
 """
 
 
@@ -1733,6 +1974,52 @@ def _do_ingest_doc(
         file_payload=file_payload,
         auto_regen=False,
     )
+
+
+def _chunk_text(text: str, size: int, overlap: int = 1000) -> List[str]:
+    """Split text into ~`size`-char chunks, preferring to break on a
+    paragraph / line / word boundary near the cut so facts aren't sliced
+    mid-sentence. `overlap` chars are repeated between adjacent chunks to
+    keep context that straddles a boundary. No external deps."""
+    if len(text) <= size:
+        return [text]
+    chunks: List[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + size, n)
+        if end < n:
+            window_lo = max(start + size - 2000, start + 1)
+            cut = text.rfind("\n\n", window_lo, end)
+            if cut == -1:
+                cut = text.rfind("\n", window_lo, end)
+            if cut == -1:
+                cut = text.rfind(" ", window_lo, end)
+            if cut > start:
+                end = cut
+        chunks.append(text[start:end])
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return chunks
+
+
+def _merge_fact_dicts(dicts: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Merge per-chunk fact dicts: concatenate list-valued keys (order-
+    preserving dedupe) and keep the first non-empty scalar per key."""
+    merged: Dict[str, Any] = {}
+    for d in dicts:
+        if not isinstance(d, dict):
+            continue
+        for k, v in d.items():
+            if isinstance(v, list):
+                bucket = merged.setdefault(k, [])
+                for item in v:
+                    if item not in bucket:
+                        bucket.append(item)
+            elif k not in merged and v:
+                merged[k] = v
+    return merged
 
 
 def _ingest_one_doc(
@@ -1795,17 +2082,22 @@ def _ingest_one_doc(
         except Exception as e:
             logger.warning(f"[BRD] ingest: structure load failed (non-fatal): {e}")
 
+    # Relevance is a coarse "which sections does this inform" classification —
+    # the first slice of a very long doc is plenty and avoids overflowing the
+    # classifier. Fact extraction (below) sees the WHOLE doc via chunking.
+    rel_text = doc_text if len(doc_text) <= BRD_INGEST_MAX_CHARS else doc_text[:BRD_INGEST_MAX_CHARS]
+
     # 1) Relevance classifier ------------------------------------------------
     suggested_sections: List[int] = []
     summary = ""
     if available_sections:
         try:
             rel_prompt = build_doc_relevance_prompt(
-                filename=filename, doc_text=doc_text, available_sections=available_sections,
+                filename=filename, doc_text=rel_text, available_sections=available_sections,
             )
             raw = chat_completion(
                 messages=[{"role": "user", "content": rel_prompt}],
-                system_prompt=DOC_RELEVANCE_SYSTEM_PROMPT,
+                system_prompt=cached_system_blocks(DOC_RELEVANCE_SYSTEM_PROMPT),
                 model=BRD_HANDLER_MODEL,
                 temperature=0.0,
                 max_tokens=200,
@@ -1828,19 +2120,52 @@ def _ingest_one_doc(
             logger.warning(f"[BRD] ingest relevance classify failed (non-fatal): {e}")
 
     # 2) Fact extraction -----------------------------------------------------
+    # Large docs are chunked so each extraction call stays within the model
+    # context (and dodges lost-in-the-middle). Each chunk is extracted, then
+    # the per-chunk fact dicts are merged into one before persisting.
     facts_extracted = 0
-    try:
-        fact_prompt = build_doc_facts_prompt(filename=filename, doc_text=doc_text)
+
+    def _extract_facts_from(chunk_text: str, label: str) -> Dict[str, Any]:
+        fact_prompt = build_doc_facts_prompt(filename=label, doc_text=chunk_text)
         raw_facts = chat_completion(
             messages=[{"role": "user", "content": fact_prompt}],
-            system_prompt=DOC_FACTS_SYSTEM_PROMPT,
+            system_prompt=cached_system_blocks(DOC_FACTS_SYSTEM_PROMPT),
             model=BRD_HANDLER_MODEL,
             temperature=0.3,
             max_tokens=800,
             user_id=user_id,
             token_source="lambda_brd_orchestrator:doc_facts",
         )
-        parsed_facts = extract_json(raw_facts)
+        parsed = extract_json(raw_facts)
+        return parsed if isinstance(parsed, dict) else {}
+
+    try:
+        if len(doc_text) <= BRD_INGEST_MAX_CHARS:
+            parsed_facts = _extract_facts_from(doc_text, filename)
+        else:
+            from concurrent.futures import ThreadPoolExecutor
+
+            chunks = _chunk_text(
+                doc_text, BRD_INGEST_CHUNK_CHARS, BRD_INGEST_CHUNK_OVERLAP
+            )
+            logger.info(
+                f"[BRD] ingest: {filename} is {len(doc_text)} chars > "
+                f"{BRD_INGEST_MAX_CHARS} — chunking into {len(chunks)} pieces "
+                f"for fact extraction"
+            )
+            per_chunk: List[Dict[str, Any]] = []
+            with ThreadPoolExecutor(max_workers=BRD_SECTION_PARALLELISM) as ex:
+                futures = [
+                    ex.submit(_extract_facts_from, ch, f"{filename} (part {i + 1}/{len(chunks)})")
+                    for i, ch in enumerate(chunks)
+                ]
+                for fut in futures:
+                    try:
+                        per_chunk.append(fut.result())
+                    except Exception as ce:
+                        logger.warning(f"[BRD] ingest chunk extraction failed (non-fatal): {ce}")
+            parsed_facts = _merge_fact_dicts(per_chunk)
+
         if isinstance(parsed_facts, dict):
             facts_extracted = sum(
                 len(v) if isinstance(v, list) else 0
@@ -1891,21 +2216,20 @@ INTENT_TO_HANDLER_MAP: Dict[str, Callable[..., Dict[str, Any]]] = {
     "ADD_INFO":              _do_add_info,
     "EDIT_SECTION":          _do_edit_section,
     "GATHER_REQUIREMENTS":   _do_gather,
-    "GENERATE_FROM_DOCS":    _do_generate_from_docs,
-    "GENERATE_FROM_HISTORY": _do_generate_from_history,
+    "GENERATE_BRD":          _do_generate_brd,
     "AUDIT":                 _do_audit,
     "REGENERATE_SECTION":    _do_regenerate_section,
     "INGEST_DOC":            _do_ingest_doc,
 }
 
 
-def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Action-level entry for `POST /api/brd/generate-from-docs`.
+def handle_generate(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Action-level entry for `POST /api/brd/generate`.
 
-    Verifies session, then delegates to the same _start_generation
-    body the intent path uses. Returns the same generation_starting /
-    generation_failed card the chat path returns so the frontend
-    renders both identically.
+    Verifies session ownership, then delegates to the same unified
+    generation body the intent path uses (one generator Lambda, all
+    sources). Returns the same generation_starting / generation_failed
+    card the chat path returns so the frontend renders both identically.
     """
     from services.brd_orchestrator_utils import verify_session_owned
 
@@ -1926,63 +2250,7 @@ def handle_generate_from_docs(event: Dict[str, Any]) -> Dict[str, Any]:
     except PermissionError:
         return card("error", code="forbidden", message="not your session", retryable=False)
 
-    return _start_generation(
-        event=event,
-        session=session,
-        worker_lambda=BRD_GENERATOR_LAMBDA,
-        worker_payload_extras={
-            "template":   (event or {}).get("template")   or (event or {}).get("template_text"),
-            "transcript": (event or {}).get("transcript") or (event or {}).get("transcript_text"),
-            "template_s3_bucket":   (event or {}).get("template_s3_bucket"),
-            "template_s3_key":      (event or {}).get("template_s3_key"),
-            "transcript_s3_bucket": (event or {}).get("transcript_s3_bucket"),
-            "transcript_s3_key":    (event or {}).get("transcript_s3_key"),
-            # Phase 6: env-gated parallel path (prime-then-fan-out + caching).
-            "parallel": BRD_USE_PARALLEL_GENERATION,
-        },
-        expected_seconds=40 if BRD_USE_PARALLEL_GENERATION else 90,
-        source="docs",
-    )
-
-
-def handle_generate_from_history(event: Dict[str, Any]) -> Dict[str, Any]:
-    """Action-level entry for `POST /api/brd/generate-from-history`.
-    Mirrors handle_generate_from_docs but fires the history worker.
-    """
-    from services.brd_orchestrator_utils import verify_session_owned
-
-    session_id = (event or {}).get("session_id")
-    user_id    = (event or {}).get("user_id")
-    if not session_id or not user_id:
-        return card("error", code="bad_request",
-                    message="session_id and user_id are required", retryable=False)
-
-    try:
-        session = verify_session_owned(
-            session_id,
-            user_id,
-            session_from_event=(event or {}).get("session"),
-        )
-    except LookupError:
-        return card("error", code="session_not_found", message=session_id, retryable=False)
-    except PermissionError:
-        return card("error", code="forbidden", message="not your session", retryable=False)
-
-    return _start_generation(
-        event=event,
-        session=session,
-        worker_lambda=BRD_FROM_HISTORY_LAMBDA,
-        worker_payload_extras={
-            "session_id": session_id,
-            # Phase 6: env-gated parallel path (prime-then-fan-out + caching).
-            # Without this the worker takes the legacy monolithic path AND
-            # reads memory under the wrong actor — leaves the user staring
-            # at a spinner forever.
-            "parallel": BRD_USE_PARALLEL_GENERATION,
-        },
-        expected_seconds=45 if BRD_USE_PARALLEL_GENERATION else 60,
-        source="history",
-    )
+    return _do_generate_brd(event, session, router={})
 
 
 def handle_audit(event: Dict[str, Any]) -> Dict[str, Any]:
@@ -2575,8 +2843,7 @@ def handle_ingest_doc(event: Dict[str, Any]) -> Dict[str, Any]:
 ACTION_HANDLER_MAP: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
     "ping":                  handle_ping,
     "turn":                  handle_turn,
-    "generate_from_docs":    handle_generate_from_docs,
-    "generate_from_history": handle_generate_from_history,
+    "generate":              handle_generate,
     "audit":                 handle_audit,
     "revert_section":        handle_revert_section,
     "save_section":          handle_save_section,

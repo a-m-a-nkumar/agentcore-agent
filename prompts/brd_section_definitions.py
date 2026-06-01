@@ -122,6 +122,35 @@ SECTION_FORMATS: Dict[int, Dict[str, Any]] = {
 }
 
 
+# ============================================================================
+# SECTION_RAG_QUERIES — per-section retrieval seeds (Phase 1 RAG).
+# Each generation chunks + embeds the full input corpus once, then for each
+# section retrieves only the chunks relevant to THAT section using these
+# topical query seeds. Keeps per-section context small (no 450K-token
+# context overflow) and lets generation scale to arbitrarily large inputs.
+# Keyed by section number; one entry per BRD_SECTIONS row.
+# ============================================================================
+
+SECTION_RAG_QUERIES: Dict[int, str] = {
+    1:  "project name, document title, author, owner, version, status, overview summary",
+    2:  "purpose, business need, problem being solved, goal, intended outcome, why this project",
+    3:  "background, current state, existing system, history, what exists today, why now, context",
+    4:  "stakeholders, people, names, roles, titles, responsibilities, owners, teams, who is involved",
+    5:  "scope, in scope, out of scope, boundaries, included, excluded, what the project covers",
+    6:  "business objectives, goals, ROI, return on investment, benefits, priorities, outcomes, value",
+    7:  "functional requirements, features, capabilities, the system shall, user actions, what it must do",
+    8:  "non-functional requirements, performance, security, scalability, reliability, latency, uptime, compliance, SLA",
+    9:  "user stories, use cases, as a user I want, personas, user goals, scenarios, workflows",
+    10: "assumptions, presumed, taken as given, depends on, expected conditions, prerequisites",
+    11: "constraints, limitations, restrictions, budget, deadline, mandated technology, must use, cannot",
+    12: "acceptance criteria, KPIs, success metrics, targets, measurable goals, definition of done, thresholds",
+    13: "timeline, milestones, phases, schedule, duration, deliverables, dates, roadmap, owner",
+    14: "risks, dependencies, threats, impact, mitigation, external systems, blockers, what could go wrong",
+    15: "approval, review, reviewers, sign-off, approvers, governance, stakeholder approval",
+    16: "glossary, terms, definitions, acronyms, abbreviations, domain terminology, jargon",
+}
+
+
 # Sanity invariants — caught at import time, NOT at runtime, so a bad
 # edit to BRD_SECTIONS / SECTION_FORMATS fails the test suite and never
 # reaches production.
@@ -131,6 +160,9 @@ assert [n for n, _, _ in BRD_SECTIONS] == list(range(1, 17)), (
 )
 assert set(SECTION_FORMATS) == set(range(1, 17)), (
     f"SECTION_FORMATS keys must be 1..16; got {sorted(SECTION_FORMATS)}"
+)
+assert set(SECTION_RAG_QUERIES) == set(range(1, 17)), (
+    f"SECTION_RAG_QUERIES keys must be 1..16; got {sorted(SECTION_RAG_QUERIES)}"
 )
 
 
