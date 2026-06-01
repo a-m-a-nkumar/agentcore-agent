@@ -393,9 +393,9 @@ def unlink_lucid_account(current_user: dict = Depends(get_current_user)):
 
 class LinkHarnessRequest(BaseModel):
     pat: str = Field(..., min_length=1)
-    account_id: str = Field(..., min_length=1)
-    org_id: str = Field(..., min_length=1)
-    project_id: str = Field(..., min_length=1)
+    account_id: str = Field(default="")
+    org_id: str = Field(default="")
+    project_id: str = Field(default="")
 
 
 @router.post("/harness/link")
@@ -403,13 +403,21 @@ def link_harness_account(
     req: LinkHarnessRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Persist the user's Harness PAT (KMS-encrypted) and workspace identifiers."""
+    """Persist the user's Harness PAT (KMS-encrypted) and workspace identifiers.
+    When org_id / project_id are omitted the existing values are preserved."""
+    if not req.org_id or not req.project_id:
+        existing = get_user_harness_credentials(current_user["id"])
+        org_id = req.org_id or (existing.get("harness_org_id", "") if existing else "")
+        project_id = req.project_id or (existing.get("harness_project_id", "") if existing else "")
+    else:
+        org_id = req.org_id
+        project_id = req.project_id
     update_user_harness_credentials(
         current_user["id"],
         req.pat,
         req.account_id,
-        req.org_id,
-        req.project_id,
+        org_id,
+        project_id,
     )
     logger.info(f"[HARNESS] Linked for user {current_user['id']}")
     return {"status": "success", "message": "Harness account linked"}
