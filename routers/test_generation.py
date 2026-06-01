@@ -22,6 +22,7 @@ from auth import verify_azure_token, require_module
 from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project, track_event
 from services.confluence_service import ConfluenceService
 from services.github_service import GitHubService
+from services.bitbucket_service import BitbucketService
 from services.lineage_service import record_lineage
 from utils.requirement_ids import normalize_requirement_id
 from utils.content_hashing import hash_text
@@ -79,6 +80,17 @@ class PushToGitHubRequest(BaseModel):
     project_id: str
     github_token: str = Field(..., description="GitHub PAT with repo scope")
     repo_url: str = Field(..., description="GitHub repository URL or owner/repo")
+    feature_files: List[FeatureFile]
+    branch: str = "test/auto-generated"
+    base_path: str = "Include/features"
+    create_pr: bool = True
+
+
+class PushToBitbucketRequest(BaseModel):
+    project_id: str
+    bitbucket_email: str = Field(..., description="Atlassian account email")
+    bitbucket_app_password: str = Field(..., description="Bitbucket App Password")
+    repo_url: str = Field(..., description="Bitbucket repo URL or workspace/slug")
     feature_files: List[FeatureFile]
     branch: str = "test/auto-generated"
     base_path: str = "Include/features"
@@ -912,3 +924,58 @@ async def push_feature_files_to_github(
     except Exception as e:
         logger.error(f"Error pushing to GitHub: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to push to GitHub: {str(e)}")
+
+
+# ============================================
+# BITBUCKET PUSH ENDPOINT
+# ============================================
+
+@router.post("/push-to-bitbucket")
+async def push_feature_files_to_bitbucket(
+    request: PushToBitbucketRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Push .feature files to a Bitbucket Cloud repository.
+    Commits files to a branch via the src API and optionally opens a PR.
+    """
+    project = get_project(request.project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if not request.feature_files:
+        raise HTTPException(status_code=400, detail="No feature files provided")
+
+    try:
+        workspace, repo_slug = BitbucketService.parse_repo_url(request.repo_url)
+        bb = BitbucketService(request.bitbucket_email, request.bitbucket_app_password)
+
+        # Validate credentials first
+        ok, err = bb.test_connection()
+        if not ok:
+            raise HTTPException(status_code=401, detail=err or "Invalid Bitbucket credentials")
+
+        result = bb.push_feature_files(
+            workspace=workspace,
+            repo_slug=repo_slug,
+            feature_files=[ff.dict() for ff in request.feature_files],
+            branch=request.branch,
+            base_path=request.base_path,
+            create_pr=request.create_pr,
+        )
+
+        return {
+            "success": True,
+            "branch": result["branch"],
+            "branch_url": result["branch_url"],
+            "files": result["files"],
+            "pr_url": result.get("pr_url"),
+            "pr_number": result.get("pr_number"),
+        }
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error pushing to Bitbucket: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to push to Bitbucket: {str(e)}")

@@ -1393,6 +1393,84 @@ def clear_user_lucid_credentials(user_id: str) -> bool:
         release_db_connection(conn)
 
 
+def update_user_harness_credentials(
+    user_id: str, pat: str, account_id: str, org_id: str, project_id: str
+) -> bool:
+    """Encrypt and persist the user's Harness PAT and workspace identifiers.
+
+    Mirrors update_user_lucid_credentials — PAT is KMS-encrypted via _encrypt_token.
+    """
+    encrypted_pat = _encrypt_token(pat)
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET harness_pat        = %s,
+                    harness_account_id = %s,
+                    harness_org_id     = %s,
+                    harness_project_id = %s,
+                    harness_linked_at  = NOW()
+                WHERE id = %s
+            """, (encrypted_pat, account_id, org_id, project_id, user_id))
+            conn.commit()
+            logger.info(f"[HARNESS] Credentials updated (KMS-encrypted) for user: {user_id}")
+            return True
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"[HARNESS] Error updating credentials for user {user_id}: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_user_harness_credentials(user_id: str) -> Optional[Dict[str, Any]]:
+    """Retrieve Harness credentials from DB and decrypt the PAT.
+
+    Returns None if no PAT is on file. Otherwise returns a dict with
+    harness_pat (decrypted), harness_account_id, harness_org_id,
+    harness_project_id, harness_linked_at.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT harness_pat, harness_account_id, harness_org_id,
+                       harness_project_id, harness_linked_at
+                FROM users
+                WHERE id = %s
+            """, (user_id,))
+            result = cursor.fetchone()
+            if not result or not result.get("harness_pat"):
+                return None
+            creds = dict(result)
+            creds["harness_pat"] = _decrypt_token(creds["harness_pat"])
+            return creds
+    finally:
+        release_db_connection(conn)
+
+
+def clear_user_harness_credentials(user_id: str) -> bool:
+    """Unlink: clear the user's Harness PAT and workspace identifiers."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                UPDATE users
+                SET harness_pat        = NULL,
+                    harness_account_id = NULL,
+                    harness_org_id     = NULL,
+                    harness_project_id = NULL,
+                    harness_linked_at  = NULL
+                WHERE id = %s
+            """, (user_id,))
+            conn.commit()
+            logger.info(f"[HARNESS] Credentials cleared for user: {user_id}")
+            return cursor.rowcount > 0
+    finally:
+        release_db_connection(conn)
+
+
 def update_user_figma_credentials(user_id: str, pat: str, team_id: str) -> bool:
     """Save Figma PAT and Team ID for a user."""
     conn = get_db_connection()

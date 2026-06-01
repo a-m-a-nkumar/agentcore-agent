@@ -102,9 +102,11 @@ def _build_bmad_prompt(base_prompt: str, workflow_key: str = "create-prd") -> st
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        # Local dev servers
-        "http://localhost:8080", "http://localhost:8081", "http://localhost:5173",
-        "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:5173",
+        # Local dev servers — Vite falls back to next available port when 8080 is taken
+        "http://localhost:8080", "http://localhost:8081", "http://localhost:8082",
+        "http://localhost:8083", "http://localhost:5173",
+        "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:8082",
+        "http://127.0.0.1:8083", "http://127.0.0.1:5173",
         # Deployed frontends — needed when testing local backend against
         # the deployed UI in the browser.
         "https://sdlc-dev.deluxe.com",

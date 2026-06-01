@@ -16,6 +16,9 @@ from db_helper import (
     update_user_lucid_credentials,
     get_user_lucid_credentials,
     clear_user_lucid_credentials,
+    update_user_harness_credentials,
+    get_user_harness_credentials,
+    clear_user_harness_credentials,
     create_or_update_user,
     get_project
 )
@@ -369,6 +372,60 @@ def unlink_lucid_account(current_user: dict = Depends(get_current_user)):
     clear_user_lucid_credentials(current_user["id"])
     _token_validation_cache.pop(f"lucid:{current_user['id']}", None)
     return {"status": "success", "message": "Lucid account unlinked"}
+
+
+# ============================================================
+# Harness CI/CD integration — store PAT + workspace in DB
+# ============================================================
+
+class LinkHarnessRequest(BaseModel):
+    pat: str = Field(..., min_length=1)
+    account_id: str = Field(..., min_length=1)
+    org_id: str = Field(..., min_length=1)
+    project_id: str = Field(..., min_length=1)
+
+
+@router.post("/harness/link")
+def link_harness_account(
+    req: LinkHarnessRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Persist the user's Harness PAT (KMS-encrypted) and workspace identifiers."""
+    update_user_harness_credentials(
+        current_user["id"],
+        req.pat,
+        req.account_id,
+        req.org_id,
+        req.project_id,
+    )
+    logger.info(f"[HARNESS] Linked for user {current_user['id']}")
+    return {"status": "success", "message": "Harness account linked"}
+
+
+@router.get("/harness/status")
+def get_harness_status(current_user: dict = Depends(get_current_user)):
+    """Return whether the user has a stored Harness PAT, and the associated
+    workspace identifiers (account / org / project). The PAT itself is never
+    returned to the client."""
+    creds = get_user_harness_credentials(current_user["id"])
+    if not creds or not creds.get("harness_pat"):
+        return {"linked": False}
+    linked_at = creds.get("harness_linked_at")
+    return {
+        "linked": True,
+        "account_id": creds.get("harness_account_id"),
+        "org_id": creds.get("harness_org_id"),
+        "project_id": creds.get("harness_project_id"),
+        "linked_at": linked_at.isoformat() if linked_at else None,
+    }
+
+
+@router.delete("/harness/unlink")
+def unlink_harness_account(current_user: dict = Depends(get_current_user)):
+    """Drop the user's stored Harness credentials. Idempotent."""
+    clear_user_harness_credentials(current_user["id"])
+    logger.info(f"[HARNESS] Unlinked for user {current_user['id']}")
+    return {"status": "success", "message": "Harness account unlinked"}
 
 
 @router.get("/jira/projects")
