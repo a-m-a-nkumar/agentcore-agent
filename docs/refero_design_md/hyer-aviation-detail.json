@@ -1,0 +1,2271 @@
+{
+  "style": {
+    "id": "f61cf515-ccd5-4494-bdd1-be9fe4d7258c",
+    "url": "https://www.flyhyer.com",
+    "siteName": "Hyer Aviation",
+    "screenshotUrl": "https://images.refero.design/styles/refero.design/image/330de06f-1f27-439b-8f53-747aa97a5470.jpg",
+    "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/c52a246b-7286-4ded-bae4-e5a16dfbde08.jpg",
+    "iconUrl": null,
+    "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/e4432daa-fc14-4938-a52a-dae8904b067e.mp4",
+    "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/53e0250a-8995-4422-9578-52fbe80ee01d.jpg",
+    "previewVideoWidth": 1200,
+    "previewVideoHeight": 750,
+    "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/e66294f6-123d-4a67-b2f6-d36177be5ffa.mp4",
+    "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/84eadbaf-64c1-436b-bdc9-d605843b6c64.jpg",
+    "previewVideoDetailWidth": 1600,
+    "previewVideoDetailHeight": 1000,
+    "previewVideoDurationMs": 22517,
+    "previewVideoCapturedAt": "2026-05-07T23:07:00.530Z",
+    "colorScheme": "light",
+    "industry": "other",
+    "createdAt": "2026-04-30T03:06:15.161Z",
+    "fullResult": {
+      "meta": {
+        "url": "https://www.flyhyer.com",
+        "siteName": "Hyer Aviation",
+        "extractedAt": "2026-04-30T03:06:15.096Z",
+        "durationMs": 30618,
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "elementCount": 326,
+        "telemetry": {
+          "enrichment": {
+            "componentHtmlStatus": "pending",
+            "attempts": 0
+          }
+        }
+      },
+      "raw": {
+        "colors": {
+          "tokens": [
+            {
+              "hex": "#000d10",
+              "oklch": {
+                "c": 0.025185159249057537,
+                "h": 209.8093791596726,
+                "l": 0.145715657245909
+              },
+              "contexts": [
+                "other",
+                "link",
+                "list",
+                "button",
+                "heading",
+                "hero",
+                "image",
+                "body",
+                "icon",
+                "footer",
+                "nav"
+              ],
+              "frequency": 1010,
+              "confidence": 1,
+              "prominence": 116951538.43180443,
+              "properties": [
+                "color",
+                "borderColor",
+                "backgroundColor",
+                "fill",
+                "stroke"
+              ],
+              "usageCounts": {
+                "icon/fill": 18,
+                "nav/color": 22,
+                "body/color": 15,
+                "hero/color": 2,
+                "icon/color": 11,
+                "link/color": 8,
+                "list/color": 9,
+                "other/fill": 10,
+                "image/color": 13,
+                "other/color": 84,
+                "footer/color": 1,
+                "other/stroke": 32,
+                "heading/color": 24,
+                "nav/borderColor": 88,
+                "body/borderColor": 60,
+                "hero/borderColor": 8,
+                "icon/borderColor": 44,
+                "link/borderColor": 32,
+                "list/borderColor": 36,
+                "image/borderColor": 52,
+                "other/borderColor": 335,
+                "footer/borderColor": 4,
+                "heading/borderColor": 96,
+                "button/backgroundColor": 5,
+                "footer/backgroundColor": 1
+              }
+            },
+            {
+              "hex": "#ffffff",
+              "oklch": {
+                "c": 0,
+                "h": 0,
+                "l": 1.0000000000000002
+              },
+              "contexts": [
+                "button",
+                "icon",
+                "other",
+                "heading",
+                "body",
+                "link",
+                "image",
+                "nav"
+              ],
+              "frequency": 221,
+              "confidence": 1,
+              "prominence": 6313476.851743586,
+              "properties": [
+                "color",
+                "borderColor",
+                "fill",
+                "backgroundColor",
+                "stroke"
+              ],
+              "usageCounts": {
+                "icon/fill": 8,
+                "nav/color": 4,
+                "body/color": 8,
+                "icon/color": 2,
+                "link/color": 1,
+                "other/fill": 9,
+                "image/color": 1,
+                "other/color": 10,
+                "button/color": 7,
+                "other/stroke": 5,
+                "heading/color": 6,
+                "nav/borderColor": 16,
+                "body/borderColor": 32,
+                "icon/borderColor": 8,
+                "link/borderColor": 4,
+                "image/borderColor": 4,
+                "other/borderColor": 40,
+                "button/borderColor": 28,
+                "heading/borderColor": 24,
+                "link/backgroundColor": 3,
+                "other/backgroundColor": 1
+              }
+            },
+            {
+              "hex": "#151623",
+              "oklch": {
+                "c": 0.025851557769793653,
+                "h": 280.46136766397126,
+                "l": 0.20576147179591522
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 2,
+              "confidence": 1,
+              "prominence": 910654.4694518467,
+              "properties": [
+                "backgroundColor"
+              ],
+              "usageCounts": {
+                "other/backgroundColor": 2
+              }
+            },
+            {
+              "hex": "#bc7155",
+              "oklch": {
+                "c": 0.10368365407006763,
+                "h": 41.09881308531095,
+                "l": 0.6241582866034198
+              },
+              "contexts": [
+                "button",
+                "other"
+              ],
+              "frequency": 2,
+              "confidence": 1,
+              "prominence": 607032.7129636991,
+              "properties": [
+                "backgroundColor",
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 1,
+                "button/backgroundColor": 1
+              }
+            },
+            {
+              "hex": "#0f0f1c",
+              "oklch": {
+                "c": 0.02671167278558464,
+                "h": 283.3052918522818,
+                "l": 0.1756245372250249
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 574559,
+              "properties": [
+                "backgroundColor"
+              ],
+              "usageCounts": {
+                "other/backgroundColor": 1
+              }
+            },
+            {
+              "hex": "#8e8e95",
+              "oklch": {
+                "c": 0.010292209617977771,
+                "h": 286.1094169532696,
+                "l": 0.6489589473830756
+              },
+              "contexts": [
+                "other",
+                "body",
+                "heading",
+                "nav"
+              ],
+              "frequency": 130,
+              "confidence": 1,
+              "prominence": 473567.40411651804,
+              "properties": [
+                "color",
+                "borderColor"
+              ],
+              "usageCounts": {
+                "nav/color": 10,
+                "body/color": 11,
+                "other/color": 4,
+                "heading/color": 1,
+                "nav/borderColor": 40,
+                "body/borderColor": 44,
+                "other/borderColor": 16,
+                "heading/borderColor": 4
+              }
+            },
+            {
+              "hex": "#d5d3d4",
+              "oklch": {
+                "c": 0.002570477615540258,
+                "h": 345.2212537729851,
+                "l": 0.868726706396859
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 118705,
+              "properties": [
+                "borderColor"
+              ],
+              "usageCounts": {
+                "other/borderColor": 1
+              }
+            }
+          ],
+          "isDarkMode": false,
+          "colorfulness": 0.053507089238549736,
+          "contrastPairs": [
+            {
+              "level": "AAA",
+              "ratio": 19.72,
+              "background": "#ffffff",
+              "foreground": "#000d10"
+            },
+            {
+              "level": "AAA",
+              "ratio": 19,
+              "background": "#0f0f1c",
+              "foreground": "#ffffff"
+            },
+            {
+              "level": "AAA",
+              "ratio": 17.93,
+              "background": "#151623",
+              "foreground": "#ffffff"
+            },
+            {
+              "level": "AAA",
+              "ratio": 13.24,
+              "background": "#d5d3d4",
+              "foreground": "#000d10"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.75,
+              "background": "#d5d3d4",
+              "foreground": "#0f0f1c"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.04,
+              "background": "#d5d3d4",
+              "foreground": "#151623"
+            },
+            {
+              "level": "AA",
+              "ratio": 6.06,
+              "background": "#000d10",
+              "foreground": "#8e8e95"
+            },
+            {
+              "level": "AA",
+              "ratio": 5.84,
+              "background": "#0f0f1c",
+              "foreground": "#8e8e95"
+            },
+            {
+              "level": "AA",
+              "ratio": 5.51,
+              "background": "#151623",
+              "foreground": "#8e8e95"
+            },
+            {
+              "level": "AA",
+              "ratio": 5.29,
+              "background": "#bc7155",
+              "foreground": "#000d10"
+            },
+            {
+              "level": "fail",
+              "ratio": 3.73,
+              "background": "#bc7155",
+              "foreground": "#ffffff"
+            },
+            {
+              "level": "fail",
+              "ratio": 3.25,
+              "background": "#ffffff",
+              "foreground": "#8e8e95"
+            },
+            {
+              "level": "fail",
+              "ratio": 1.15,
+              "background": "#bc7155",
+              "foreground": "#8e8e95"
+            },
+            {
+              "level": "fail",
+              "ratio": 1.1,
+              "background": "#151623",
+              "foreground": "#000d10"
+            },
+            {
+              "level": "fail",
+              "ratio": 1.04,
+              "background": "#0f0f1c",
+              "foreground": "#000d10"
+            }
+          ]
+        },
+        "shapes": {
+          "radii": [
+            {
+              "value": 1000,
+              "contexts": [
+                "button",
+                "link"
+              ],
+              "frequency": 5
+            },
+            {
+              "value": 45,
+              "corners": [
+                0,
+                0,
+                45,
+                0
+              ],
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "asymmetric": true
+            }
+          ],
+          "shadows": []
+        },
+        "spacing": {
+          "tokens": [
+            {
+              "value": 11,
+              "contexts": [
+                "other",
+                "list"
+              ],
+              "frequency": 3,
+              "properties": [
+                "marginRight"
+              ],
+              "propertyContextPairs": [
+                "marginRight|other",
+                "marginRight|list"
+              ]
+            },
+            {
+              "value": 13,
+              "contexts": [
+                "link",
+                "nav"
+              ],
+              "frequency": 6,
+              "properties": [
+                "marginTop",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "marginTop|link",
+                "marginBottom|nav"
+              ]
+            },
+            {
+              "value": 15,
+              "contexts": [
+                "button",
+                "icon"
+              ],
+              "frequency": 5,
+              "properties": [
+                "paddingTop",
+                "marginRight"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|button",
+                "marginRight|icon"
+              ]
+            },
+            {
+              "value": 16,
+              "contexts": [
+                "button"
+              ],
+              "frequency": 4,
+              "properties": [
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingBottom|button"
+              ]
+            },
+            {
+              "value": 17,
+              "contexts": [
+                "heading",
+                "nav"
+              ],
+              "frequency": 5,
+              "properties": [
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|heading",
+                "marginBottom|nav"
+              ]
+            },
+            {
+              "value": 21,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 6,
+              "properties": [
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|heading"
+              ]
+            },
+            {
+              "value": 22,
+              "contexts": [
+                "button"
+              ],
+              "frequency": 8,
+              "properties": [
+                "paddingRight",
+                "paddingLeft"
+              ],
+              "propertyContextPairs": [
+                "paddingRight|button",
+                "paddingLeft|button"
+              ]
+            },
+            {
+              "value": 23,
+              "contexts": [
+                "other",
+                "heading"
+              ],
+              "frequency": 8,
+              "properties": [
+                "paddingTop",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "marginBottom|heading"
+              ]
+            },
+            {
+              "value": 31,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 6,
+              "properties": [
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|other"
+              ]
+            },
+            {
+              "value": 34,
+              "contexts": [
+                "link"
+              ],
+              "frequency": 3,
+              "properties": [
+                "marginRight"
+              ],
+              "propertyContextPairs": [
+                "marginRight|link"
+              ]
+            },
+            {
+              "value": 38,
+              "contexts": [
+                "other",
+                "body"
+              ],
+              "frequency": 5,
+              "properties": [
+                "paddingTop",
+                "paddingLeft",
+                "marginBottom",
+                "marginTop"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "paddingLeft|other",
+                "marginBottom|other",
+                "marginTop|body"
+              ]
+            },
+            {
+              "value": 45,
+              "contexts": [
+                "heading",
+                "other"
+              ],
+              "frequency": 2,
+              "properties": [
+                "marginBottom",
+                "paddingTop"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|heading",
+                "paddingTop|other"
+              ]
+            },
+            {
+              "value": 51,
+              "contexts": [
+                "body"
+              ],
+              "frequency": 2,
+              "properties": [
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|body"
+              ]
+            },
+            {
+              "value": 52,
+              "contexts": [
+                "other",
+                "hero"
+              ],
+              "frequency": 3,
+              "properties": [
+                "paddingTop"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "paddingTop|hero"
+              ]
+            },
+            {
+              "value": 53,
+              "contexts": [
+                "other",
+                "link",
+                "button"
+              ],
+              "frequency": 9,
+              "properties": [
+                "paddingTop",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "paddingTop|link",
+                "paddingTop|button",
+                "marginBottom|other"
+              ]
+            },
+            {
+              "value": 58,
+              "contexts": [
+                "other",
+                "link",
+                "button"
+              ],
+              "frequency": 3,
+              "properties": [
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingBottom|other",
+                "paddingBottom|link",
+                "paddingBottom|button"
+              ]
+            },
+            {
+              "value": 59,
+              "contexts": [
+                "other",
+                "link",
+                "button"
+              ],
+              "frequency": 19,
+              "properties": [
+                "marginLeft",
+                "paddingRight",
+                "paddingLeft",
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "marginLeft|other",
+                "paddingRight|other",
+                "paddingLeft|other",
+                "paddingRight|link",
+                "paddingLeft|link",
+                "paddingRight|button",
+                "paddingLeft|button",
+                "paddingBottom|other"
+              ]
+            },
+            {
+              "value": 60,
+              "contexts": [
+                "other",
+                "nav"
+              ],
+              "frequency": 4,
+              "properties": [
+                "paddingRight",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingRight|other",
+                "marginBottom|nav"
+              ]
+            },
+            {
+              "value": 68,
+              "contexts": [
+                "heading",
+                "other"
+              ],
+              "frequency": 5,
+              "properties": [
+                "marginBottom",
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|heading",
+                "paddingBottom|other"
+              ]
+            },
+            {
+              "value": 119,
+              "contexts": [
+                "other",
+                "nav"
+              ],
+              "frequency": 6,
+              "properties": [
+                "marginLeft"
+              ],
+              "propertyContextPairs": [
+                "marginLeft|other",
+                "marginLeft|nav"
+              ]
+            },
+            {
+              "value": 135,
+              "contexts": [
+                "hero"
+              ],
+              "frequency": 1,
+              "properties": [
+                "paddingTop"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|hero"
+              ]
+            },
+            {
+              "value": 141,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 3,
+              "properties": [
+                "paddingTop",
+                "paddingRight",
+                "paddingLeft"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "paddingRight|other",
+                "paddingLeft|other"
+              ]
+            },
+            {
+              "value": 148,
+              "contexts": [
+                "hero"
+              ],
+              "frequency": 1,
+              "properties": [
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingBottom|hero"
+              ]
+            }
+          ],
+          "density": "spacious",
+          "baseUnit": 4
+        },
+        "gradients": [],
+        "typography": {
+          "fonts": [
+            {
+              "family": "HelveticaNowDisplay",
+              "source": "custom",
+              "weights": [
+                400,
+                700
+              ],
+              "frequency": 250,
+              "fontFeatureSettings": []
+            },
+            {
+              "family": "sans-serif",
+              "source": "system",
+              "weights": [
+                700
+              ],
+              "frequency": 4,
+              "fontFeatureSettings": []
+            }
+          ],
+          "scale": {
+            "base": 20,
+            "name": "Minor Third",
+            "ratio": 1.2,
+            "confidence": 0.91
+          },
+          "steps": [
+            {
+              "size": 17,
+              "family": "sans-serif",
+              "weight": 700,
+              "contexts": [
+                "button",
+                "icon"
+              ],
+              "frequency": 4,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 17,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "button",
+                "link",
+                "icon"
+              ],
+              "frequency": 10,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 17,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "body"
+              ],
+              "frequency": 6,
+              "lineHeight": 1.2,
+              "letterSpacing": 0.01,
+              "textTransform": "none"
+            },
+            {
+              "size": 18,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "other",
+                "link",
+                "list",
+                "body",
+                "image",
+                "button",
+                "hero",
+                "icon",
+                "footer",
+                "nav"
+              ],
+              "frequency": 136,
+              "lineHeight": 1.61,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 18,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "nav"
+              ],
+              "frequency": 8,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 18,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "nav"
+              ],
+              "frequency": 3,
+              "lineHeight": 1.09,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 20,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "link"
+              ],
+              "frequency": 3,
+              "lineHeight": 1.2,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 20,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "body"
+              ],
+              "frequency": 24,
+              "lineHeight": 1.1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 20,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "body",
+                "other"
+              ],
+              "frequency": 6,
+              "lineHeight": 1.1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 20,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "nav"
+              ],
+              "frequency": 17,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 23,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading",
+                "other",
+                "nav"
+              ],
+              "frequency": 7,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 23,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 10,
+              "lineHeight": 1,
+              "letterSpacing": -0.01,
+              "textTransform": "none"
+            },
+            {
+              "size": 30,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 4,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 30,
+              "family": "HelveticaNowDisplay",
+              "weight": 400,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 4,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 30,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 1,
+              "lineHeight": 1.61,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 37,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 2,
+              "lineHeight": 1,
+              "letterSpacing": -0.01,
+              "textTransform": "none"
+            },
+            {
+              "size": 52,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 2,
+              "lineHeight": 1,
+              "letterSpacing": -0.01,
+              "textTransform": "none"
+            },
+            {
+              "size": 60,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 1,
+              "lineHeight": 0.91,
+              "letterSpacing": -0.02,
+              "textTransform": "none"
+            },
+            {
+              "size": 63,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 3,
+              "lineHeight": 1,
+              "letterSpacing": -0.02,
+              "textTransform": "none"
+            },
+            {
+              "size": 131,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading",
+                "link"
+              ],
+              "frequency": 2,
+              "lineHeight": 1,
+              "letterSpacing": -0.02,
+              "textTransform": "none"
+            },
+            {
+              "size": 187,
+              "family": "HelveticaNowDisplay",
+              "weight": 700,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 1,
+              "lineHeight": 0.8,
+              "letterSpacing": -0.02,
+              "textTransform": "none"
+            }
+          ]
+        }
+      },
+      "designSystem": {
+        "dos": [
+          "Prioritize Canvas White (#ffffff) for primary backgrounds and Obsidian (#000d10) for primary text to maintain high contrast (19.7:1 AAA).",
+          "Use HelveticaNowDisplay consistently across all text, emphasizing weight 700 for headings and weight 400 for body text.",
+          "Apply a 1000px border-radius to all buttons and prominent links to achieve the signature pill shape.",
+          "Reserve Desert Sienna (#bc7155) exclusively for primary action buttons to create a single, clear focal point.",
+          "Ensure generous spacing: utilize 23px for element gaps and 68px between major sections.",
+          "Employ negative letter-spacing for large headlines to condense text and enhance impact, specifically -0.02em at sizes like 187px.",
+          "Use Slate Mist (#8e8e95) for supporting text and subtle UI elements where less visual weight is desired, such as form helper text or secondary navigation."
+        ],
+        "donts": [
+          "Avoid using multiple saturated colors; Desert Sienna (#bc7155) is the singular accent color.",
+          "Do not introduce complex gradients or shadows, as the system relies on flat surfaces and high contrast.",
+          "Refrain from using smaller body text sizes than 17px to maintain readability and design gravitas.",
+          "Do not deviate from the HelveticaNowDisplay font for any brand-related text.",
+          "Avoid tight spacing around interactive elements; maintain a minimum of 22px horizontal padding for buttons.",
+          "Do not use square or mildly rounded corners for buttons; the pill shape (1000px radius) is critical for brand identity.",
+          "Do not use generic gray tones for text; ensure body text aligns with Obsidian (#000d10) or Slate Mist (#8e8e95) to maintain the established hierarchy."
+        ],
+        "theme": "light",
+        "colors": [
+          {
+            "hex": "#000d10",
+            "name": "Obsidian",
+            "role": "Primary text, dark surface backgrounds, button backgrounds, interactive elements, nav text. Creates a dominant, authoritative presence",
+            "group": "neutral"
+          },
+          {
+            "hex": "#ffffff",
+            "name": "Canvas White",
+            "role": "Page backgrounds, light surface backgrounds, secondary text, button text, icons. Provides a clean, expansive foundation",
+            "group": "neutral"
+          },
+          {
+            "hex": "#8e8e95",
+            "name": "Slate Mist",
+            "role": "Muted body text, navigation dividers, subtle borders. Used for secondary information that lives harmoniously within the high-contrast system",
+            "group": "neutral"
+          },
+          {
+            "hex": "#bc7155",
+            "name": "Desert Sienna",
+            "role": "Accent for call-to-action buttons, prominent graphical elements. This warm, earthy tone provides the only saturated color highlight, drawing attention with understated luxury",
+            "group": "accent"
+          }
+        ],
+        "layout": "The page primarily utilizes a full-bleed structure, especially for the hero section which extends across the viewport with central text and imagery. Content sections alternate between stark white full-width blocks and dark full-width blocks, creating a distinct visual rhythm. Text and imagery are often arranged in centered stacks or simple two-column layouts. The overall density is spacious, allowing elements to breathe. Navigation is a minimalist top bar with links aligned to the right, often disappearing into a hamburger menu on smaller screens, and a utility navigation in the footer.",
+        "imagery": "The site uses a clean mix of professional product renders (specifically, a white private jet prominent against a subtly cloudy sky) and abstract, high-contrast imagery to convey luxury and precision. Photography is minimalist, focusing on the product itself with little extraneous context. Icons, where present, are likely minimal and monochromatic, adhering to the high-contrast aesthetic. Imagery plays a key role in setting the atmosphere without overwhelming the clean UI.",
+        "similar": [
+          {
+            "why": "Luxury aviation brand with high-quality product imagery and emphasis on exclusivity.",
+            "business": "NetJets"
+          },
+          {
+            "why": "Focus on private jet services, using clean layouts and impactful visuals.",
+            "business": "Flexjet"
+          },
+          {
+            "why": "Strong typographic hierarchy, large headlines, and a focus on essential UI elements over decorative embellishments.",
+            "business": "Stripe"
+          },
+          {
+            "why": "Product-centric visuals against clean backgrounds, high contrast text, and a strong sense of modern minimalism.",
+            "business": "Apple"
+          }
+        ],
+        "spacing": {
+          "radius": {
+            "links": "1000px",
+            "other": "45px",
+            "buttons": "1000px"
+          },
+          "elementGap": "23px",
+          "sectionGap": "68px",
+          "cardPadding": "22px",
+          "pageMaxWidth": null
+        },
+        "industry": "other",
+        "surfaces": [
+          {
+            "hex": "#ffffff",
+            "name": "Canvas White",
+            "level": 1,
+            "purpose": "Primary page background and default surface for content."
+          },
+          {
+            "hex": "#000d10",
+            "name": "Obsidian Surface",
+            "level": 2,
+            "purpose": "Elevated dark surfaces, footer, and backgrounds for prominent sections."
+          }
+        ],
+        "northStar": "monochromatic luxury, sharp contrast",
+        "typeScale": [
+          {
+            "role": "body-sm",
+            "size": 17,
+            "lineHeight": 1.61,
+            "letterSpacing": 0.17
+          },
+          {
+            "role": "subheading",
+            "size": 20,
+            "lineHeight": 1.2,
+            "letterSpacing": 0.2
+          },
+          {
+            "role": "heading-sm",
+            "size": 30,
+            "lineHeight": 1.1,
+            "letterSpacing": -0.3
+          },
+          {
+            "role": "heading",
+            "size": 52,
+            "lineHeight": 1.09,
+            "letterSpacing": -0.52
+          },
+          {
+            "role": "heading-lg",
+            "size": 63,
+            "lineHeight": 0.91,
+            "letterSpacing": -0.63
+          },
+          {
+            "role": "display",
+            "size": 187,
+            "lineHeight": 0.8,
+            "letterSpacing": -3.74
+          }
+        ],
+        "components": [
+          {
+            "name": "Primary Filled Button",
+            "role": "Main call-to-action button, promoting core actions.",
+            "description": "Background: Desert Sienna (#bc7155), Text: Canvas White (#ffffff), Border: None, Border Radius: 1000px (pill shape), Padding: 15px top, 22px horizontal, 16px bottom. Font: HelveticaNowDisplay, 17px, bold (700)."
+          },
+          {
+            "name": "Obsidian Filled Button",
+            "role": "Secondary call-to-action or general action buttons.",
+            "description": "Background: Obsidian (#000d10), Text: Canvas White (#ffffff), Border: 1px Canvas White (#ffffff) for hover/focus, Border Radius: 1000px (pill shape), Padding: 15px top, 22px horizontal, 16px bottom. Font: HelveticaNowDisplay, 17px, bold (700)."
+          },
+          {
+            "name": "Obsidian Ghost Button",
+            "role": "Alternative action buttons, appearing less prominent than filled variants.",
+            "description": "Background: transparent, Text: Canvas White (#ffffff), Border: 1px Canvas White (#ffffff), Border Radius: 1000px (pill shape), Padding: 15px top, 22px horizontal, 16px bottom. Font: HelveticaNowDisplay, 17px, bold (700)."
+          },
+          {
+            "name": "Navigation Link",
+            "role": "Primary navigation items in the header and footer.",
+            "description": "Text: Obsidian (#000d10) or Canvas White (#ffffff), active state may have a subtle underline. Font: HelveticaNowDisplay, 17px, 400 weight. Spacing: 13px top/bottom margin, 34px right margin."
+          },
+          {
+            "name": "Feature Card",
+            "role": "Displays key features or offerings with associated text.",
+            "description": "Background: Canvas White (#ffffff), Text: Obsidian (#000d10) or Slate Mist (#8e8e95). Font: HelveticaNowDisplay, varying sizes. Likely has internal padding of 22px."
+          }
+        ],
+        "typography": [
+          {
+            "role": "All primary textual content: headlines, body, buttons, navigation. Its large scale and slightly condensed forms deliver a modern, impactful voice.",
+            "sizes": "17px, 18px, 20px, 23px, 30px, 37px, 52px, 60px, 63px, 131px, 187px",
+            "family": "HelveticaNowDisplay",
+            "weight": "400, 700",
+            "lineHeight": "0.80, 0.91, 1.00, 1.09, 1.10, 1.20, 1.61",
+            "substitute": "system-ui",
+            "letterSpacing": "-0.02em at largest sizes, -0.01em at medium, 0.01em at smallest"
+          },
+          {
+            "role": "Used sparingly for specific bold text, likely for icons or small utility elements where a system sans-serif is a fallback.",
+            "sizes": "17px",
+            "family": "sans-serif",
+            "weight": "700",
+            "lineHeight": "1.00",
+            "substitute": "Arial",
+            "letterSpacing": "normal"
+          }
+        ],
+        "description": "Hyer Aviation employs a commanding, high-contrast aesthetic, juxtaposing crisp white surfaces with deep, almost-black elements. Bold, large-scale typography creates immediate impact, while subtle details like rounded pill shapes and a single warm accent color temper its power. The design feels grounded and luxurious, with ample whitespace and a restrained color palette that allows imagery to take center stage, communicating sophistication through assertive simplicity.",
+        "customSections": [
+          {
+            "title": "Agent Prompt Guide",
+            "content": "Quick Color Reference:\ntext: #000d10\nbackground: #ffffff\nborder: #8e8e95\naccent: #bc7155\nprimary action: #bc7155 (filled action)\n\nExample Component Prompts:\nCreate a hero section: full-bleed background set by an image of a private jet against a light blue sky. Overlay a large headline \"Personalised Aviation\" in Canvas White (#ffffff), HelveticaNowDisplay, 187px, weight 700, line height 0.8, letter-spacing -3.74px, aligned left. Below the headline, add a subtitle \"More flexibility, freedom and choice!\" in Canvas White (#ffffff), HelveticaNowDisplay, 23px, weight 400. In the bottom right corner, place two pill-shaped buttons with 1000px radius: 'All Solutions' (Obsidian Filled Button: #000d10 background, #ffffff text, HelveticaNowDisplay, 17px, bold, 15px top, 22px horizontal, 16px bottom padding) and 'Ownership' (Desert Sienna Filled Button: #bc7155 background, #ffffff text, HelveticaNowDisplay, 17px, bold, 15px top, 22px horizontal, 16px bottom padding).\n\nCreate a feature panel: Canvas White (#ffffff) background. Headline 'Flexible Solutions' in Obsidian (#000d10), HelveticaNowDisplay, 30px, weight 700, line height 1.1, letter-spacing -0.3px. Below, body text 'Stop depending on airlines. Fly on your own terms or join our exclusive shared flights.' in Slate Mist (#8e8e95), HelveticaNowDisplay, 17px, weight 400, line height 1.61. Separate features with a 1px Slate Mist (#8e8e95) horizontal rule that extends the width of the content.\n\nCreate a footer: Obsidian (#000d10) background, with all text in Canvas White (#ffffff). Navigation links 'On-demand', 'Private Charter', 'Aircraft Ownership' should use HelveticaNowDisplay, 17px, weight 400, with 13px top/bottom and 34px right margin between them. Include a minimal copyright text in Canvas White (#ffffff) at 17px."
+          }
+        ]
+      },
+      "screenshot": {
+        "url": "https://images.refero.design/styles/refero.design/image/330de06f-1f27-439b-8f53-747aa97a5470.jpg",
+        "thumbnail": "https://images.refero.design/styles/refero.design/image/c52a246b-7286-4ded-bae4-e5a16dfbde08.jpg"
+      }
+    }
+  },
+  "similar": [
+    {
+      "id": "bf523387-03fc-4243-86ca-25af34daa0ce",
+      "url": "https://heartaerospace.com",
+      "siteName": "Heart Aerospace",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/5c9f6d3d-75c4-4476-a2cf-c68a58b24db1.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/70e5cf67-1a7c-497e-8a89-8110b4264a60.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Cloud Gray",
+          "hex": "#716e85",
+          "gradient": "linear-gradient(rgb(113, 110, 133) 0px, rgb(255, 255, 255) 65%)"
+        },
+        {
+          "name": "Midnight Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Pure Canvas",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Electric Violet",
+          "hex": "#001489"
+        }
+      ],
+      "fonts": [
+        "NeueHaasText",
+        "NeueHaasDisplay"
+      ],
+      "northStar": "Overcast Sky, Silent Typography",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 01:31:40.606075"
+    },
+    {
+      "id": "c1052d8d-3663-46a4-a882-e50d9b8a1166",
+      "url": "https://www.jobyaviation.com",
+      "siteName": "Joby Aviation",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/e0c1e9c3-ebfd-4dcb-92d5-cd40dd43e3e6.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/8a335874-a617-4788-87e4-67ff675db502.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#0e1620"
+        },
+        {
+          "name": "Cloud Whisper",
+          "hex": "#f5f4df"
+        },
+        {
+          "name": "Skybound Blue",
+          "hex": "#007ae5"
+        },
+        {
+          "name": "Cosmic Violet",
+          "hex": "#1c3f99"
+        },
+        {
+          "name": "Sunset Orange",
+          "hex": "#eb6110"
+        },
+        {
+          "name": "Horizon Blue",
+          "hex": "#083e6f"
+        }
+      ],
+      "fonts": [
+        "JobyDisplay",
+        "jobyText",
+        "Arial",
+        "Joby Sans Display"
+      ],
+      "northStar": "Skyward Glide",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:15:55.481031"
+    },
+    {
+      "id": "36fb90f7-3547-4dfd-a34e-592aa140078a",
+      "url": "https://www.halfhelix.com",
+      "siteName": "Halfhelix",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/d1fb67ce-4dd5-4e57-ab5a-6413e9f696e1.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/28be6ddb-1afc-4cd2-a130-3c2cdeac1471.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Canvas",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Lead",
+          "hex": "#484a4c"
+        },
+        {
+          "name": "Fog",
+          "hex": "#ededed"
+        },
+        {
+          "name": "Stone",
+          "hex": "#808080"
+        },
+        {
+          "name": "Platinum",
+          "hex": "#dbdbdb"
+        }
+      ],
+      "fonts": [
+        "Suisse Intl"
+      ],
+      "northStar": "High-contrast monochrome, violet punctuation",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 02:56:31.229974"
+    },
+    {
+      "id": "d19c6fc3-1fc6-44a0-9c22-a0a82f7f79b4",
+      "url": "https://hyperaktiv.li",
+      "siteName": "HyperAktiv",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/4444d00e-51d9-43f6-8445-39d978104ee6.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/0cfcf94e-6893-4883-bb06-606272448f04.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Text Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Muted Gray",
+          "hex": "#cccccc"
+        },
+        {
+          "name": "Dark Text Gray",
+          "hex": "#333333"
+        },
+        {
+          "name": "Action Blue",
+          "hex": "#0000ff"
+        }
+      ],
+      "fonts": [
+        "Studiofeixensans",
+        "DM Sans"
+      ],
+      "northStar": "High-contrast stark blueprint",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 02:57:58.173534"
+    },
+    {
+      "id": "4a248569-2b5a-4416-bb2a-c78890218b9f",
+      "url": "https://www.zipline.com",
+      "siteName": "Zipline",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/3469c5b5-a723-497d-ad85-382c1986e82d.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/389b30ae-02a2-409e-82de-5cb36890fd32.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Cream Canvas",
+          "hex": "#f7f4e8"
+        },
+        {
+          "name": "Midnight Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Cloud Gray",
+          "hex": "#c6c3ba"
+        },
+        {
+          "name": "Zipline Violet",
+          "hex": "#643aed"
+        }
+      ],
+      "fonts": [
+        "fkGroteskNeue",
+        "fkScreamer",
+        "fkDisplay"
+      ],
+      "northStar": "Open-air flight path \u2013 vast, clean, and direct.",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:39:56.920998"
+    },
+    {
+      "id": "0d0de64c-1891-4984-9e12-8976e042ce11",
+      "url": "https://flighty.com",
+      "siteName": "Flighty",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/d9603367-621c-489d-b723-3db2d69250b4.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/f054c46a-bd4d-40e4-b4eb-8bf8a6f9cfc9.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/6ad1b81b-5ea0-4220-b729-7028c1252cbc.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/17508607-6b3b-4cdd-a025-e2a92221faec.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/a920b110-3e2c-4c8b-9369-0cd9c7c0daca.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/d3380760-d841-4baa-a07b-c3bcb7068f65.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 17080,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Midnight Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Deep Space",
+          "hex": "#05010d"
+        },
+        {
+          "name": "Abyssal Black",
+          "hex": "#010a1a"
+        },
+        {
+          "name": "Shadow Gray",
+          "hex": "#333333"
+        },
+        {
+          "name": "Muted Ash",
+          "hex": "#595959"
+        }
+      ],
+      "fonts": [
+        "sans-serif",
+        "system-ui",
+        "EB Garamond",
+        "SF Pro Text",
+        "Inter",
+        "Indie Flower"
+      ],
+      "northStar": "Inky depths over clear white",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:33:25.608913"
+    },
+    {
+      "id": "6665a3dd-606f-4fd1-80dd-a84e3b3a6226",
+      "url": "https://hypertria.com",
+      "siteName": "Hyper Tria",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/6ce2bb15-def4-44cf-821e-748f82fec2ee.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/e6ddb788-a882-471c-83e8-f8a4f1db9128.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight",
+          "hex": "#000000"
+        },
+        {
+          "name": "Canvas",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Charcoal",
+          "hex": "#666666"
+        },
+        {
+          "name": "Leaf Green",
+          "hex": "#0fa64b"
+        },
+        {
+          "name": "Vivid Blue",
+          "hex": "#007bff"
+        },
+        {
+          "name": "Accent Red",
+          "hex": "#ee3a49"
+        }
+      ],
+      "fonts": [
+        "Aeonik",
+        "-apple-system"
+      ],
+      "northStar": "monochromatic gallery, bold typography",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 02:43:42.170855"
+    },
+    {
+      "id": "d3289fe7-a85e-42d8-96b7-eb7faa62a104",
+      "url": "https://air.inc",
+      "siteName": "Air",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/5834a317-bd1d-41d8-9f0d-be5690280e4d.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/5f215101-6aac-4cb6-9830-69f77bf23afe.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/b24c9864-978f-452f-b442-62654d374c63.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/391f1c0d-37a5-41f9-9bde-244757d3d0ab.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/3174dbac-06e9-42b6-964d-59ad83bd1564.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/5301d2a1-e749-4d76-ba32-905915307feb.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 19334,
+      "colorScheme": "dark",
+      "colors": [
+        {
+          "name": "Cloud Canvas",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Midnight Ink",
+          "hex": "#1b1b1b"
+        },
+        {
+          "name": "Vapor Gray",
+          "hex": "#f5f5f5"
+        },
+        {
+          "name": "Charcoal Void",
+          "hex": "#000000"
+        },
+        {
+          "name": "Sky Blue",
+          "hex": "#426188"
+        },
+        {
+          "name": "Vivid Azure",
+          "hex": "#2b7fff"
+        }
+      ],
+      "fonts": [
+        "Control",
+        "Control Compressed",
+        "Control Cursive",
+        "Control TNT"
+      ],
+      "northStar": "Expansive sky, clean canvas.",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:37:27.919861"
+    },
+    {
+      "id": "b1ec0888-1dbe-439c-bccd-ba2c39effb70",
+      "url": "https://acolorbright.com",
+      "siteName": "Acolorbright",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/cedae66e-809d-4162-aed2-f3c94b32a608.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/c4fdad14-9880-4526-93d0-0d043f825d37.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/3fc1d989-de92-4f04-bd27-b0357d068062.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/84de2603-2728-4022-bbca-2cd4c823353d.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/a99ad4c5-3d25-4a9e-8924-24f64de78c82.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/214804af-19c7-4e2d-af75-3970a84dcdb7.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/b8342ad7-bf05-4bbb-9c34-e4a0b6bb94bc.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 18767,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#1a1a1a"
+        },
+        {
+          "name": "Graphite",
+          "hex": "#666666"
+        },
+        {
+          "name": "Storm Gray",
+          "hex": "#999999"
+        },
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Snowdrift",
+          "hex": "#f2f2f2"
+        },
+        {
+          "name": "Onyx",
+          "hex": "#000000"
+        }
+      ],
+      "fonts": [
+        "RiformaLLWeb",
+        "Arial"
+      ],
+      "northStar": "Black-on-white architectural blueprint.",
+      "managementSignals": [],
+      "createdAt": "2026-05-08 18:58:25.894963"
+    },
+    {
+      "id": "6f3fb64d-d4c9-4ec1-86a1-7983e5180985",
+      "url": "https://peakdesign.com",
+      "siteName": "Peak Design",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/197ec1a5-a558-423f-beea-53742b99a9e7.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/6b966c5c-0fef-4c36-8ab5-7addcf6cf289.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Absolute Zero",
+          "hex": "#000000"
+        },
+        {
+          "name": "Cloud White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Forest Black",
+          "hex": "#1a211"
+        },
+        {
+          "name": "Ash Gray",
+          "hex": "#eef1f0"
+        },
+        {
+          "name": "Charcoal Black",
+          "hex": "#0c0c0c"
+        },
+        {
+          "name": "Graphite",
+          "hex": "#606562"
+        }
+      ],
+      "fonts": [
+        "Exposure-10",
+        "Geist",
+        "bryant",
+        "Geist Mono"
+      ],
+      "northStar": "Photographic gallery on architectural black and white. Product precision through high-contrast typography.",
+      "managementSignals": [],
+      "createdAt": "2026-01-21 12:07:18"
+    },
+    {
+      "id": "7f6799d9-0733-4523-9a94-036b9ad3bf28",
+      "url": "https://phippscharlie.com",
+      "siteName": "Charlie Phipps",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/11df2101-ab58-4846-876d-10f9df21e506.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/3e6c48ea-2f42-4246-8127-fee08c34a442.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "dark",
+      "colors": [
+        {
+          "name": "Midnight Canvas",
+          "hex": "#101011"
+        },
+        {
+          "name": "Cloud White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Obsidian Text",
+          "hex": "#000000"
+        },
+        {
+          "name": "Ash Panel",
+          "hex": "#ededed"
+        },
+        {
+          "name": "Whisper Grey",
+          "hex": "#bab7b2"
+        },
+        {
+          "name": "Charcoal Detail",
+          "hex": "#888888"
+        }
+      ],
+      "fonts": [
+        "Helvetica Neue",
+        "Times"
+      ],
+      "northStar": "Midnight Command Center: precise lines on a deep, expansive canvas, guided by stark textual contrasts.",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 03:30:41.11703"
+    },
+    {
+      "id": "f11750fc-d7c0-4d26-b32a-3b1d2098ae34",
+      "url": "https://dji.com",
+      "siteName": "DJI",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/924a80ab-30a0-4907-a86e-bead1f43883f.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/2e29415e-9aee-411a-83e4-ab7f4ec7302d.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Void",
+          "hex": "#000000"
+        },
+        {
+          "name": "Arctic Snow",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Glacial White",
+          "hex": "#f7f9fa"
+        },
+        {
+          "name": "Platinum Gray",
+          "hex": "#ededed"
+        },
+        {
+          "name": "Charcoal Black",
+          "hex": "#272727"
+        },
+        {
+          "name": "Shadow Ink",
+          "hex": "#040404"
+        }
+      ],
+      "fonts": [
+        "Open Sans",
+        "Arial"
+      ],
+      "northStar": "Precision instrument display. A stark, high-contrast digital interface where light and shadow define advanced technology.",
+      "managementSignals": [],
+      "createdAt": "2026-04-04 13:08:26"
+    },
+    {
+      "id": "0f7da1b2-9d06-4ef5-b5a8-ef7f92e57ab2",
+      "url": "https://augen.pro",
+      "siteName": "Augen Pro",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/9cda283f-3d28-46c5-a2fd-0bc834e121e9.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/91cfcfd4-937e-41b1-a640-b75bbee15062.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/4e262015-166c-4d6f-bf92-ebf8b4a8c68d.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/4251cd1c-eece-496c-b107-195182c5b81e.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/599ad50a-a0b8-4a5c-81d5-28dbba4c9b63.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/88b4b2d4-02a6-410e-9365-dcdb2c2f0fda.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 12280,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#0f1012"
+        },
+        {
+          "name": "Ghost White",
+          "hex": "#f2f2f4"
+        },
+        {
+          "name": "Canvas",
+          "hex": "#fdfdfd"
+        },
+        {
+          "name": "Skyline Gray",
+          "hex": "#868788"
+        },
+        {
+          "name": "Slate Comment",
+          "hex": "#8f8f8f"
+        },
+        {
+          "name": "Deep Graphite",
+          "hex": "#020201"
+        }
+      ],
+      "fonts": [
+        "PP Neue Montreal",
+        "PP Neue Montreal"
+      ],
+      "northStar": "Architectural Blueprint on White Marble. Every element is immaculately placed against a pristine, bright background, creating a sense of technical elegance.",
+      "managementSignals": [],
+      "createdAt": "2026-02-10 18:02:40"
+    },
+    {
+      "id": "96845df2-7ddb-420a-814e-c339f95a6554",
+      "url": "https://dyson.com",
+      "siteName": "Dyson",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/fb479044-ee90-4cd0-96e9-8bf31695bfc3.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/847f60c2-f9a9-4bbd-b167-6273127727e5.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Dyson Ink",
+          "hex": "#333333"
+        },
+        {
+          "name": "Ghost Gray",
+          "hex": "#999999"
+        },
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Deep Graphite",
+          "hex": "#000000"
+        },
+        {
+          "name": "Aluminum",
+          "hex": "#919191"
+        },
+        {
+          "name": "Medium Gray",
+          "hex": "#555555"
+        }
+      ],
+      "fonts": [
+        "DysonFutura"
+      ],
+      "northStar": "engineered precision, clean displays",
+      "managementSignals": [],
+      "createdAt": "2026-02-01 19:51:29"
+    },
+    {
+      "id": "fb459c9d-c089-4d0b-b5b0-d147b1c4ebd7",
+      "url": "https://movingparts.io",
+      "siteName": "Moving Parts",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/9d2914a4-d12a-4722-9ebb-6e23e9687e4c.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/0c516347-4342-46a2-af46-136bac42d825.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/81c2d2b0-cbb4-41c6-93a3-dd3ca89be04f.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/710d92d9-8f15-4235-b2e5-7cfc6da3905c.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/5e4c5221-08ba-4e57-8710-ac10012ad1ba.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/53304488-f642-4109-aeff-d4c1a25361d2.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 16560,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Ghostly Gray",
+          "hex": "#121212"
+        },
+        {
+          "name": "Fog Grid",
+          "hex": "#bcc1c7"
+        },
+        {
+          "name": "Warm Mist",
+          "hex": "#efefef"
+        },
+        {
+          "name": "Cloud Gray",
+          "hex": "#b3b3b3"
+        }
+      ],
+      "fonts": [
+        "Whyte Semi-Mono",
+        "Unica77",
+        "PP Neue Montreal",
+        "Druk XXCondensed Super",
+        "Inter",
+        "ui-monospace",
+        "Fraunces 72pt Soft",
+        "Arial",
+        "Fraunces 72pt SuperSoft",
+        "TAN-BUSTER"
+      ],
+      "northStar": "High-contrast geometric clarity",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 03:57:53.703903"
+    },
+    {
+      "id": "6c0b77d3-71f9-469d-98aa-4ce1d6d76ac8",
+      "url": "https://structured.money",
+      "siteName": "Structured",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/67df1221-43aa-4761-b5d7-f539d31d1585.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/efc3c1cd-7577-4599-9753-f53d22ed573d.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Greige Canvas",
+          "hex": "#ebebeb"
+        },
+        {
+          "name": "Black Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Off-White Text",
+          "hex": "#dfdcd5"
+        },
+        {
+          "name": "Slate Surface",
+          "hex": "#c4c3b6"
+        },
+        {
+          "name": "Smoke Grey",
+          "hex": "#e7e5e4"
+        },
+        {
+          "name": "Warm Accent Grey",
+          "hex": "#595855"
+        }
+      ],
+      "fonts": [
+        "Davinci",
+        "Helvetica Now"
+      ],
+      "northStar": "Classical art gallery",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:18:18.109069"
+    },
+    {
+      "id": "7b083729-e694-4b66-82a3-befb08451722",
+      "url": "https://aboard.com",
+      "siteName": "Aboard",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/de59ca06-a94d-409e-9d27-a6f852daa1b2.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/9ed6dbf2-d65a-4666-9e70-684413338667.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "dark",
+      "colors": [
+        {
+          "name": "Ember Glow",
+          "hex": "#de4c00"
+        },
+        {
+          "name": "Peach Fuzz",
+          "hex": "#efa680"
+        },
+        {
+          "name": "Deep Forest",
+          "hex": "#040c06"
+        },
+        {
+          "name": "Warm Black",
+          "hex": "#271503"
+        },
+        {
+          "name": "Parchment",
+          "hex": "#eadfcf"
+        },
+        {
+          "name": "Stone Slate",
+          "hex": "#a49784"
+        }
+      ],
+      "fonts": [
+        "Tobias",
+        "Atkinson Hyperlegible Mono",
+        "Work Sans",
+        "ui-sans-serif"
+      ],
+      "northStar": "Warm earth against dark steel",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:54:00.00393"
+    },
+    {
+      "id": "802bdc0e-ec2e-4d2d-bf5d-de98c0899f66",
+      "url": "https://www.clutch.security",
+      "siteName": "Clutch Security",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/75d26d2c-dff2-4889-a149-6e7eceff9b04.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/186e3e31-864e-492d-95a0-250714cb5d38.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/bdd1f3d1-2553-4dff-8c31-79a7af02190a.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/73fd3738-696b-44b3-8cc8-df4148015f9e.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/513110ae-991f-4951-8684-3897ac78f497.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/d3035a9a-41d2-4fcf-968e-381c658efb03.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/963fd113-f37e-4e6b-b3ff-f476fddd20a3.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 19000,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Ink Black",
+          "hex": "#000000",
+          "gradient": "linear-gradient(rgb(25, 25, 25), rgb(0, 0, 0))"
+        },
+        {
+          "name": "Storm Gray",
+          "hex": "#e5e7eb"
+        },
+        {
+          "name": "Muted Gray",
+          "hex": "#dfdfdf"
+        },
+        {
+          "name": "Whisper Gray",
+          "hex": "#c9c9c9"
+        },
+        {
+          "name": "Dim Gray",
+          "hex": "#6e6e6e"
+        }
+      ],
+      "fonts": [
+        "Inter",
+        "PP Radio Grotesk",
+        "Times"
+      ],
+      "northStar": "Minimalist digital blueprint",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 22:58:03.371237"
+    },
+    {
+      "id": "d95a35c2-d3f7-49e7-9ba7-282d52d3211d",
+      "url": "https://www.orderful.com",
+      "siteName": "Orderful",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/697fbb6a-b586-4dfc-b189-7570806efae4.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/bcaef480-8821-4074-bf56-e3a8dec73b7a.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/c98b1b62-bdf7-4bf3-88d7-1228e45c158f.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/8f39c560-ecb0-42ee-a690-9c88cf7c9422.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/c2a48140-71d1-477b-94af-0b19a824450e.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/84a69342-05a3-48fc-8080-fc9be614bf01.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 15040,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas Fog",
+          "hex": "#f5f5f5"
+        },
+        {
+          "name": "Surface Snow",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Ink Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Graphite Text",
+          "hex": "#4a5565"
+        },
+        {
+          "name": "Slate Gray",
+          "hex": "#364153"
+        },
+        {
+          "name": "Whisper Gray",
+          "hex": "#99a1af"
+        }
+      ],
+      "fonts": [
+        "telegraf",
+        "modernGothic"
+      ],
+      "northStar": "Precision on White Canvas",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 02:05:34.121515"
+    },
+    {
+      "id": "194faa2f-2f69-4bbf-9e29-290f28fa8ca2",
+      "url": "https://airbnb.org",
+      "siteName": "Airbnb",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/52440a68-a5ea-4756-8415-98175d32bebd.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/50f2011f-9d0c-401e-ae7e-8152970165ff.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Carbon Black",
+          "hex": "#222222"
+        },
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Faint Gray",
+          "hex": "#f7f7f7"
+        },
+        {
+          "name": "Storm Gray",
+          "hex": "#6a6a6a"
+        },
+        {
+          "name": "Pale Drift",
+          "hex": "#ebebeb"
+        },
+        {
+          "name": "Dust Bunny",
+          "hex": "#a6a6a6"
+        }
+      ],
+      "fonts": [
+        "Airbnb Cereal VF"
+      ],
+      "northStar": "High-contrast editorial canvas",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 03:57:03.648338"
+    }
+  ]
+}

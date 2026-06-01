@@ -1,0 +1,6 @@
+Title: Template - Meeting notes
+Page ID: 8147894896
+Version: 1
+============================================================
+
+&nbsp;Date &nbsp;Participants Type @ name to mention a person and add them as a meeting attendee - they will be notified &nbsp;Goals List goals for this meeting (e.g., Set design priorities for FY27) &nbsp;Brainstorm Type /whiteboard to create an interactive canvas for icebreakers, brainstorms, diagramming, retros, and more &nbsp;Discussion topics Time Topic Presenter Notes @ mention teammate Add notes for each discussion topic &nbsp;Action items incomplete &nbsp;Decisions Type /decision to record the decisions you make in this meeting: 149630d1-c22b-41c0-ace7-a2f036aebf73 f93ab9d0-d1bb-48eb-ae3f-3c34d8574598 DECIDED &nbsp;Related info Type /database to create a database of related information, meetings, or assets

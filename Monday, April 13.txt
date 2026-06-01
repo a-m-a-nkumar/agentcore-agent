@@ -1,0 +1,749 @@
+
+Surendran, Swetha started transcription
+SS
+
+Singh, Shubham
+0 minutes 3 seconds0:03
+Singh, Shubham 0 minutes 3 seconds
+or task to complete, but I may not be aware that, okay, with all requirements from the BRD I'm even delivering, or let's say the tester, if I'm testing a particular module, I may not be aware that, okay, what exactly, where did this test scenario come up? What requirements have we completed? How exactly does this flow?
+Singh, Shubham 0 minutes 22 seconds
+To solve these problems, we have built this orchestrator.
+Singh, Shubham 0 minutes 27 seconds
+where it's a combination of your tools which are approved within Deluxe or which Deluxe team is using, along with dedicated AI agents which we have built.
+Singh, Shubham 0 minutes 51 seconds
+GitHub Copilot within VS Code continuous to remain your tool. What we will do is provide you the context, which is available within your conference spaces and Jira tickets, to build an enhanced prompt that will basically help you implement the story. We can start directly. So there are two different kinds of modules.
+Singh, Shubham 1 minute 10 seconds
+One is for business students, yes.
+
+Mohanakrishnan, Vadivel
+1 minute 10 seconds1:10
+Mohanakrishnan, Vadivel 1 minute 10 seconds
+Yeah, Shubham.
+Mohanakrishnan, Vadivel 1 minute 13 seconds
+Sorry, yeah, sorry to cut your flow. By any chance, do you have that slide which we showed to Mike Chab as well? I mean, can we start from those flow chart and because these are this is the first time both Mike are seeing this or you want to finish the demo and then go there as I was thinking.
+SS
+
+Singh, Shubham
+1 minute 16 seconds1:16
+Singh, Shubham 1 minute 16 seconds
+Mhm.
+
+Lawrence, Michael
+1 minute 19 seconds1:19
+Lawrence, Michael 1 minute 19 seconds
+Back.
+SS
+Singh, Shubham
+1 minute 33 seconds1:33
+Singh, Shubham 1 minute 33 seconds
+Okay, I can take I can start from the slide. Just give me a minute. I'll have it with me.
+
+Mohanakrishnan, Vadivel
+1 minute 38 seconds1:38
+Mohanakrishnan, Vadivel 1 minute 38 seconds
+Sure, yeah, uh, in the meantime, Mike, as Shubham was saying.
+Mohanakrishnan, Vadivel 1 minute 44 seconds
+By default, it works with VS code and GitHub Copilot, but this has been tested with the plot hassle, but since we don't have the license and other stuff, we are sticking with GitHub, and if you see in this screen at the top, clocks on at 4.5, we have made it as a problem, but currently we're just using only one thing.
+
+Lawrence, Michael
+1 minute 52 seconds1:52
+Lawrence, Michael 1 minute 52 seconds
+Good.
+SS
+Singh, Shubham
+1 minute 53 seconds1:53
+Singh, Shubham 1 minute 53 seconds
+Yeah.
+
+Lawrence, Michael
+2 minutes 1 second2:01
+Lawrence, Michael 2 minutes 1 second
+Yeah.
+
+Mohanakrishnan, Vadivel
+2 minutes 6 seconds2:06
+Mohanakrishnan, Vadivel 2 minutes 6 seconds
+Because internally, we are using to power some of these things, basically. So out of it, we're just using Cloud SOURADEEP 4.5. But it has been tested with multiple other stuff as well, but if it needs to be extended for any other model, it shouldn't be a big deal. That's what the idea is, yeah.
+Mohanakrishnan, Vadivel 2 minutes 28 seconds
+Yeah, thanks.
+SS
+Singh, Shubham
+2 minutes 28 seconds2:28
+Singh, Shubham 2 minutes 28 seconds
+Yeah, yeah, I had that open, actually. I mean, I thought...
+
+Mohanakrishnan, Vadivel
+2 minutes 34 seconds2:34
+Mohanakrishnan, Vadivel 2 minutes 34 seconds
+Thank you.
+SS
+Singh, Shubham
+2 minutes 37 seconds2:37
+Singh, Shubham 2 minutes 37 seconds
+Okay, it's showing up.
+
+Mohanakrishnan, Vadivel
+2 minutes 37 seconds2:37
+Mohanakrishnan, Vadivel 2 minutes 37 seconds
+BAPPA.
+
+Lawrence, Michael
+7 minutes 8 seconds7:08
+Lawrence, Michael 7 minutes 8 seconds
+Ohh.
+SS
+Singh, Shubham
+7 minutes 23 seconds7:23
+Singh, Shubham 7 minutes 23 seconds
+When they're available, we want to implement similar functionality with both testing as well as for deployment. Again, the principle would remain the same. The end user would spend most of their time within their tools. Orchestrator is just there to provide you relevant context based on the project workspace. And we'll use MCP servers or AI agents as and when we feel that.
+Singh, Shubham 7 minutes 45 seconds
+Some gaps need to be covered.
+
+Lawrence, Michael
+7 minutes 47 seconds7:47
+Lawrence, Michael 7 minutes 47 seconds
+Quick question. Is a process, and I heard the mention of using bedrock, but is there any process here of creating fixed memory over time so that those questions don't have to be answered every single time? Or is it meant to be, is it not meant to do that?
+SS
+Singh, Shubham
+7 minutes 49 seconds7:49
+Singh, Shubham 7 minutes 49 seconds
+Yeah, sure, sure.
+Singh, Shubham 8 minutes 5 seconds
+Um...
+
+Mohanakrishnan, Vadivel
+8 minutes 6 seconds8:06
+Mohanakrishnan, Vadivel 8 minutes 6 seconds
+Yeah, Shubham can answer, but it has memory already, so it has an invalid memory. Maybe Shubham can show it as, sorry, Shubham, you go ahead.
+
+Lawrence, Michael
+8 minutes 8 seconds8:08
+Lawrence, Michael 8 minutes 8 seconds
+Okay.
+SS
+Singh, Shubham
+8 minutes 9 seconds8:09
+Singh, Shubham 8 minutes 9 seconds
+Yes.
+Singh, Shubham 8 minutes 15 seconds
+No, no, you actually answered that. I mean, I would have answered how it solved that problem. So that's being solved using AWS Agent Core. So we have built this whole solution on Agent Core. Agent Core has its memory components. So even in terms of implementation perspective, and code it from our end, that memory part was very gracefully handled or is being handled by AWS Agent Core.
+
+Mohanakrishnan, Vadivel
+8 minutes 16 seconds8:16
+Mohanakrishnan, Vadivel 8 minutes 16 seconds
+Okay.
+Mohanakrishnan, Vadivel 8 minutes 18 seconds
+Mmh.
+
+Lawrence, Michael
+8 minutes 23 seconds8:23
+Lawrence, Michael 8 minutes 23 seconds
+Got it.
+Lawrence, Michael 8 minutes 35 seconds
+Got it. All right. Thanks.
+SS
+Singh, Shubham
+8 minutes 40 seconds8:40
+Singh, Shubham 8 minutes 40 seconds
+On this slide, we basically, it's a simplification of what exactly we were mentioning in the previous slide. The team, this solution should not be seen as a simple agent SDLC or shouldn't be seen as a tool binder. It's basically a combination of both. That's why we are using the term orchestrator.
+Singh, Shubham 8 minutes 59 seconds
+And apologies that now we also have a name for this solution. It's called Deluxe.
+Singh, Shubham 9 minutes 5 seconds
+Sorry, sorry, I forgot to mention this. Yeah, our Deluxe is basically something which picks the best of both. By orchestrator, it basically helps you bring context from the different tools. And by AI, it basically fills the gaps which may be there even with the AI capabilities or some tools. Some tools do not have AI capability as such.
+
+Lawrence, Michael
+9 minutes 18 seconds9:18
+Lawrence, Michael 9 minutes 18 seconds
+Yeah.
+SS
+Singh, Shubham
+9 minutes 58 seconds9:58
+Singh, Shubham 9 minutes 58 seconds
+That's what we can see here in this workflow diagram here.
+
+Lawrence, Michael
+10 minutes 6 seconds10:06
+Lawrence, Michael 10 minutes 6 seconds
+Got it.
+SS
+Singh, Shubham
+10 minutes 7 seconds10:07
+Singh, Shubham 10 minutes 7 seconds
+Any questions, or should we proceed?
+
+Lawrence, Michael
+10 minutes 9 seconds10:09
+Lawrence, Michael 10 minutes 9 seconds
+That was, I'd like to see it.
+
+Lawrence, Mike
+10 minutes 10 seconds10:10
+Lawrence, Mike 10 minutes 10 seconds
+Yeah.
+SS
+Singh, Shubham
+10 minutes 15 seconds10:15
+Singh, Shubham 10 minutes 15 seconds
+Okay.
+Singh, Shubham 10 minutes 17 seconds
+So before we do this, I'll take one or two minutes to just explain this. This is a simplified version of what we had on the previous slide. This actually answered that the whole process flow, that what happens in different steps for each phase, for each user. Where exactly do we have agents, where exactly do we have dedicated tools, and what is the output of different, in different phases?
+
+Lawrence, Mike
+10 minutes 19 seconds10:19
+Lawrence, Mike 10 minutes 19 seconds
+Yeah.
+SS
+Singh, Shubham
+10 minutes 36 seconds10:36
+Singh, Shubham 10 minutes 36 seconds
+That's basically a simplification now.
+
+Lawrence, Michael
+10 minutes 39 seconds10:39
+Lawrence, Michael 10 minutes 39 seconds
+Question, just quick question on that first is for requirements. How are we putting context on the applications in scope for requirements?
+SS
+Singh, Shubham
+10 minutes 41 seconds10:41
+Singh, Shubham 10 minutes 41 seconds
+Somebody.
+Singh, Shubham 10 minutes 43 seconds
+Mhm.
+
+Lawrence, Mike
+10 minutes 48 seconds10:48
+Lawrence, Mike 10 minutes 48 seconds
+Good.
+Lawrence, Mike 10 minutes 50 seconds
+Yeah.
+SS
+Singh, Shubham
+10 minutes 50 seconds10:50
+Singh, Shubham 10 minutes 50 seconds
+two ways. Either you can upload the transcript and everything which is available. Second is, let's say if you already have some documentation available within Confluence. So we are using APIs, we are linking Confluence. So whatever documentation was available earlier would already be present within the orchestrator itself. So that's how we are doing it.
+
+Lawrence, Mike
+11 minutes 8 seconds11:08
+Lawrence, Mike 11 minutes 8 seconds
+Okay.
+
+Lawrence, Michael
+11 minutes 9 seconds11:09
+Lawrence, Michael 11 minutes 9 seconds
+Got it. So it's not going to go evaluate source code and repos to build context. It's going to be solely based off of what's already documented.
+
+Lawrence, Mike
+11 minutes 19 seconds11:19
+Lawrence, Mike 11 minutes 19 seconds
+Well, how much?
+SS
+Singh, Shubham
+11 minutes 20 seconds11:20
+Singh, Shubham 11 minutes 20 seconds
+Source code is a part of future that, okay, what if only source code is available? Can we build different BRDs or different, can we identify that what all has been implemented? That is a part, but that's phase two, I would say.
+
+Lawrence, Michael
+11 minutes 23 seconds11:23
+Lawrence, Michael 11 minutes 23 seconds
+Good.
+
+Lawrence, Mike
+11 minutes 33 seconds11:33
+Lawrence, Mike 11 minutes 33 seconds
+Yeah.
+
+Lawrence, Michael
+11 minutes 35 seconds11:35
+Lawrence, Michael 11 minutes 35 seconds
+Got it. So on this sequence right here where it says has any documentation, no agent analyst, what is that agent analyst doing?
+SS
+Singh, Shubham
+11 minutes 36 seconds11:36
+Singh, Shubham 11 minutes 36 seconds
+But it.
+Singh, Shubham 11 minutes 42 seconds
+Agent Analyst is going to ask you questions to build a BRD. Yeah, we'll show it in the demo. Why should I?
+
+Lawrence, Mike
+11 minutes 44 seconds11:44
+Lawrence, Mike 11 minutes 44 seconds
+Two.
+
+Lawrence, Michael
+11 minutes 46 seconds11:46
+Lawrence, Michael 11 minutes 46 seconds
+Got it. OK.
+Lawrence, Michael 11 minutes 51 seconds
+OK.
+SS
+Singh, Shubham
+11 minutes 51 seconds11:51
+Singh, Shubham 11 minutes 51 seconds
+Okay.
+
+Mohanakrishnan, Vadivel
+11 minutes 52 seconds11:52
+Mohanakrishnan, Vadivel 11 minutes 52 seconds
+Yeah, yeah, while he just moves to the demo part, quick answer to you, Mike, which is already answered, kind of it is the add on the roadmap, but the initial release we are just depending on this Atlassian product for the context slowly, we just want to extend it for our repos as well, specifically for Brownfield project which has.
+SS
+Singh, Shubham
+12 minutes 19 seconds12:19
+Singh, Shubham 12 minutes 19 seconds
+In fact, if I take a minute, if I may take a minute, so what's one thing which we have also seen? I know plot code is not in the picture yet, but if source code is available, even plot code or even Copilot has some capabilities to create at least a.md file that what all has been implemented here, what exactly was...
+Singh, Shubham 12 minutes 37 seconds
+The user's mind, so based on that itself, those capabilities also will use to basically build this enhanced documentation. I mean, to answer that part, that we use the leverage the capabilities which are already available along with the agents which will build.
+
+Lawrence, Michael
+12 minutes 45 seconds12:45
+Lawrence, Michael 12 minutes 45 seconds
+Got it.
+SS
+Singh, Shubham
+12 minutes 52 seconds12:52
+Singh, Shubham 12 minutes 52 seconds
+Over to you, Aman.
+Singh, Shubham 12 minutes 56 seconds
+The team, like you said, that these are orchestrator model. This is the homepage. On the left-hand side, you can see different tools which are available.
+Singh, Shubham 13 minutes 5 seconds
+We'll start with a simple BRDS. Here on the, okay, before that, let's show the homepage itself. So here, Aman has logged in with his account. Here we can see Atlation connected. If Atlation is not connected, the steps and everything is available in the documentation. Basically, all you have to do is visit a particular link. It's basically Atlation only and create your API.
+Singh, Shubham 13 minutes 26 seconds
+API key. Very simple, straightforward step, and that is available in the Support module as well.
+Singh, Shubham 13 minutes 37 seconds
+Here, there's a process of selecting a project workspace. So there are some existing projects which are already there. I'll create a new project. I just want to show that how a new user would basically interact with this orchestrator.
+Singh, Shubham 13 minutes 49 seconds
+So this thing, basically, while thinking with Atlation, it's bringing in all the GRAN conference spaces which a user already has access to, which is again being fetched from my API key.
+Singh, Shubham 14 minutes 3 seconds
+Yeah, I'll do this STL free demo.
+Singh, Shubham 14 minutes 8 seconds
+Like the BRD template, there's only one template right now.
+Singh, Shubham 14 minutes 11 seconds
+Now, when I clicked on Select Jira Project, all these projects which my API key has access to would be available as a in the dropdown.
+
+Lawrence, Michael
+14 minutes 13 seconds14:13
+Lawrence, Michael 14 minutes 13 seconds
+Okay.
+SS
+Singh, Shubham
+14 minutes 20 seconds14:20
+Singh, Shubham 14 minutes 20 seconds
+So my API key has access to all these large number of projects. I'll select a particular project. Yeah, created this for demo purposes only. Similarly for conference, with my API key, all these conference spaces I can access.
+Singh, Shubham 14 minutes 37 seconds
+I'll just link SDL senders for BRD.
+Singh, Shubham 14 minutes 41 seconds
+Create project. Now you can see that project has been created and on the bottom corner you can also see that syncing conference page. So all the conference pages and JR issues which are already available within my conference and JR spaces, they have been synced up. Now my workspace is ready.
+Singh, Shubham 14 minutes 59 seconds
+As a new user, I'll have to create this workspace. As an existing user, I can have this workspace, or I can switch to different workspaces which are available to me, or I can create new workspace just based on the steps that I showed earlier.
+Singh, Shubham 15 minutes 13 seconds
+We'll come back to this homepage later. Let me just show you the BRD Assistant. Like I mentioned earlier, there are two ways in which you can create BRD. One is if you have supporting documents available. Second is if you don't have supporting documents available, based on conversation only. We'll start with the supporting documents fully available.
+Singh, Shubham 15 minutes 33 seconds
+It is nothing but our agent PM.
+Singh, Shubham 15 minutes 36 seconds
+To get.
+Singh, Shubham 15 minutes 39 seconds
+We'll select a particular transcript file. As you've seen right now, we support these three formats, PDF, docs, and text, but multimodal capabilities are also in progress.
+Singh, Shubham 16 minutes
+has uploaded this transcript. This whole process will take around 1 to 1 1/2 minute to build a detailed BRD.
+Singh, Shubham 16 minutes 10 seconds
+And while it is building, can we show some completed BRDs? I mean, we have we have the transcripts and we can show the template at least. Yeah, what we are saying by the template. So team, this is the template that we are following currently. It has 16 sections, as I mentioned earlier.
+Singh, Shubham 16 minutes 28 seconds
+The idea is that for both technical and non-technical business level users, there should be something in the BRD.
+Singh, Shubham 16 minutes 36 seconds
+So this is the template that we have come up with, covers function business objectives, ROIs, and use cases, stories, different assumptions, constraints, timelines, and the approval and review standard process, glossary appendix part. So these are around 16 odd sections we are there. Having said that, if there's a different template that team follows, we can very well.
+Singh, Shubham 16 minutes 58 seconds
+Consume it within our tool itself. Let's see if this is done. OK, take it on.
+Singh, Shubham 17 minutes 7 seconds
+Maybe one minute more.
+Singh, Shubham 17 minutes 11 seconds
+There's another option to switch different workflows, but let it come up, then I'll show that what exactly can we do with this button on three different workflows. Let it be transcript is fine. I think we have some output.
+
+Lawrence, Michael
+17 minutes 12 seconds17:12
+Lawrence, Michael 17 minutes 12 seconds
+Yes.
+
+
+Lawrence, Michael
+25 minutes 23 seconds25:23
+Lawrence, Michael 25 minutes 23 seconds
+Yeah.
+SS
+Singh, Shubham
+25 minutes 25 seconds25:25
+Singh, Shubham 25 minutes 25 seconds
+Any questions in the meantime?
+
+Lawrence, Michael
+25 minutes 28 seconds25:28
+Lawrence, Michael 25 minutes 28 seconds
+No, not yet, this is cool.
+SS
+Singh, Shubham
+25 minutes 31 seconds25:31
+Singh, Shubham 25 minutes 31 seconds
+Thank you.
+Singh, Shubham 25 minutes 33 seconds
+Yeah, this is the.
+
+Mohanakrishnan, Vadivel
+25 minutes 34 seconds25:34
+Mohanakrishnan, Vadivel 25 minutes 34 seconds
+The intention of those labels, Mike, and oops, is, I mean, if it is a 16 page document, and if we look into this document after a few weeks.
+Mohanakrishnan, Vadivel 25 minutes 45 seconds
+I mean, we can forget what is that something which we provided and what are the things which is generated by itself. We thought it makes more sense. And also, if something says medium confidence or something which is not high confidence, maybe we want to go back to the tool and have more discussion with it, answer more clarifying questions to make it high confidence.
+Mohanakrishnan, Vadivel 26 minutes 6 seconds
+We just see that as one of the trick by which we can just improve the document, who is providing this, creating this documentation.
+
+Lawrence, Michael
+26 minutes 14 seconds26:14
+Lawrence, Michael 26 minutes 14 seconds
+Yep, got it.
+SS
+Singh, Shubham
+26 minutes 16 seconds26:16
+Singh, Shubham 26 minutes 16 seconds
+We have similar similar tags, what was user provided or what was partially specified by user plus AI dedication.
+Singh, Shubham 26 minutes 25 seconds
+A I assumption, rather, so.
+Singh, Shubham 26 minutes 29 seconds
+So, again, we have the 16 sections in scope, out of scope, business objectives. I'll just scroll through this.
+
+Lawrence, Michael
+26 minutes 32 seconds26:32
+Lawrence, Michael 26 minutes 32 seconds
+Yes.
+SS
+Singh, Shubham
+26 minutes 36 seconds26:36
+Singh, Shubham 26 minutes 36 seconds
+functional requirements. Functional requirements, why am I linked? These are very essential because in the next steps, when we build those epics and stories, it's very important that we actually show that, okay, which all functional requirements are we trying to cover with these epics and stories. So that also we have taken care of in our solution.
+Singh, Shubham 26 minutes 55 seconds
+Right? And not just that, even in pair programming and even the future testing modules which we are building, there also we are trying, we are actively covering that, okay, all functional requirements, non-functional requirements should be taken care of in storage itself. That is the idea.
+Singh, Shubham 27 minutes 10 seconds
+I mean, I'll move back to my tool.
+Singh, Shubham 27 minutes 14 seconds
+Similar to agent PM, we can actually push this particular BRD to conference. This has been pushed to conference. I can view the page from here, or I can move to conference.
+Singh, Shubham 27 minutes 26 seconds
+Select this particular page, so team the ideas on this module, the...
+Singh, Shubham 27 minutes 30 seconds
+Latest document which we have generated or which we have worked on would be available on top. So this is sorted by date in the descending fashion.
+
+Mohanakrishnan, Vadivel
+29 minutes 43 seconds29:43
+Mohanakrishnan, Vadivel 29 minutes 43 seconds
+Accept, reject.
+Mohanakrishnan, Vadivel 29 minutes 48 seconds
+Yeah, go to go ahead, sure.
+SS
+Singh, Shubham
+29 minutes 49 seconds29:49
+Singh, Shubham 29 minutes 49 seconds
+Right, yes, so as you can see here, even with this epic, it has shown that which all functional requirements it is mapped to, and then the stories are generated with clear acceptance criteria, and this has been fetched from BRDTL, so we properly understand that, okay, where exactly is it coming from?
+
+Lawrence, Michael
+30 minutes 3 seconds30:03
+Lawrence, Michael 30 minutes 3 seconds
+Yes.
+SS
+Singh, Shubham
+30 minutes 8 seconds30:08
+Singh, Shubham 30 minutes 8 seconds
+Now, what I can do is select some stories, and I'll push it into Jira. Again, in Jira, you'd remember that while creating the project workspace, we selected a...
+Singh, Shubham 30 minutes 20 seconds
+JR space, that's where it will be generated. Now here we can ask for which particular board you want to push into, since currently we have only one board, it will be pushed into that particular board. Only if you have multiple boards, you actually have the option to...
+Singh, Shubham 30 minutes 36 seconds
+Select which board you want to push this, uh, these G Rajesh into.
+Singh, Shubham 30 minutes 41 seconds
+So, items have been generated.
+Singh, Shubham 30 minutes 44 seconds
+Epics are there, stories are there.
+Singh, Shubham 30 minutes 47 seconds
+If he has a small business owner, I want to accept all major credit cards. Now, again, like Vadivel earlier mentioned, again, we have two-way integration. Whatever you update on Jira would be available on my orchestrator, and whatever I'm pushing from orchestrator is available within my Jira workspace as well. So that we have maintained. Now,
+Singh, Shubham 31 minutes 7 seconds
+I'll request Aman to take over the.
+Singh, Shubham 31 minutes 9 seconds
+Pair programming part, but again, when you access the solution, there are different kinds of modules. So, we have segregated the modules into two categories: one is for business and one is for develop for coders. For coders, we have 3 modules: pair programming, testing, and DevOps.
+Singh, Shubham 31 minutes 27 seconds
+Pair programming is currently live. Testing and DevOps will be available hopefully in the next release or so. But yeah, for business users, we have these three modules. A pair programming user would be able to see conference and Jira, but they won't be allowed to create all these Jira issues. That primarily lies with the project manager or the scrum team.
+Singh, Shubham 31 minutes 48 seconds
+or with product owner, product manager. That's what I wanted to clarify so that once you all have the access, the interface would look exactly the same, but in terms of tools which are available on the left-hand side, there would be differences. Some users will have different tool access, some users will have different access. I'm an overview. Yeah.
+
+Lawrence, Michael
+31 minutes 59 seconds31:59
+Lawrence, Michael 31 minutes 59 seconds
+The.
+
+Mohanakrishnan, Vadivel
+32 minutes 7 seconds32:07
+Mohanakrishnan, Vadivel 32 minutes 7 seconds
+Yeah, let me just take some 10 seconds. Sorry, just to wrap this section, right? So, Mike, the point, whatever they have just showed now, right? Creating the BRD, two different versions. You have content or you have just one liner, discuss with it and build it, two different hypothesis. The other thing is you build it.
+SS
+Singh, Shubham
+32 minutes 8 seconds32:08
+Singh, Shubham 32 minutes 8 seconds
+So, yeah, sure, yeah, sure.
+
+Mohanakrishnan, Vadivel
+32 minutes 26 seconds32:26
+Mohanakrishnan, Vadivel 32 minutes 26 seconds
+build the epic stories, acceptance criteria, push it into Atlassian product, bidirectional. The other way to think about this, I'm having an brownfield project, right? So it means I already in project is there, but I don't have, I already have an BRD, but that is not that effective.
+
+Lawrence, Michael
+32 minutes 28 seconds32:28
+Lawrence, Michael 32 minutes 28 seconds
+Yeah.
+
+Mohanakrishnan, Vadivel
+32 minutes 45 seconds32:45
+Mohanakrishnan, Vadivel 32 minutes 45 seconds
+Maybe right, or it is half baked. Still, we can use this solution currently, because once you link your JR and Confluence, those documentation is going to come here and inside Confluence, the pages will be listed. We can still interact with it and fine-tune it and upgrade your existing content.
+
+Lawrence, Michael
+32 minutes 59 seconds32:59
+Lawrence, Michael 32 minutes 59 seconds
+Got it.
+
+Mohanakrishnan, Vadivel
+33 minutes 4 seconds33:04
+Mohanakrishnan, Vadivel 33 minutes 4 seconds
+As well, right? So that's what I just want to highlight here.
+SS
+Singh, Shubham
+33 minutes 8 seconds33:08
+Singh, Shubham 33 minutes 8 seconds
+Yeah.
+
+Lawrence, Michael
+33 minutes 8 seconds33:08
+Lawrence, Michael 33 minutes 8 seconds
+Got it.
+SS
+Singh, Shubham
+33 minutes 10 seconds33:10
+Singh, Shubham 33 minutes 10 seconds
+Yeah. So for the pair programming part, any developer would need to 1st set up our MCP server inside their ID. Now, what this MCP server does, that it integrates our orchestrator with the ID that the user is using.
+
+Mohanakrishnan, Vadivel
+33 minutes 11 seconds33:11
+Mohanakrishnan, Vadivel 33 minutes 11 seconds
+Go ahead, Abhinav.
+
+
+Singh, Shubham 36 minutes 23 seconds
+This is the starting of the prompt. We can see you are touched with implementing a project creation wizard. This all was fetched from the conference page that I had with linked to my project ID.
+
+Lawrence, Michael
+36 minutes 28 seconds36:28
+Lawrence, Michael 36 minutes 28 seconds
+Ah.
+SS
+Singh, Shubham
+36 minutes 34 seconds36:34
+Singh, Shubham 36 minutes 34 seconds
+As we can see, it has fetched different wizard requirements, like what are the language and framework that we are going to use, like Java, Spring Boot, and project details, team member management, etc. And if any developer is satisfied with this prompt, then he can simply enter and
+
+Lawrence, Michael
+36 minutes 39 seconds36:39
+Lawrence, Michael 36 minutes 39 seconds
+Yeah.
+SS
+Singh, Shubham
+36 minutes 53 seconds36:53
+Singh, Shubham 36 minutes 53 seconds
+Any AI Power ID will start executing this code.
+Singh, Shubham 37 minutes 6 seconds
+It will take its only time. Yeah, since I have already entered the prompt now, GitHub Copilot will take over from here and start implementing this in my project workspace.
+
+Lawrence, Michael
+37 minutes 11 seconds37:11
+Lawrence, Michael 37 minutes 11 seconds
+Yeah.
+Lawrence, Michael 37 minutes 17 seconds
+Great.
+SS
+Singh, Shubham
+37 minutes 18 seconds37:18
+Singh, Shubham 37 minutes 18 seconds
+Team with itself, we tried using different IDs, so this is GitHub Copilot with VS Code. We have also tried exactly same thing with plot code as well, and the outputs also we have as artifacts. Aman, do we have it? Yes.
+
+Lawrence, Michael
+37 minutes 22 seconds37:22
+Lawrence, Michael 37 minutes 22 seconds
+Yes.
+Lawrence, Michael 37 minutes 36 seconds
+Very cool.
+SS
+Singh, Shubham
+37 minutes 36 seconds37:36
+Singh, Shubham 37 minutes 36 seconds
+Let me show you one of the output.
+
+Mohanakrishnan, Vadivel
+37 minutes 38 seconds37:38
+Mohanakrishnan, Vadivel 37 minutes 38 seconds
+Yeah, team wants to go with Claude only, Mike, but since we didn't have that, whatever, right, license and approval yet, they have tested it with it, but we are going with GitHub corporate, but if any team has that, still the solution works in Claude as well, that's what, yeah.
+
+Lawrence, Michael
+37 minutes 56 seconds37:56
+Lawrence, Michael 37 minutes 56 seconds
+Got it. Okay.
+SS
+Singh, Shubham
+37 minutes 59 seconds37:59
+Singh, Shubham 37 minutes 59 seconds
+Yeah.
+Singh, Shubham 38 minutes 1 second
+So as we can see, this entire thing, what you are seeing here on my screen and what I'll show, this was created in one chart with just simple command that implement a wizard setup for new project.
+Singh, Shubham 38 minutes 14 seconds
+Here you can actually select that, okay, what am I building? I'll just pick the front end app I'm building.
+Singh, Shubham 38 minutes 20 seconds
+Next, which language or framework? React.
+Singh, Shubham 38 minutes 26 seconds
+Project details, maybe.
+Singh, Shubham 38 minutes 29 seconds
+SDNC.
+
+Lawrence, Michael
+38 minutes 31 seconds38:31
+Lawrence, Michael 38 minutes 31 seconds
+RK.
+SS
+Singh, Shubham
+38 minutes 32 seconds38:32
+Singh, Shubham 38 minutes 32 seconds
+Ben.
+Singh, Shubham 38 minutes 33 seconds
+brief description.
+Singh, Shubham 38 minutes 37 seconds
+Randomly report visibility and again select internal, private or public.
+Singh, Shubham 38 minutes 45 seconds
+Sorry.
+Singh, Shubham 38 minutes 47 seconds
+Intel.
+Singh, Shubham 38 minutes 50 seconds
+On.
+Singh, Shubham 38 minutes 51 seconds
+Tegann.
+Singh, Shubham 38 minutes 55 seconds
+Mhm.
+Singh, Shubham 38 minutes 57 seconds
+And next, you can actually add, for example.
+Singh, Shubham 39 minutes 5 seconds
+Yes.
+Singh, Shubham 39 minutes 7 seconds
+Maybe give me any other role, maintainers, Anil.
+
+Mohanakrishnan, Vadivel
+39 minutes 10 seconds39:10
+Mohanakrishnan, Vadivel 39 minutes 10 seconds
+It is actually the output of the IDP which Satish was trying to interact with the tool. We're just using the same thing. We build the BRD out of it. And if there is an output, how does it look from that BRD? That's what we're just seeing here.
+
+
+Mohanakrishnan, Vadivel
+42 minutes 2 seconds42:02
+Mohanakrishnan, Vadivel 42 minutes 2 seconds
+We'll just handle that part; just give us a name, yeah.
+
+Lawrence, Michael
+42 minutes 3 seconds42:03
+Lawrence, Michael 42 minutes 3 seconds
+Yeah, okay, yeah, we can do that.
+
+Mohanakrishnan, Vadivel
+42 minutes 6 seconds42:06
+Mohanakrishnan, Vadivel 42 minutes 6 seconds
+Yeah, the other thing is if your team is stuck somewhere and if they need support or something, we can have people work during your ELT time for specific days, right? If we can just say that Dave, we are just going to test it out next one week or so. We can have somebody from Shubham team.
+Mohanakrishnan, Vadivel 42 minutes 25 seconds
+to work along with you or we can just set up some sort of an one hour office hours daily so that people can come and ask questions. That way the intention is we don't want people to get stuck and feel that this tool is not helping. We just want to see how best we can just unblock them so that it becomes a win-win situation for both the teams. That's all.
+
+Lawrence, Michael
+42 minutes 39 seconds42:39
+Lawrence, Michael 42 minutes 39 seconds
+Sure.
+Lawrence, Michael 42 minutes 45 seconds
+Yeah, makes sense. Yep. Okay, I'll send you that list and we'll get it going.
+
+Mohanakrishnan, Vadivel
+42 minutes 47 seconds42:47
+Mohanakrishnan, Vadivel 42 minutes 47 seconds
+BAPPA.
+
+Lawrence, Mike
+42 minutes 51 seconds42:51
+Lawrence, Mike 42 minutes 51 seconds
+So, Mike, does that list include just developers, or do you see like put this team there?
+
+Mohanakrishnan, Vadivel
+42 minutes 51 seconds42:51
+Mohanakrishnan, Vadivel 42 minutes 51 seconds
+Awesome.
+SS
+Singh, Shubham
+42 minutes 52 seconds42:52
+Singh, Shubham 42 minutes 52 seconds
+Sure.
+
+Lawrence, Michael
+42 minutes 54 seconds42:54
+Lawrence, Michael 42 minutes 54 seconds
+No.
+SS
+Singh, Shubham
+42 minutes 55 seconds42:55
+Singh, Shubham 42 minutes 55 seconds
+Think.
+
+Lawrence, Michael
+42 minutes 55 seconds42:55
+Lawrence, Michael 42 minutes 55 seconds
+Yeah, I'll buy that product and my team.
+
+Lawrence, Mike
+43 minutes 2 seconds43:02
+Lawrence, Mike 43 minutes 2 seconds
+All right.
+
+Mohanakrishnan, Vadivel
+43 minutes 3 seconds43:03
+Mohanakrishnan, Vadivel 43 minutes 3 seconds
+Awesome.
+
+Lawrence, Mike
+43 minutes 5 seconds43:05
+Lawrence, Mike 43 minutes 5 seconds
+Thank you very much for the information, for the demo. I know Mike's running fast. It says if we can put some of these things together, I think it collectively makes us better, faster, and doing all the things that Yogaraj is asking us to do. So thanks so much for the time this morning.
+
+Mohanakrishnan, Vadivel
+43 minutes 24 seconds43:24
+Mohanakrishnan, Vadivel 43 minutes 24 seconds
+So, thanks a lot, Mike. I appreciate the feedback. Looking forward for your email, Mike. Thanks a lot.
+SS
+Singh, Shubham
+43 minutes 25 seconds43:25
+Singh, Shubham 43 minutes 25 seconds
+Thanks.
+
+Lawrence, Michael
+43 minutes 28 seconds43:28
+Lawrence, Michael 43 minutes 28 seconds
+Yep. Thanks, guys.
+SS
+Singh, Shubham
+43 minutes 29 seconds43:29
+Singh, Shubham 43 minutes 29 seconds
+Thank you, Tim. Thank you. Thanks for the audience. Thanks for the feedback.
+
+Lawrence, Mike
+43 minutes 31 seconds43:31
+Lawrence, Mike 43 minutes 31 seconds
+Thanks, Jason.
+
+Mohanakrishnan, Vadivel
+43 minutes 31 seconds43:31
+Mohanakrishnan, Vadivel 43 minutes 31 seconds
+Thanks, Tim. Great. Thank you.
+SS
+Singh, Shubham
+43 minutes 36 seconds43:36
+Singh, Shubham 43 minutes 36 seconds
+Yeah.

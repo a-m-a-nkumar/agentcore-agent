@@ -1,0 +1,137 @@
+{
+  "timestamp": "2026-04-10T17:05:50.076660",
+  "project_id": "1a34265d-2bf0-4f2a-b78c-a929fe9d6e24",
+  "summary": {
+    "queries_tested": 15,
+    "avg_old_score": 89.1,
+    "avg_new_score": 92.3,
+    "improvement": 3.1,
+    "avg_old_latency": 3.1,
+    "avg_new_latency": 10.1,
+    "wins_old": 1,
+    "wins_new": 4,
+    "ties": 10
+  },
+  "queries": [
+    {
+      "query": "implement payment authorization and capture flow",
+      "domain": "Payment Fintech",
+      "old_score_pct": 100.0,
+      "new_score_pct": 100.0,
+      "old_latency": 19.8,
+      "new_latency": 14.8
+    },
+    {
+      "query": "build card tokenization for recurring payments",
+      "domain": "Payment Fintech",
+      "old_score_pct": 90.9,
+      "new_score_pct": 90.9,
+      "old_latency": 2.8,
+      "new_latency": 9.6
+    },
+    {
+      "query": "add 3D Secure authentication to checkout",
+      "domain": "Payment Fintech",
+      "old_score_pct": 100.0,
+      "new_score_pct": 100.0,
+      "old_latency": 1.5,
+      "new_latency": 9.3
+    },
+    {
+      "query": "implement fraud detection scoring system",
+      "domain": "Payment Fintech",
+      "old_score_pct": 100.0,
+      "new_score_pct": 100.0,
+      "old_latency": 1.4,
+      "new_latency": 10.3
+    },
+    {
+      "query": "create merchant onboarding with KYC verification",
+      "domain": "Payment Fintech",
+      "old_score_pct": 66.7,
+      "new_score_pct": 66.7,
+      "old_latency": 1.4,
+      "new_latency": 10.3
+    },
+    {
+      "query": "build real-time transaction dashboard with widgets",
+      "domain": "Merchant Portal",
+      "old_score_pct": 80.0,
+      "new_score_pct": 100.0,
+      "old_latency": 1.5,
+      "new_latency": 9.0
+    },
+    {
+      "query": "implement dispute management workflow",
+      "domain": "Merchant Portal / Payments Enhancement",
+      "old_score_pct": 100.0,
+      "new_score_pct": 100.0,
+      "old_latency": 1.9,
+      "new_latency": 10.5
+    },
+    {
+      "query": "add multi-currency support with FX rates",
+      "domain": "Payments Enhancement Q4",
+      "old_score_pct": 90.9,
+      "new_score_pct": 90.9,
+      "old_latency": 2.8,
+      "new_latency": 8.7
+    },
+    {
+      "query": "implement settlement reporting system",
+      "domain": "Payments Enhancement Q4",
+      "old_score_pct": 75.0,
+      "new_score_pct": 87.5,
+      "old_latency": 1.4,
+      "new_latency": 9.3
+    },
+    {
+      "query": "build instant refund processing",
+      "domain": "Payments Enhancement Q4",
+      "old_score_pct": 85.7,
+      "new_score_pct": 100.0,
+      "old_latency": 1.4,
+      "new_latency": 10.3
+    },
+    {
+      "query": "create project provisioning wizard with templates",
+      "domain": "Internal Developer Portal",
+      "old_score_pct": 100.0,
+      "new_score_pct": 100.0,
+      "old_latency": 1.4,
+      "new_latency": 9.0
+    },
+    {
+      "query": "implement webhook notification system for transaction events",
+      "domain": "Payment Fintech",
+      "old_score_pct": 100.0,
+      "new_score_pct": 100.0,
+      "old_latency": 1.4,
+      "new_latency": 10.5
+    },
+    {
+      "query": "what are the security and compliance requirements",
+      "domain": "Cross-cutting",
+      "old_score_pct": 100.0,
+      "new_score_pct": 80.0,
+      "old_latency": 1.7,
+      "new_latency": 10.3
+    },
+    {
+      "query": "implement user authentication and RBAC",
+      "domain": "Cross-cutting",
+      "old_score_pct": 70.0,
+      "new_score_pct": 90.0,
+      "old_latency": 2.7,
+      "new_latency": 9.8
+    },
+    {
+      "query": "set up recurring billing for merchants",
+      "domain": "Payment Fintech",
+      "old_score_pct": 77.8,
+      "new_score_pct": 77.8,
+      "old_latency": 2.8,
+      "new_latency": 9.1
+    }
+  ]
+}

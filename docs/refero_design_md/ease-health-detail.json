@@ -1,0 +1,2391 @@
+{
+  "style": {
+    "id": "e9f5e976-53f7-42f5-a882-4e63b3c2f734",
+    "url": "https://easehealth.com",
+    "siteName": "Ease Health",
+    "screenshotUrl": "https://images.refero.design/styles/refero.design/image/3ff5a209-080b-44ea-9657-41b177bfab5c.jpg",
+    "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/bc8e9081-df0c-47b7-b6b8-2e2482aabafa.jpg",
+    "iconUrl": null,
+    "previewVideoUrl": null,
+    "previewVideoPosterUrl": null,
+    "previewVideoWidth": null,
+    "previewVideoHeight": null,
+    "previewVideoDetailUrl": null,
+    "previewVideoDetailPosterUrl": null,
+    "previewVideoDetailWidth": null,
+    "previewVideoDetailHeight": null,
+    "previewVideoDurationMs": null,
+    "previewVideoCapturedAt": null,
+    "colorScheme": "light",
+    "industry": "other",
+    "createdAt": "2026-04-30T00:13:33.860Z",
+    "fullResult": {
+      "meta": {
+        "url": "https://easehealth.com",
+        "siteName": "Ease Health",
+        "extractedAt": "2026-04-30T00:13:33.790Z",
+        "durationMs": 33317,
+        "viewport": {
+          "width": 1440,
+          "height": 900
+        },
+        "elementCount": 745,
+        "telemetry": {
+          "enrichment": {
+            "componentHtmlStatus": "pending",
+            "attempts": 0
+          }
+        }
+      },
+      "raw": {
+        "colors": {
+          "tokens": [
+            {
+              "hex": "#e5e7eb",
+              "oklch": {
+                "c": 0.005813542372075684,
+                "h": 264.5313231484507,
+                "l": 0.9275823098127417
+              },
+              "contexts": [
+                "other",
+                "link",
+                "nav",
+                "card",
+                "heading",
+                "button",
+                "icon",
+                "hero",
+                "badge",
+                "footer"
+              ],
+              "frequency": 1180,
+              "confidence": 1,
+              "prominence": 166166582.13462526,
+              "properties": [
+                "borderColor",
+                "stroke"
+              ],
+              "usageCounts": {
+                "other/stroke": 8,
+                "nav/borderColor": 56,
+                "card/borderColor": 40,
+                "hero/borderColor": 8,
+                "icon/borderColor": 24,
+                "link/borderColor": 84,
+                "badge/borderColor": 48,
+                "other/borderColor": 888,
+                "button/borderColor": 8,
+                "footer/borderColor": 4,
+                "heading/borderColor": 12
+              }
+            },
+            {
+              "hex": "#0f3e17",
+              "oklch": {
+                "c": 0.08281577200879707,
+                "h": 146.25321258670658,
+                "l": 0.32190993508510135
+              },
+              "contexts": [
+                "other",
+                "nav",
+                "button",
+                "card",
+                "heading",
+                "image",
+                "icon",
+                "hero",
+                "badge",
+                "link",
+                "footer"
+              ],
+              "frequency": 423,
+              "confidence": 1,
+              "prominence": 142104457.30549344,
+              "properties": [
+                "color",
+                "backgroundColor",
+                "borderColor",
+                "fill",
+                "stroke"
+              ],
+              "usageCounts": {
+                "nav/color": 4,
+                "card/color": 10,
+                "hero/color": 2,
+                "icon/color": 7,
+                "link/color": 20,
+                "other/fill": 50,
+                "badge/color": 12,
+                "image/color": 8,
+                "other/color": 210,
+                "footer/color": 1,
+                "other/stroke": 9,
+                "heading/color": 3,
+                "icon/borderColor": 28,
+                "image/borderColor": 32,
+                "button/borderColor": 20,
+                "button/backgroundColor": 7
+              }
+            },
+            {
+              "hex": "#fffefc",
+              "oklch": {
+                "c": 0.0028470190114866763,
+                "h": 84.55865787610281,
+                "l": 0.9972310468957699
+              },
+              "contexts": [
+                "other",
+                "button",
+                "icon",
+                "badge"
+              ],
+              "frequency": 50,
+              "confidence": 1,
+              "prominence": 7274885.501078443,
+              "properties": [
+                "backgroundColor",
+                "color",
+                "stroke",
+                "fill"
+              ],
+              "usageCounts": {
+                "icon/color": 6,
+                "other/fill": 8,
+                "other/color": 12,
+                "button/color": 7,
+                "other/stroke": 2,
+                "badge/backgroundColor": 12,
+                "other/backgroundColor": 3
+              }
+            },
+            {
+              "hex": "#000000",
+              "oklch": {
+                "c": 0,
+                "h": 0,
+                "l": 0
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 364,
+              "confidence": 1,
+              "prominence": 3299844.7805651915,
+              "properties": [
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 364
+              }
+            },
+            {
+              "hex": "#b1dbb8",
+              "oklch": {
+                "c": 0.06528517454123316,
+                "h": 149.71557775073987,
+                "l": 0.8519743660600748
+              },
+              "contexts": [
+                "card",
+                "other"
+              ],
+              "frequency": 7,
+              "confidence": 1,
+              "prominence": 3041712,
+              "properties": [
+                "backgroundColor",
+                "stroke",
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 2,
+                "other/stroke": 2,
+                "card/backgroundColor": 3
+              }
+            },
+            {
+              "hex": "#b6ced5",
+              "oklch": {
+                "c": 0.027671466303258847,
+                "h": 217.18418054030099,
+                "l": 0.835665574428606
+              },
+              "contexts": [
+                "card",
+                "other"
+              ],
+              "frequency": 14,
+              "confidence": 1,
+              "prominence": 1665726.2467812656,
+              "properties": [
+                "backgroundColor"
+              ],
+              "usageCounts": {
+                "card/backgroundColor": 2,
+                "other/backgroundColor": 12
+              }
+            },
+            {
+              "hex": "#e1f4df",
+              "oklch": {
+                "c": 0.03432325678891153,
+                "h": 142.6182934848391,
+                "l": 0.9474266113946479
+              },
+              "contexts": [
+                "card"
+              ],
+              "frequency": 2,
+              "confidence": 1,
+              "prominence": 1606999.819331183,
+              "properties": [
+                "backgroundColor"
+              ],
+              "usageCounts": {
+                "card/backgroundColor": 2
+              }
+            },
+            {
+              "hex": "#cfe7d3",
+              "oklch": {
+                "c": 0.03704488778560535,
+                "h": 150.24691260068929,
+                "l": 0.9047726625424318
+              },
+              "contexts": [
+                "card"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 1013904,
+              "properties": [
+                "backgroundColor"
+              ],
+              "usageCounts": {
+                "card/backgroundColor": 1
+              }
+            },
+            {
+              "hex": "#333333",
+              "oklch": {
+                "c": 0,
+                "h": 0,
+                "l": 0.3210925111636326
+              },
+              "contexts": [
+                "link",
+                "image"
+              ],
+              "frequency": 11,
+              "confidence": 1,
+              "prominence": 36781.71525739906,
+              "properties": [
+                "color",
+                "borderColor"
+              ],
+              "usageCounts": {
+                "link/color": 1,
+                "image/color": 2,
+                "image/borderColor": 8
+              }
+            },
+            {
+              "hex": "#222222",
+              "oklch": {
+                "c": 0,
+                "h": 0,
+                "l": 0.2519647498644126
+              },
+              "contexts": [
+                "nav"
+              ],
+              "frequency": 12,
+              "confidence": 1,
+              "prominence": 18206.163413254173,
+              "properties": [
+                "color",
+                "stroke"
+              ],
+              "usageCounts": {
+                "nav/color": 10,
+                "nav/stroke": 2
+              }
+            },
+            {
+              "hex": "#addbe8",
+              "oklch": {
+                "c": 0.05102302071033935,
+                "h": 216.89594313657813,
+                "l": 0.863253501749779
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 4575,
+              "properties": [
+                "stroke"
+              ],
+              "usageCounts": {
+                "other/stroke": 1
+              }
+            },
+            {
+              "hex": "#a9e6b0",
+              "oklch": {
+                "c": 0.09659989922605162,
+                "h": 147.6702398454777,
+                "l": 0.8694274490725389
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 229,
+              "properties": [
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 1
+              }
+            },
+            {
+              "hex": "#0a7a9b",
+              "oklch": {
+                "c": 0.10078338592001487,
+                "h": 225.69577926191332,
+                "l": 0.540100597537168
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 108,
+              "properties": [
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 1
+              }
+            },
+            {
+              "hex": "#009b19",
+              "oklch": {
+                "c": 0.19645084377942051,
+                "h": 143.58936294488237,
+                "l": 0.5982211074293449
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 107,
+              "properties": [
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 1
+              }
+            },
+            {
+              "hex": "#016d00",
+              "oklch": {
+                "c": 0.1574904938062453,
+                "h": 142.43688052914197,
+                "l": 0.4634620846651804
+              },
+              "contexts": [
+                "other"
+              ],
+              "frequency": 1,
+              "confidence": 1,
+              "prominence": 98,
+              "properties": [
+                "fill"
+              ],
+              "usageCounts": {
+                "other/fill": 1
+              }
+            }
+          ],
+          "isDarkMode": false,
+          "colorfulness": 0.056935506517294635,
+          "contrastPairs": [
+            {
+              "level": "AAA",
+              "ratio": 20.83,
+              "background": "#fffefc",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 18.21,
+              "background": "#e1f4df",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 16.96,
+              "background": "#e5e7eb",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 16.02,
+              "background": "#cfe7d3",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 15.78,
+              "background": "#fffefc",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 14.63,
+              "background": "#a9e6b0",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 14.07,
+              "background": "#addbe8",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 13.79,
+              "background": "#e1f4df",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 13.69,
+              "background": "#b1dbb8",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.85,
+              "background": "#e5e7eb",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.78,
+              "background": "#b6ced5",
+              "foreground": "#000000"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.54,
+              "background": "#fffefc",
+              "foreground": "#333333"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.14,
+              "background": "#cfe7d3",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 12.1,
+              "background": "#fffefc",
+              "foreground": "#0f3e17"
+            },
+            {
+              "level": "AAA",
+              "ratio": 11.09,
+              "background": "#a9e6b0",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 10.95,
+              "background": "#e1f4df",
+              "foreground": "#333333"
+            },
+            {
+              "level": "AAA",
+              "ratio": 10.66,
+              "background": "#addbe8",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 10.57,
+              "background": "#e1f4df",
+              "foreground": "#0f3e17"
+            },
+            {
+              "level": "AAA",
+              "ratio": 10.37,
+              "background": "#b1dbb8",
+              "foreground": "#222222"
+            },
+            {
+              "level": "AAA",
+              "ratio": 10.2,
+              "background": "#e5e7eb",
+              "foreground": "#333333"
+            }
+          ]
+        },
+        "shapes": {
+          "radii": [
+            {
+              "value": 999,
+              "contexts": [
+                "badge",
+                "other"
+              ],
+              "frequency": 24
+            },
+            {
+              "value": 14.08,
+              "contexts": [
+                "button",
+                "other",
+                "card"
+              ],
+              "frequency": 18
+            },
+            {
+              "value": 7.04,
+              "contexts": [
+                "nav"
+              ],
+              "frequency": 4
+            }
+          ],
+          "shadows": []
+        },
+        "spacing": {
+          "tokens": [
+            {
+              "value": 4,
+              "contexts": [
+                "other",
+                "link"
+              ],
+              "frequency": 36,
+              "properties": [
+                "paddingBottom",
+                "paddingTop"
+              ],
+              "propertyContextPairs": [
+                "paddingBottom|other",
+                "paddingTop|link",
+                "paddingBottom|link"
+              ]
+            },
+            {
+              "value": 7,
+              "contexts": [
+                "nav",
+                "badge",
+                "other"
+              ],
+              "frequency": 36,
+              "properties": [
+                "paddingTop",
+                "paddingBottom",
+                "columnGap",
+                "rowGap"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|nav",
+                "paddingBottom|nav",
+                "columnGap|nav",
+                "rowGap|badge",
+                "columnGap|badge",
+                "rowGap|other",
+                "columnGap|other"
+              ]
+            },
+            {
+              "value": 9,
+              "contexts": [
+                "badge"
+              ],
+              "frequency": 24,
+              "properties": [
+                "paddingTop",
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|badge",
+                "paddingBottom|badge"
+              ]
+            },
+            {
+              "value": 11,
+              "contexts": [
+                "nav"
+              ],
+              "frequency": 4,
+              "properties": [
+                "paddingRight",
+                "paddingLeft"
+              ],
+              "propertyContextPairs": [
+                "paddingRight|nav",
+                "paddingLeft|nav"
+              ]
+            },
+            {
+              "value": 14,
+              "contexts": [
+                "other",
+                "nav",
+                "button",
+                "badge"
+              ],
+              "frequency": 56,
+              "properties": [
+                "rowGap",
+                "columnGap",
+                "paddingRight",
+                "paddingLeft",
+                "paddingTop",
+                "paddingBottom",
+                "marginTop"
+              ],
+              "propertyContextPairs": [
+                "rowGap|other",
+                "columnGap|other",
+                "paddingRight|nav",
+                "paddingLeft|nav",
+                "paddingTop|button",
+                "paddingBottom|button",
+                "marginTop|other",
+                "paddingRight|badge",
+                "paddingLeft|badge"
+              ]
+            },
+            {
+              "value": 18,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 6,
+              "properties": [
+                "rowGap",
+                "columnGap"
+              ],
+              "propertyContextPairs": [
+                "rowGap|other",
+                "columnGap|other"
+              ]
+            },
+            {
+              "value": 21,
+              "contexts": [
+                "button",
+                "other",
+                "card",
+                "link"
+              ],
+              "frequency": 63,
+              "properties": [
+                "paddingRight",
+                "paddingLeft",
+                "rowGap",
+                "columnGap",
+                "marginBottom",
+                "paddingTop",
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingRight|button",
+                "paddingLeft|button",
+                "rowGap|other",
+                "columnGap|other",
+                "rowGap|button",
+                "columnGap|button",
+                "rowGap|card",
+                "columnGap|card",
+                "marginBottom|other",
+                "rowGap|link",
+                "columnGap|link",
+                "paddingTop|other",
+                "paddingBottom|other"
+              ]
+            },
+            {
+              "value": 28,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 10,
+              "properties": [
+                "marginBottom",
+                "columnGap",
+                "marginTop"
+              ],
+              "propertyContextPairs": [
+                "marginBottom|other",
+                "columnGap|other",
+                "marginTop|other"
+              ]
+            },
+            {
+              "value": 35,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 27,
+              "properties": [
+                "paddingRight",
+                "paddingLeft",
+                "marginBottom",
+                "rowGap",
+                "columnGap"
+              ],
+              "propertyContextPairs": [
+                "paddingRight|other",
+                "paddingLeft|other",
+                "marginBottom|other",
+                "rowGap|other",
+                "columnGap|other"
+              ]
+            },
+            {
+              "value": 42,
+              "contexts": [
+                "card",
+                "button",
+                "other"
+              ],
+              "frequency": 33,
+              "properties": [
+                "paddingTop",
+                "paddingRight",
+                "paddingBottom",
+                "paddingLeft",
+                "rowGap",
+                "columnGap",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|card",
+                "paddingRight|card",
+                "paddingBottom|card",
+                "paddingLeft|card",
+                "paddingTop|button",
+                "paddingRight|button",
+                "paddingBottom|button",
+                "paddingLeft|button",
+                "rowGap|other",
+                "columnGap|other",
+                "marginBottom|other"
+              ]
+            },
+            {
+              "value": 49,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 3,
+              "properties": [
+                "rowGap",
+                "columnGap"
+              ],
+              "propertyContextPairs": [
+                "rowGap|other",
+                "columnGap|other"
+              ]
+            },
+            {
+              "value": 56,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 4,
+              "properties": [
+                "rowGap",
+                "columnGap",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "rowGap|other",
+                "columnGap|other",
+                "marginBottom|other"
+              ]
+            },
+            {
+              "value": 70,
+              "contexts": [
+                "card",
+                "other"
+              ],
+              "frequency": 26,
+              "properties": [
+                "rowGap",
+                "columnGap",
+                "paddingTop",
+                "paddingBottom",
+                "marginTop",
+                "marginBottom",
+                "paddingRight",
+                "paddingLeft"
+              ],
+              "propertyContextPairs": [
+                "rowGap|card",
+                "columnGap|card",
+                "rowGap|other",
+                "columnGap|other",
+                "paddingTop|other",
+                "paddingBottom|other",
+                "marginTop|other",
+                "marginBottom|other",
+                "paddingTop|card",
+                "paddingRight|card",
+                "paddingBottom|card",
+                "paddingLeft|card"
+              ]
+            },
+            {
+              "value": 76,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 2,
+              "properties": [
+                "marginTop",
+                "marginBottom"
+              ],
+              "propertyContextPairs": [
+                "marginTop|other",
+                "marginBottom|other"
+              ]
+            },
+            {
+              "value": 99,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 6,
+              "properties": [
+                "paddingTop",
+                "paddingBottom"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "paddingBottom|other"
+              ]
+            },
+            {
+              "value": 141,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 2,
+              "properties": [
+                "paddingTop",
+                "marginTop"
+              ],
+              "propertyContextPairs": [
+                "paddingTop|other",
+                "marginTop|other"
+              ]
+            },
+            {
+              "value": 156,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 12,
+              "properties": [
+                "marginRight",
+                "marginLeft"
+              ],
+              "propertyContextPairs": [
+                "marginRight|other",
+                "marginLeft|other"
+              ]
+            }
+          ],
+          "density": "comfortable",
+          "baseUnit": null
+        },
+        "gradients": [],
+        "typography": {
+          "fonts": [
+            {
+              "family": "Suisseintl",
+              "source": "custom",
+              "weights": [
+                300,
+                400
+              ],
+              "frequency": 312,
+              "fontFeatureSettings": []
+            },
+            {
+              "family": "Faire Octave",
+              "source": "custom",
+              "weights": [
+                300
+              ],
+              "frequency": 3,
+              "fontFeatureSettings": []
+            }
+          ],
+          "scale": {
+            "base": 16,
+            "name": "Minor Third",
+            "ratio": 1.2,
+            "confidence": 1
+          },
+          "steps": [
+            {
+              "size": 12,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "link",
+                "other"
+              ],
+              "frequency": 3,
+              "lineHeight": 1.5,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 14,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "other",
+                "link",
+                "image",
+                "nav",
+                "card",
+                "button",
+                "icon",
+                "hero",
+                "footer"
+              ],
+              "frequency": 219,
+              "lineHeight": 1.5,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 14,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "button",
+                "badge",
+                "other",
+                "icon",
+                "link"
+              ],
+              "frequency": 73,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 18,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 3,
+              "lineHeight": 1.5,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 18,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 7,
+              "lineHeight": 1,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 23,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 2,
+              "lineHeight": 1.5,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 28,
+              "family": "Suisseintl",
+              "weight": 400,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 3,
+              "lineHeight": 1.3,
+              "letterSpacing": 0,
+              "textTransform": "none"
+            },
+            {
+              "size": 40,
+              "family": "Faire Octave",
+              "weight": 300,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 1,
+              "lineHeight": 1.35,
+              "letterSpacing": -0.01,
+              "textTransform": "none"
+            },
+            {
+              "size": 56,
+              "family": "Suisseintl",
+              "weight": 300,
+              "contexts": [
+                "other"
+              ],
+              "frequency": 2,
+              "lineHeight": 1,
+              "letterSpacing": -0.03,
+              "textTransform": "none"
+            },
+            {
+              "size": 74,
+              "family": "Faire Octave",
+              "weight": 300,
+              "contexts": [
+                "heading"
+              ],
+              "frequency": 2,
+              "lineHeight": 1.05,
+              "letterSpacing": -0.03,
+              "textTransform": "none"
+            }
+          ]
+        }
+      },
+      "designSystem": {
+        "dos": [
+          "Use Forest Green (#0f3e17) exclusively for primary action buttons and core brand elements to maintain its impact.",
+          "Apply 14px border-radius to all cards and most buttons for a consistent soft, approachable aesthetic.",
+          "Ensure all text content defaults to Suisseintl for readability and consistency, varying only weight and size.",
+          "Utilize Faire Octave at weight 300 for major headlines (40px, 74px) to convey understated authority.",
+          "Employ Cream Canvas (#fffefc) as the primary background for detailed UI elements, balancing against chromatic cards.",
+          "Maintain a comfortable density with 21px for element gaps and 42px for card and section padding.",
+          "Use Border Grey (#e5e7eb) for all neutral borders and dividers to keep the interface light and airy."
+        ],
+        "donts": [
+          "Do not introduce new chromatic colors outside of the defined green and blue accents to preserve the muted palette.",
+          "Avoid harsh shadows or strong elevation; surfaces should feel flat and distinct through color changes, not depth.",
+          "Do not use multiple font families for body text or interface elements; Suisseintl serves this purpose exclusively.",
+          "Never use full black (#000000) for text; opt for Ink Text (#222222) or Dark Charcoal (#333333) for softer contrast.",
+          "Do not deviate from the established border-radius values across component types.",
+          "Avoid compacting content; err on the side of generous element and padding values to maintain the comfortable density.",
+          "Do not use generic system fonts when Suisseintl or Faire Octave are available; these are critical for brand identity."
+        ],
+        "theme": "light",
+        "colors": [
+          {
+            "hex": "#0f3e17",
+            "name": "Forest Green",
+            "role": "Primary brand color for calls to action, text, and critical icons \u2014 grounding the UI with a sense of growth and reliability",
+            "group": "brand"
+          },
+          {
+            "hex": "#fffefc",
+            "name": "Cream Canvas",
+            "role": "Background for page surfaces and pristine component backdrops, providing a clean, bright foundation",
+            "group": "neutral"
+          },
+          {
+            "hex": "#b1dbb8",
+            "name": "Mint Glaze",
+            "role": "Soft background for informational cards and sections, introducing a gentle, almost pastel tint to the UI planes",
+            "group": "accent"
+          },
+          {
+            "hex": "#b6ced5",
+            "name": "Slate Mist",
+            "role": "Cool, muted background for secondary cards and sections, offering visual separation without overwhelming the primary content",
+            "group": "accent"
+          },
+          {
+            "hex": "#e1f4df",
+            "name": "Keylime Wash",
+            "role": "Lightest green surface, used for subtle card backgrounds or layered elements, providing a hint of color",
+            "group": "accent"
+          },
+          {
+            "hex": "#cfe7d3",
+            "name": "Mint Kiss",
+            "role": "Another very light green surface, subtly differentiating stacked cards or sections",
+            "group": "accent"
+          },
+          {
+            "hex": "#e5e7eb",
+            "name": "Border Grey",
+            "role": "Default boundary and separator color, used for hairline borders and inactive states, maintaining visual separation with minimal distraction",
+            "group": "neutral"
+          },
+          {
+            "hex": "#222222",
+            "name": "Ink Text",
+            "role": "Primary text color for navigation and core content, providing strong contrast against light backgrounds",
+            "group": "neutral"
+          },
+          {
+            "hex": "#333333",
+            "name": "Dark Charcoal",
+            "role": "Secondary text and link color for less prominent information, like image captions or muted links",
+            "group": "neutral"
+          }
+        ],
+        "layout": "The page uses a maximum-width contained layout, centering content within a white canvas. The hero section features a split layout: a bold green content block on the left with a large headline, contrasted by a light blue canvas on the right presenting stacked product visuals. Sections below alternate between full-width content blocks and contained layouts, often with alternating two-column layouts (text left, image right, or vice-versa). Vertical rhythm is established through generous and consistent section gaps, giving content ample breathing room. The navigation is a sticky top bar with a primary 'Book a Demo' button.",
+        "imagery": "Imagery is functional and product-focused, featuring clean product screenshots of UI elements and interface cards. These visuals often overlap or are presented as distinct, rounded-corner elements against tinted backgrounds. Text-based icons are minimal. Visuals serve to explain product features rather than create abstract atmosphere, maintaining a high-fidelity, clear display of the software's capabilities.",
+        "similar": [
+          {
+            "why": "Shares a similar muted pastel color palette with one dominant deep action color, spacious layouts, and rounded card styles.",
+            "business": "Alinea"
+          },
+          {
+            "why": "Employs a clean, health-tech aesthetic with a focus on clear UI design, abundant whitespace, and subtle use of color for functional elements.",
+            "business": "Elation Health"
+          },
+          {
+            "why": "Uses a single, grounding brand color for primary actions and headlines against a light, neutral background, with clean typography.",
+            "business": "Klang.ai"
+          },
+          {
+            "why": "Exhibits a comfortable density with generous spacing and distinct, subtly colored surface levels for content organization, though with a different palette.",
+            "business": "Notion"
+          }
+        ],
+        "spacing": {
+          "radius": {
+            "nav": "7px",
+            "cards": "14px",
+            "badges": "999px",
+            "buttons": "14px"
+          },
+          "elementGap": "21px",
+          "sectionGap": "42px",
+          "cardPadding": "42px",
+          "pageMaxWidth": null
+        },
+        "industry": "other",
+        "surfaces": [
+          {
+            "hex": "#fffefc",
+            "name": "Canvas Background",
+            "level": 0,
+            "purpose": "Dominant page background, providing a clean, bright, and almost textured base for all content."
+          },
+          {
+            "hex": "#e1f4df",
+            "name": "Keylime Wash Card",
+            "level": 1,
+            "purpose": "First layer of elevated content, used for prominent cards or hero sections, offering a subtle green tint."
+          },
+          {
+            "hex": "#b1dbb8",
+            "name": "Mint Glaze Card",
+            "level": 2,
+            "purpose": "Second layer of elevated content, for detailed information cards or feature blocks, slightly more saturated green."
+          },
+          {
+            "hex": "#b6ced5",
+            "name": "Slate Mist Card",
+            "level": 3,
+            "purpose": "Third layer of elevated content, providing clear visual separation for distinct blocks, using a cool desaturated blue-gray."
+          }
+        ],
+        "northStar": "calm clinical canvas",
+        "typeScale": [
+          {
+            "role": "caption",
+            "size": 12,
+            "lineHeight": 1.5,
+            "letterSpacing": -0.36
+          },
+          {
+            "role": "body",
+            "size": 14,
+            "lineHeight": 1.5,
+            "letterSpacing": -0.42
+          },
+          {
+            "role": "body-lg",
+            "size": 18,
+            "lineHeight": 1.5,
+            "letterSpacing": -0.54
+          },
+          {
+            "role": "subheading",
+            "size": 23,
+            "lineHeight": 1.3,
+            "letterSpacing": -0.69
+          },
+          {
+            "role": "heading-sm",
+            "size": 28,
+            "lineHeight": 1.3,
+            "letterSpacing": -0.84
+          },
+          {
+            "role": "heading",
+            "size": 40,
+            "lineHeight": 1.05,
+            "letterSpacing": -0.4
+          },
+          {
+            "role": "display",
+            "size": 56,
+            "lineHeight": 1,
+            "letterSpacing": -1.68
+          },
+          {
+            "role": "display-lg",
+            "size": 74,
+            "lineHeight": 1.05,
+            "letterSpacing": -0.74
+          }
+        ],
+        "components": [
+          {
+            "name": "Primary Action Button (Filled)",
+            "role": "Main call-to-action button, conveying primary user interaction.",
+            "description": "Solid Forest Green background (#0f3e17), Cream Canvas text (#fffefc), 14px rounded corners, with generous 14px vertical and 21px horizontal padding. Delivers a confident and prominent interaction point."
+          },
+          {
+            "name": "Large Action Button",
+            "role": "Prominent full-block call-to-action for key feature sections.",
+            "description": "Solid Forest Green background (#0f3e17), Cream Canvas text (#fffefc), 14px radius. Features expansive 42px padding on all sides, drawing significant attention to critical actions."
+          },
+          {
+            "name": "Content Card (Mint Glaze)",
+            "role": "General purpose container for information or features, with a refreshing tint.",
+            "description": "Mint Glaze background (#b1dbb8), no box shadow, 14px rounded corners. Offers 42px of internal padding."
+          },
+          {
+            "name": "Content Card (Slate Mist)",
+            "role": "Alternative general purpose container, providing subtle visual distinction.",
+            "description": "Slate Mist background (#b6ced5), no box shadow, 14px rounded corners. Offers 42px of internal padding."
+          },
+          {
+            "name": "Content Card (Keylime Wash)",
+            "role": "Lightest card background for sub-sections or layered content.",
+            "description": "Keylime Wash background (#e1f4df), no box shadow, 14px rounded corners. Offers 70px of internal padding for a spacious feel."
+          },
+          {
+            "name": "Pill Badge",
+            "role": "Used for categorization or brief status indicators.",
+            "description": "Cream Canvas background (#fffefc), Forest Green text (#0f3e17), with maximum border-radius (999px) for a pill shape. Contains 9px vertical and 14px horizontal padding."
+          }
+        ],
+        "typography": [
+          {
+            "role": "The workhorse sans-serif for most body text, links, buttons, and detailed interface elements. Its refined simplicity supports a clinical tone without feeling sterile.",
+            "sizes": "12px, 14px, 18px, 23px, 28px, 56px",
+            "family": "Suisseintl",
+            "weight": "300, 400",
+            "weights": [
+              300,
+              400
+            ],
+            "lineHeight": "1.00, 1.30, 1.50",
+            "substitute": "Inter",
+            "letterSpacing": "-0.0300em"
+          },
+          {
+            "role": "Used exclusively for large, impactful headings. Its light weight (300) for such prominent sizes creates an authoritative yet approachable voice, suggesting wisdom through understatement rather than volume.",
+            "sizes": "40px, 74px",
+            "family": "Faire Octave",
+            "weight": "300",
+            "weights": [
+              300
+            ],
+            "lineHeight": "1.05, 1.35",
+            "substitute": "Playfair Display",
+            "letterSpacing": "-0.0300em, -0.0100em"
+          }
+        ],
+        "description": "Ease Health employs a grounded, clinical yet approachable aesthetic, balancing a muted green-blue palette with abundant whitespace. The design emphasizes clarity through distinct surface levels, subtle typography, and a signature deep forest green for primary actions, contrasting with the soft, almost pastel backgrounds. Components are clean and substantial, featuring generous padding and distinctive rounded corners, giving the interface a calm, trustworthy, and organized feel.",
+        "customSections": [
+          {
+            "title": "Agent Prompt Guide",
+            "content": "Quick Color Reference:\ntext: #222222\nbackground: #fffefc\nborder: #e5e7eb\naccent: #b1dbb8\nprimary action: #0f3e17 (filled action)\n\nExample Component Prompts:\n1. Create a Primary Action Button: #0f3e17 background, #fffefc text, 9999px radius, compact pill padding. Use this filled treatment for the main CTA.\n2. Design a feature card: Mint Glaze background (#b1dbb8), 14px radius, 42px padding. Title 'AI-Powered Documentation' using Suisseintl weight 400 at 28px, #0f3e17. Body copy 'Reduce administrative burden\u2026' using Suisseintl weight 300 at 18px, #333333. Includes a small checked icon (Forest Green, 0f3e17).\n3. Generate a testimonial section: Cream Canvas background (#fffefc). Headline 'What healthcare providers say' using Faire Octave weight 300 at 40px, #0f3e17, letter-spacing -0.4px. Display a Pill Badge 'Broad clinical support', Cream Canvas background (#fffefc), Forest Green text (#0f3e17)."
+          }
+        ]
+      },
+      "screenshot": {
+        "url": "https://images.refero.design/styles/refero.design/image/3ff5a209-080b-44ea-9657-41b177bfab5c.jpg",
+        "thumbnail": "https://images.refero.design/styles/refero.design/image/bc8e9081-df0c-47b7-b6b8-2e2482aabafa.jpg"
+      }
+    }
+  },
+  "similar": [
+    {
+      "id": "81bd6ad6-b02b-4fb3-a600-91ecf8324171",
+      "url": "https://www.augusthealth.com",
+      "siteName": "August Health EHR",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/17704778-71a1-4090-97a6-56501d24ff42.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/17964008-62ee-4bb6-99b0-a1839a9f0310.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/ae1fd2b4-0d4f-44ee-a584-749f357887f8.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/46dcd700-76b9-4dd1-8956-f93d9fda311f.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/5271d587-c9bf-4ff8-84dd-e84e6a8e031b.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/badbcc19-71b7-46eb-ae85-6edb0decc865.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/ae3532dc-2495-44cc-813a-551206880db6.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 19367,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#080331"
+        },
+        {
+          "name": "Regal Violet",
+          "hex": "#1b1463"
+        },
+        {
+          "name": "Forest Fern",
+          "hex": "#328a3b"
+        },
+        {
+          "name": "Sky Blue",
+          "hex": "#4865ff"
+        },
+        {
+          "name": "Deep Moss",
+          "hex": "#0d5238"
+        },
+        {
+          "name": "Sunset Orange",
+          "hex": "#ff6d39"
+        }
+      ],
+      "fonts": [
+        "Saans",
+        "Reckless Neue"
+      ],
+      "northStar": "Softly curved canvases on a clean sheet",
+      "managementSignals": [],
+      "createdAt": "2026-05-11 00:39:08.258735"
+    },
+    {
+      "id": "8b4a1a95-9dbf-4565-ace7-c4cf48eb028a",
+      "url": "https://2ag.com",
+      "siteName": "2.AG",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/20f01c95-02d6-46c3-baee-1ecf4ccb903d.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/c00e6deb-8fca-44e1-982c-c7ec4ba03c0d.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/6fd4705b-367a-41ad-a714-04bc1e28e5bc.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/b0ca6681-89d3-4964-b5cd-392630e3d117.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/7b14ae7b-dc15-4b33-9077-e4e3a36106aa.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/1047d89a-d01b-4222-a3d9-a96175b8b123.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 41467,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Teal",
+          "hex": "#244d54"
+        },
+        {
+          "name": "Activation Green",
+          "hex": "#2ecea0"
+        },
+        {
+          "name": "Lagoon Mist",
+          "hex": "#6dddbd"
+        },
+        {
+          "name": "Deep Graphite",
+          "hex": "#000000"
+        },
+        {
+          "name": "Medium Gray",
+          "hex": "#151515"
+        },
+        {
+          "name": "Silver Cloud",
+          "hex": "#e5e7eb"
+        }
+      ],
+      "fonts": [
+        "Inter Tight",
+        "Inter"
+      ],
+      "northStar": "Clinical clarity, soft curves.",
+      "managementSignals": [],
+      "createdAt": "2026-05-08 19:23:43.024614"
+    },
+    {
+      "id": "2230ba53-445e-411d-b483-16410a072639",
+      "url": "https://www.useparallel.com",
+      "siteName": "Home",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/9a68d9ac-b795-47fa-bbf4-365caa1bee24.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/ef3e3fcc-78ca-42d0-99a9-b8e912a04816.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/e9045d33-5fb9-4553-9f6d-2e1509ea0e96.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/15ec292b-369f-4bc0-a687-b9db2fd543f9.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/99adcb9c-9be7-4d82-9c41-ee8622eaae3b.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/75d96cf7-b5e8-4c42-aec1-cf8dae92554f.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/21ed64f6-cabd-4fcd-96de-97c1ac6631e8.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 7417,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas Sand",
+          "hex": "#e4dfd9"
+        },
+        {
+          "name": "White Cloud",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Midnight Ink",
+          "hex": "#000000"
+        },
+        {
+          "name": "Slate Gray",
+          "hex": "#737373"
+        },
+        {
+          "name": "Dark Onyx",
+          "hex": "#050505"
+        },
+        {
+          "name": "Ash Mist",
+          "hex": "#c7c7c7"
+        }
+      ],
+      "fonts": [
+        "Rules Font",
+        "ui-sans-serif"
+      ],
+      "northStar": "Warm Canvas, Restrained Focus",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 18:04:46.669579"
+    },
+    {
+      "id": "75fdb89f-ca64-41b3-af36-7a78bd09448e",
+      "url": "https://steep.app",
+      "siteName": "Steep",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/5143ca15-7844-46ed-b226-ac582a2b0d90.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/59b42abc-7137-41d7-8823-22f863b2003f.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Ink",
+          "hex": "#17191c"
+        },
+        {
+          "name": "Graphite",
+          "hex": "#000000"
+        },
+        {
+          "name": "Warm Mist",
+          "hex": "#fbe1d1"
+        },
+        {
+          "name": "Terracotta",
+          "hex": "#5d2a1a"
+        },
+        {
+          "name": "Fog",
+          "hex": "#f7f7f8"
+        }
+      ],
+      "fonts": [
+        "Sohne",
+        "Signifier"
+      ],
+      "northStar": "Warm, Crisp Canvas",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:52:09.573464"
+    },
+    {
+      "id": "21b71be3-78a0-4681-a5b9-64cc4b40eb67",
+      "url": "https://www.functionhealth.com",
+      "siteName": "Function",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/166bdb7d-2154-460a-8879-3c7240c34463.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/3a0c50c6-9c2c-43d8-aabc-bab8e98c921c.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Amber Glow",
+          "hex": "#b05a36",
+          "gradient": "linear-gradient(116deg, rgb(176, 90, 54), rgb(212, 166, 142))"
+        },
+        {
+          "name": "Night Sky",
+          "hex": "#2a2b2f"
+        },
+        {
+          "name": "Charcoal Grey",
+          "hex": "#333333"
+        },
+        {
+          "name": "Faded Stone",
+          "hex": "#515151"
+        },
+        {
+          "name": "Parchment White",
+          "hex": "#fef9ef"
+        },
+        {
+          "name": "Cream Canvas",
+          "hex": "#f5eee1"
+        }
+      ],
+      "fonts": [
+        "Ftbase",
+        "Financier Display",
+        "Fragment mono"
+      ],
+      "northStar": "organic science lab",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:12:10.227431"
+    },
+    {
+      "id": "736830b5-90b1-47b0-99dd-d79454a0d22a",
+      "url": "https://www.7shifts.com",
+      "siteName": "7shifts",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/23966029-5672-4da8-b250-687d0c475586.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/d7c74b9b-0fea-4f0a-8743-178aec7fa4e6.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Blueprint Blue",
+          "hex": "#4570ff"
+        },
+        {
+          "name": "Ink Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Divider Gray",
+          "hex": "#e5e7eb"
+        },
+        {
+          "name": "Whisper White",
+          "hex": "#f1f0ec"
+        },
+        {
+          "name": "Muted Text Gray",
+          "hex": "#6e6d6c"
+        }
+      ],
+      "fonts": [
+        "Regular",
+        "Medium",
+        "Nanum Pen Script",
+        "Bold"
+      ],
+      "northStar": "Crisp Utility, Rounded Edges",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:44:25.717605"
+    },
+    {
+      "id": "2eab438d-32cd-40c2-b160-1e4127dac569",
+      "url": "https://gleap.io",
+      "siteName": "Gleap",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/0633b863-7d45-499f-a3bf-17ae78e14632.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/8707eb71-2906-466b-9bd8-940d7e8720d7.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/670359b9-955f-439a-af1a-32110448852e.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/b8bc9a99-3043-45d7-9167-79d8902dc27e.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/4f756417-a4e0-419e-9825-09a552e96e2c.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/0b6eac2f-f9d4-4a66-8571-99d839ac0f8e.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 19434,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Cloud Canvas",
+          "hex": "#f5f2f0"
+        },
+        {
+          "name": "Porcelain Surface",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Graphite Text",
+          "hex": "#333333"
+        },
+        {
+          "name": "Ink Text",
+          "hex": "#000000"
+        },
+        {
+          "name": "Platinum Border",
+          "hex": "#d6d6d6"
+        },
+        {
+          "name": "Silver Detail",
+          "hex": "#bcbcbc"
+        }
+      ],
+      "fonts": [
+        "PP Editorial New",
+        "Switzer",
+        "Arial",
+        "system-ui"
+      ],
+      "northStar": "Crisp canvas, magenta highlight",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 02:31:49.866593"
+    },
+    {
+      "id": "0ab4c544-6147-4998-8365-3a0f6191e54f",
+      "url": "https://www.workable.com",
+      "siteName": "Workable",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/e6b9a926-0b7d-4adc-8ec7-e4e695a608fa.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/d052ac5b-cb6c-4387-8a6b-362465f60800.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas Porcelain",
+          "hex": "#fff5ee"
+        },
+        {
+          "name": "White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Midnight Ink",
+          "hex": "#0f161e"
+        },
+        {
+          "name": "Harbor Mist",
+          "hex": "#333942"
+        },
+        {
+          "name": "Forest Canopy",
+          "hex": "#012620"
+        },
+        {
+          "name": "Deep Teal",
+          "hex": "#004038"
+        }
+      ],
+      "fonts": [
+        "Proxima Nova",
+        "Source Serif Pro"
+      ],
+      "northStar": "Clean canvas, purposeful accents",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:53:19.366382"
+    },
+    {
+      "id": "a4314209-7688-4750-842a-432c3918a21b",
+      "url": "https://www.evergreen.so",
+      "siteName": "Evergreen",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/18aebcea-16d4-4ee7-982c-7075d6b4829f.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/9145cac2-07b1-4288-a7a6-43178c6c7a8c.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/43a72b67-7e7d-4f24-8d20-2e4a02cf5cf0.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/7c76b787-78b5-4bc4-9ab8-d87ee259b526.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/df269a71-6e14-43e5-94d3-b7989714b822.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/1914ac7a-50d3-4fa9-a4e2-0bae93b543a4.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/ffe2caf3-e3f7-48d8-a1b9-760f39d71380.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 17840,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Rich Earth",
+          "hex": "#000000"
+        },
+        {
+          "name": "Parchment",
+          "hex": "#edede2"
+        },
+        {
+          "name": "Cloud Whisper",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Forest Fern",
+          "hex": "#beedc0"
+        },
+        {
+          "name": "Deep Slate",
+          "hex": "#333333"
+        },
+        {
+          "name": "Soft Vanilla",
+          "hex": "#fffff3"
+        }
+      ],
+      "fonts": [
+        "Arial",
+        "ivypresto-headline",
+        "Rubik"
+      ],
+      "northStar": "Warm parchment, dark ink, verdant accent",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 13:52:09.827033"
+    },
+    {
+      "id": "2ffd50d4-93b7-4acf-9bc2-e86e61b63f27",
+      "url": "https://geniestudio.app",
+      "siteName": "Geniestudio",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/3a64276a-f638-475c-bfae-b0e96bdfdb9a.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/2d127571-0fab-4066-852c-ecf376cbf6b3.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/2ef444e6-5562-42ed-86ac-36c6392f464c.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/14e8248c-bb5c-485f-a9fc-0c0e0681da62.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/df9753db-c5a4-4b46-899e-d01a5d99126c.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/fb1502f2-b7c4-4cc9-bb7a-a721073d9b01.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/5c90f47e-53bb-4b9b-93cd-f593480c5fa6.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 21133,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#181d27"
+        },
+        {
+          "name": "Arctic Mist",
+          "hex": "#fafdff"
+        },
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Obsidian",
+          "hex": "#0a0d12"
+        },
+        {
+          "name": "Silver Pine",
+          "hex": "#535862"
+        },
+        {
+          "name": "Ash Gray",
+          "hex": "#93979f"
+        }
+      ],
+      "fonts": [
+        "Geist",
+        "Aeonik"
+      ],
+      "northStar": "White canvas, friendly illustrations.",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 22:40:42.087093"
+    },
+    {
+      "id": "04109c48-f591-4110-9739-622243d4ecc2",
+      "url": "https://letters.app",
+      "siteName": "Letters",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/990e2129-36f0-4ec9-adbb-20ed3b88c4c2.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/14e2a385-5bcb-4c0b-8ab5-7c0182c476c4.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/f2a3db41-9cea-4cc5-84fc-e4d87b4be729.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/9916315a-05b5-40e7-b650-662224bdf6cd.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/19f5c5f2-ac76-4624-a830-d4cafbb32dde.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/91d91ccf-ff2c-4dd1-b589-4b1eb48de528.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/2632701f-7273-4819-b3cc-94a7db1493de.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 22833,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Cloud Canvas",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Ghost Gray",
+          "hex": "#f5f5f5"
+        },
+        {
+          "name": "Deep Sea Blue",
+          "hex": "#2597d0"
+        },
+        {
+          "name": "Sky Wash",
+          "hex": "#c0eaff"
+        },
+        {
+          "name": "Coal Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Charcoal Action",
+          "hex": "#070709"
+        }
+      ],
+      "fonts": [
+        "sans-serif",
+        "Open Runde",
+        "Inter",
+        "The Doctor FreeVersion",
+        "Open Runde Semibold",
+        "Open Runde Medium",
+        "Open Runde Regular",
+        "Open Runde Bold"
+      ],
+      "northStar": "Blue Sky Productivity",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 23:00:05.539842"
+    },
+    {
+      "id": "d577e44e-bc63-4cbe-b759-25262d089b95",
+      "url": "https://www.healthytogether.co",
+      "siteName": "Healthy Together",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/ed22395e-0488-443b-b9bd-c8c1eee780d9.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/cccf7d61-a92b-40e8-b3ed-fa705f64168c.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "both",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#101722"
+        },
+        {
+          "name": "Canvas Ice",
+          "hex": "#f9f0ff"
+        },
+        {
+          "name": "Plasma Violet",
+          "hex": "#4541fe",
+          "gradient": "linear-gradient(270deg, rgb(69, 65, 254) 40%, rgb(254, 15, 131))"
+        },
+        {
+          "name": "Soft Lavender",
+          "hex": "#d9c6ff"
+        },
+        {
+          "name": "Pale Stone",
+          "hex": "#6c6c7a"
+        },
+        {
+          "name": "Snow White",
+          "hex": "#ffffff"
+        }
+      ],
+      "fonts": [
+        "Inter"
+      ],
+      "northStar": "midnight gradient horizon",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 01:22:01.725949"
+    },
+    {
+      "id": "6734fe92-6a02-45d5-8d72-0c55b37ace82",
+      "url": "https://withaqua.com",
+      "siteName": "Aqua Voice",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/5842de25-0665-43be-82dc-98282413967e.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/8089ee83-8321-4478-a534-c8dae5513960.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/d8ac9439-0500-419c-8a67-c883a6e73215.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/8ef539cf-41e7-444c-9159-f83dbeba231a.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/4cc30faf-657e-4338-bb98-8d2da9565cc5.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/80842e71-a0c9-493e-b747-9b62fe06ab42.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/ff59fede-acc6-4f6b-ad26-da40a03d3038.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 22250,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#fafbfc"
+        },
+        {
+          "name": "Cloud Gray",
+          "hex": "#f3f7fa"
+        },
+        {
+          "name": "Pale Ash",
+          "hex": "#f2f6fa"
+        },
+        {
+          "name": "Porcelain Whisper",
+          "hex": "#efefef"
+        },
+        {
+          "name": "Dark Charcoal",
+          "hex": "#292c3d"
+        },
+        {
+          "name": "Soft Lead",
+          "hex": "#3e4150"
+        }
+      ],
+      "fonts": [
+        "sans-serif",
+        "PP Neue Montreal",
+        "PP Neue Montreal",
+        "Inter",
+        "Geist Mono",
+        "IBM Plex Mono"
+      ],
+      "northStar": "Frosted Light Canvas",
+      "managementSignals": [],
+      "createdAt": "2026-05-10 23:41:36.421451"
+    },
+    {
+      "id": "47c9e353-bed3-4d6c-8316-63a2db5cc377",
+      "url": "https://craftwork.design",
+      "siteName": "Craftwork",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/6285477d-cb6c-496a-bbdc-141c2ed64622.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/b83ce066-dbfd-480f-a9f0-62f7dc20bd59.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/b1362b14-84a7-4189-ad82-339c22ce0925.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/33436ee3-1296-463b-9127-4d1d1dbdfa68.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/09f88a4b-d224-45c3-a179-d42116519aa0.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/62ecea31-d221-4847-9880-c9b2ad275276.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 23320,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Pitch Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Cloud White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Slate Gray",
+          "hex": "#606060"
+        },
+        {
+          "name": "Ash Gray",
+          "hex": "#999999"
+        },
+        {
+          "name": "Whisper Gray",
+          "hex": "#f9f9f9"
+        },
+        {
+          "name": "Smoke Gray",
+          "hex": "#f2f2f2"
+        }
+      ],
+      "fonts": [
+        "Euclid Circular A"
+      ],
+      "northStar": "Crisp paper on a clean desk. A light, airy workspace where bold black text and electric lime accents pop against pristine whites and soft grays, creating an impression of organized creativity.",
+      "managementSignals": [],
+      "createdAt": "2026-02-23 19:00:10"
+    },
+    {
+      "id": "72da35d5-1cfd-41a3-94f6-cb6b8c07a670",
+      "url": "https://cluely.com",
+      "siteName": "Cluely",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/31b5c550-5d96-4ce5-a3c8-2fd859c1cea1.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/35b60502-9342-4756-bdc5-174c5c062527.jpg",
+      "iconUrl": "https://images.refero.design/styles/refero.design/image/17fa7bf3-76e7-4287-b39c-ede035802c01.png",
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/633f6971-a52b-453d-804c-237d560e4300.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/3aa8737a-3fd8-484c-8f65-73f8a64f4d22.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/6921ed05-a10b-49ef-aed8-f22b398919f7.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/230ada8e-83cc-4494-82ad-60b19563b2fb.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 16733,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Subtle Gray",
+          "hex": "#e4e4e7"
+        },
+        {
+          "name": "Surface Text",
+          "hex": "#000000"
+        },
+        {
+          "name": "Paragraph Gray",
+          "hex": "#2e3038"
+        },
+        {
+          "name": "Muted Text",
+          "hex": "#777a88"
+        },
+        {
+          "name": "Sky Canvas",
+          "hex": "#f3f8ff"
+        }
+      ],
+      "fonts": [
+        "Geist",
+        "EB Garamond",
+        "ui-monospace"
+      ],
+      "northStar": "Radiant cloud-native intelligence: ethereal gradients, frosted glass, and digital blue accents against a bright canvas.",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 22:57:00.035201"
+    },
+    {
+      "id": "7829a500-242b-4932-b42d-7ce40c254101",
+      "url": "https://heylow.world",
+      "siteName": "Hey Low",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/4befa0a5-c8c9-494f-b489-2f92b355907a.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/bce80a84-7ad6-46c6-8120-d8eb6b22b807.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Forest Green",
+          "hex": "#003329"
+        },
+        {
+          "name": "Green Flash",
+          "hex": "#e6ffa3"
+        },
+        {
+          "name": "Ash Gray",
+          "hex": "#e5e7eb"
+        },
+        {
+          "name": "Paper White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Charcoal Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Moss Gray",
+          "hex": "#52756e"
+        }
+      ],
+      "fonts": [
+        "UntitledSans",
+        "BoogyBrutPoster",
+        "sans-serif"
+      ],
+      "northStar": "Eco-minimalist botanical blueprint: Lush green accents on a cream canvas.",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 02:38:10.606473"
+    },
+    {
+      "id": "8b91f4c9-74e5-4925-90a3-3dd31fd5725e",
+      "url": "https://saybriefly.com",
+      "siteName": "Say Briefly",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/8f4126f7-517f-4e61-82d5-59ae0cf1c3a6.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/c351e701-b007-4f9f-bda5-1d2b126e57ab.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/810fda55-aa95-4138-b4b8-215228c62e72.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/99d95bbd-d895-41dd-a6dd-3e83ce3552c1.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/a7059b6f-eb40-4185-aa75-1fd5ea1f1648.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/e25d8b90-7d02-4392-a4fd-734d0e5923e0.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 19933,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#fcfaf5"
+        },
+        {
+          "name": "Deep Olive",
+          "hex": "#1a3300"
+        },
+        {
+          "name": "Highlight Yellow",
+          "hex": "#ffe95c"
+        },
+        {
+          "name": "Charcoal Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Soft Teal",
+          "hex": "#a8e5e5"
+        },
+        {
+          "name": "Muted Sage",
+          "hex": "#d5f5c2"
+        }
+      ],
+      "fonts": [
+        "Bricolage Grotesque",
+        "Inter",
+        "Roboto Mono"
+      ],
+      "northStar": "Olive Canvas, Highlighted Briefs, Warm Accents",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 18:35:31.393473"
+    },
+    {
+      "id": "376baf20-9ace-405d-bf4a-086016f2b1e3",
+      "url": "https://www.userinterviews.com",
+      "siteName": "User Interviews",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/b0dec40d-bcb1-4cd6-ad6b-eafa058b1214.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/08bc7cb4-8890-4f97-a6b6-a2342123515d.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas Ice",
+          "hex": "#f2f8f7"
+        },
+        {
+          "name": "Polar White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Inkwell Black",
+          "hex": "#000000"
+        },
+        {
+          "name": "Slate Gray",
+          "hex": "#283338"
+        },
+        {
+          "name": "Cloud Frost",
+          "hex": "#e4f0f1"
+        },
+        {
+          "name": "Misty Teal",
+          "hex": "#cae1e2"
+        }
+      ],
+      "fonts": [
+        "sofia-pro",
+        "p22-mackinac-pro",
+        "P 22 Mackinac italic",
+        "IBM Plex Mono"
+      ],
+      "northStar": "Teal-accented architectural blueprint on pristine parchment.",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 00:56:37.047056"
+    },
+    {
+      "id": "63d44e1f-e3e9-40dc-bba4-1aa6efc4db87",
+      "url": "https://opencollective.com",
+      "siteName": "Raise",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/1bf2c4c9-7cd6-4dff-a0af-11b720d2e80c.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/289280a2-58e4-433d-822c-d176a826d05a.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": "https://images.refero.design/styles/refero.design/video/34ca383f-bbd7-44a0-8dfc-08e47e0d8175.mp4",
+      "previewVideoPosterUrl": "https://images.refero.design/styles/refero.design/image/0b81acd0-57cc-4dd5-a7a9-c9e5f3103afe.jpg",
+      "previewVideoWidth": 1200,
+      "previewVideoHeight": 750,
+      "previewVideoDetailUrl": "https://images.refero.design/styles/refero.design/video/aaac13e8-59ba-4b64-a407-6ce1e3122885.mp4",
+      "previewVideoDetailPosterUrl": "https://images.refero.design/styles/refero.design/image/a23bd1aa-f68e-4399-a069-b60517fe3a67.jpg",
+      "previewVideoDetailWidth": 1600,
+      "previewVideoDetailHeight": 1000,
+      "previewVideoDurationMs": 6483,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Canvas White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Navy Ink",
+          "hex": "#0f172b"
+        },
+        {
+          "name": "Ocean Blue",
+          "hex": "#0c2764"
+        },
+        {
+          "name": "Slate Text",
+          "hex": "#1d293d"
+        },
+        {
+          "name": "Light Slate",
+          "hex": "#62748e"
+        },
+        {
+          "name": "Medium Slate",
+          "hex": "#314158"
+        }
+      ],
+      "fonts": [
+        "Inter"
+      ],
+      "northStar": "Architectural Blueprint Clarity",
+      "managementSignals": [],
+      "createdAt": "2026-05-07 18:05:28.416365"
+    },
+    {
+      "id": "f73ce3e0-4452-4b21-b36f-6fde27de2cd6",
+      "url": "https://vibrants.com",
+      "siteName": "Vibrants",
+      "screenshotUrl": "https://images.refero.design/styles/refero.design/image/b2257a6e-fa75-43fb-9566-33eb0b1bb9d7.jpg",
+      "thumbnailUrl": "https://images.refero.design/styles/refero.design/image/67583bba-5df1-49a9-b242-547dfac4d080.jpg",
+      "iconUrl": null,
+      "previewVideoUrl": null,
+      "previewVideoPosterUrl": null,
+      "previewVideoWidth": null,
+      "previewVideoHeight": null,
+      "previewVideoDetailUrl": null,
+      "previewVideoDetailPosterUrl": null,
+      "previewVideoDetailWidth": null,
+      "previewVideoDetailHeight": null,
+      "previewVideoDurationMs": null,
+      "colorScheme": "light",
+      "colors": [
+        {
+          "name": "Midnight Ink",
+          "hex": "#021422"
+        },
+        {
+          "name": "Cloud White",
+          "hex": "#ffffff"
+        },
+        {
+          "name": "Fog Gray",
+          "hex": "#e6e8e9"
+        },
+        {
+          "name": "Canvas Ice",
+          "hex": "#f2f6ff"
+        },
+        {
+          "name": "Smoke Stone",
+          "hex": "#ccd2d7"
+        },
+        {
+          "name": "Forest Green",
+          "hex": "#00852e"
+        }
+      ],
+      "fonts": [
+        "Montserrat",
+        "new-kansas",
+        "Inter",
+        "rift-soft",
+        "Arial"
+      ],
+      "northStar": "white canvas, vibrant accents",
+      "managementSignals": [],
+      "createdAt": "2026-04-30 03:47:40.988352"
+    }
+  ]
+}
