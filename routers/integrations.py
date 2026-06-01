@@ -1025,3 +1025,72 @@ def fetch_bitbucket_files_direct(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ============================================================
+# Stored-credential Bitbucket endpoints
+# Credentials come from the user's My Profile connection — no
+# email / token needed in the request.
+# ============================================================
+
+def _get_stored_bitbucket_service(user_id: str) -> "BitbucketService":
+    """Load stored Bitbucket credentials from DB and return a ready BitbucketService."""
+    creds = get_user_bitbucket_credentials(user_id)
+    if not creds or not creds.get("bitbucket_app_password"):
+        raise HTTPException(
+            status_code=404,
+            detail="Bitbucket not connected. Please link your account in My Profile → Integrations → Bitbucket.",
+        )
+    return BitbucketService(creds["bitbucket_email"], creds["bitbucket_app_password"])
+
+
+@router.get("/bitbucket/repositories-stored/{workspace}")
+def list_bitbucket_repositories_stored(
+    workspace: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List repositories using credentials stored in DB (connected via My Profile)."""
+    try:
+        svc = _get_stored_bitbucket_service(current_user["id"])
+        repos = svc.get_repositories(workspace)
+        return {"repositories": repos}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/branches-stored/{workspace}/{repo_slug}")
+def list_bitbucket_branches_stored(
+    workspace: str,
+    repo_slug: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """List branches using credentials stored in DB."""
+    try:
+        svc = _get_stored_bitbucket_service(current_user["id"])
+        branches = svc.get_branches(workspace, repo_slug)
+        return {"branches": branches}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/bitbucket/fetch-files-stored/{workspace}/{repo_slug}")
+def fetch_bitbucket_files_stored(
+    workspace: str,
+    repo_slug: str,
+    ref: str = "main",
+    path: str = "",
+    current_user: dict = Depends(get_current_user),
+):
+    """Fetch Terraform files using credentials stored in DB."""
+    try:
+        svc = _get_stored_bitbucket_service(current_user["id"])
+        files = svc.get_files_bulk(workspace, repo_slug, ref=ref, path=path, extensions=[".tf", ".tfvars", ".hcl"])
+        return {"files": files, "count": len(files)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+

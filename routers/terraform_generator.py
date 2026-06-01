@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from auth import verify_azure_token
 from environment import chat_completion
 from services.checkov_service import run_checkov, format_failures_for_prompt
+from db_helper import get_user_bitbucket_credentials, create_or_update_user
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +87,23 @@ class BitbucketPushRequest(BaseModel):
     branch: Optional[str] = "main"
     commit_message: Optional[str] = "feat: add Terraform infrastructure code"
     folder_prefix: Optional[str] = ""
+
+class BitbucketStoredPushRequest(BaseModel):
+    files: dict[str, str]           # filename -> content
+    workspace: str                  # Bitbucket workspace slug
+    repo_slug: str                  # Repository slug
+    branch: Optional[str] = "main"
+    commit_message: Optional[str] = "feat: add Terraform infrastructure code"
+    folder_prefix: Optional[str] = ""
+
+def _get_current_user_tf(token_data: dict = Depends(verify_azure_token)) -> dict:
+    """Resolve the DB user from the Azure token (same logic as integrations router)."""
+    user_id = token_data.get("oid") or token_data.get("sub")
+    email = token_data.get("preferred_username") or token_data.get("email") or token_data.get("upn")
+    name = token_data.get("name")
+    if not user_id or not email:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return create_or_update_user(user_id, email, name)
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -1067,3 +1085,30 @@ Return every file (changed and unchanged) using this exact format:
             else f"{len(final_failed)} check(s) could not be auto-fixed. Manual review required."
         ),
     }
+
+
+@router.post("/push-bitbucket-stored")
+async def push_to_bitbucket_stored(
+    req: BitbucketStoredPushRequest,
+    current_user: dict = Depends(_get_current_user_tf),
+):
+    """Push Terraform files to Bitbucket using credentials stored in My Profile.
+    The user only needs to provide workspace, repo_slug, branch — no email/token."""
+    creds = get_user_bitbucket_credentials(current_user["id"])
+    if not creds or not creds.get("bitbucket_app_password"):
+        raise HTTPException(
+            status_code=404,
+            detail="Bitbucket not connected. Please link your account in My Profile → Integrations → Bitbucket.",
+        )
+    full_req = BitbucketPushRequest(
+        files=req.files,
+        email=creds["bitbucket_email"],
+        api_token=creds["bitbucket_app_password"],
+        workspace=req.workspace,
+        repo_slug=req.repo_slug,
+        branch=req.branch,
+        commit_message=req.commit_message,
+        folder_prefix=req.folder_prefix,
+    )
+    token_data = {"preferred_username": current_user.get("email", "")}
+    return await push_to_bitbucket(full_req, token_data)
