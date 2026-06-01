@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from db_helper import get_design_session, get_user_atlassian_credentials, update_design_session
+from db_helper import get_design_session, get_user_atlassian_credentials, update_design_session, track_event
 from environment import S3_BUCKET_NAME
 
 # Reuse the projects-router auth dependency (DB user row with key "id")
@@ -424,6 +424,20 @@ def sad_generate(
     }
     result = _invoke_sad_lambda(payload)
     update_design_session(session_id=body.session_id, stage="SAD_REFINING", bump_activity=True)
+    try:
+        track_event(
+            current_user["id"],
+            module="architecture",
+            event_type="sad_generated",
+            project_id=body.project_id or session.get("project_id"),
+            metadata={
+                "session_id": body.session_id,
+                "brd_id": body.brd_id,
+                "slots_present": list((slots_state.get("slots") or {}).keys()),
+            },
+        )
+    except Exception as _track_err:
+        logger.warning(f"track_event failed (non-fatal): {_track_err}")
     return result
 
 

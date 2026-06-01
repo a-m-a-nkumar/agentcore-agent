@@ -385,6 +385,7 @@ def generate_test_scenarios_with_bedrock(brd_content: str, page_title: str, user
         temperature=0,
         max_tokens=16000,
         user_id=user_id,
+        token_source="test_scenarios_generate",
     )
     content = _strip_trailing_notes(content)
     logger.info(f"Bedrock response received, length: {len(content)} characters")
@@ -500,6 +501,23 @@ async def generate_test_scenarios(
             page_data['title'],
             user_id=current_user.get("id"),
         )
+        for _module, _event in (
+            ("confluence", "test_scenarios_generated_confluence"),
+            ("testing", "test_scenarios_generated"),
+        ):
+            try:
+                track_event(
+                    current_user["id"],
+                    module=_module,
+                    event_type=_event,
+                    project_id=request.project_id,
+                    metadata={
+                        "confluence_page_id": request.confluence_page_id,
+                        "page_title": page_data["title"],
+                    },
+                )
+            except Exception as _track_err:
+                logger.warning(f"track_event failed (non-fatal): {_track_err}")
         return {
             "page_title": page_data['title'],
             "content": markdown_content
@@ -562,20 +580,27 @@ async def generate_test_scenarios_stream(
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
         if stream_succeeded:
-            try:
-                track_event(
-                    current_user["id"],
-                    module="confluence",
-                    event_type="test_scenarios_generated_confluence",
-                    project_id=request.project_id,
-                    metadata={
-                        "confluence_page_id": request.confluence_page_id,
-                        "page_title": page_data["title"],
-                        "duration_ms": int((time.time() - t0) * 1000),
-                    },
-                )
-            except Exception as _track_err:
-                logger.warning(f"track_event failed (non-fatal): {_track_err}")
+            # Dual-write: the action originates in the Confluence module
+            # (existing event) AND counts as Testing-module activity (the
+            # AI prompt that drives Gherkin generation downstream).
+            for _module, _event in (
+                ("confluence", "test_scenarios_generated_confluence"),
+                ("testing", "test_scenarios_generated"),
+            ):
+                try:
+                    track_event(
+                        current_user["id"],
+                        module=_module,
+                        event_type=_event,
+                        project_id=request.project_id,
+                        metadata={
+                            "confluence_page_id": request.confluence_page_id,
+                            "page_title": page_data["title"],
+                            "duration_ms": int((time.time() - t0) * 1000),
+                        },
+                    )
+                except Exception as _track_err:
+                    logger.warning(f"track_event failed (non-fatal): {_track_err}")
 
     return StreamingResponse(
         stream_generator(),
@@ -660,6 +685,7 @@ RULES:
         temperature=0.1,
         max_tokens=_EXTRACTION_MAX_TOKENS,
         user_id=user_id,
+        token_source="test_scenarios_extract",
     )
     logger.info(f"Bedrock extraction response length: {len(content_text)} chars")
 
@@ -734,6 +760,20 @@ async def parse_scenarios_from_confluence(
             page_data['title'],
             user_id=current_user.get("id"),
         )
+        try:
+            track_event(
+                current_user["id"],
+                module="testing",
+                event_type="scenarios_parsed",
+                project_id=request.project_id,
+                metadata={
+                    "confluence_page_id": request.confluence_page_id,
+                    "page_title": page_data["title"],
+                    "scenario_count": len(result.get("scenarios", []) or []),
+                },
+            )
+        except Exception as _track_err:
+            logger.warning(f"track_event failed (non-fatal): {_track_err}")
         return {
             "page_title": page_data['title'],
             "scenarios": result.get("scenarios", []),

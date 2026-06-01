@@ -26,6 +26,7 @@ from db_helper import (
     get_design_session,
     update_design_session,
     update_diagram_slot,
+    track_event,
 )
 from services.confluence_service import ConfluenceService
 from services.s3_service import s3_put_object, get_s3_client
@@ -77,6 +78,7 @@ def _invoke_claude(
     model_id: str = XML_MODEL_ID,
     max_tokens: int = XML_MAX_TOKENS,
     user_id: Optional[str] = None,
+    token_source: str = "design_invoke_claude",
 ) -> str:
     """Call the environment LLM synchronously and return the full text response."""
     try:
@@ -87,6 +89,7 @@ def _invoke_claude(
             max_tokens=max_tokens,
             system_prompt=system_prompt,
             user_id=user_id,
+            token_source=token_source,
         )
     except Exception as e:
         logger.error(f"[DESIGN] LLM invoke error: {e}")
@@ -1918,13 +1921,26 @@ async def generate_lucid_prompt(
         user_id=current_user.get("id") or current_user.get("id"),
     )
     logger.info(f"[DESIGN] Lucid {request.diagram_type} prompt generated ({len(prompt)} chars)")
+    try:
+        track_event(
+            current_user["id"],
+            module="architecture",
+            event_type="lucid_prompt_generated",
+            metadata={
+                "diagram_type": request.diagram_type,
+                "prompt_chars": len(prompt),
+                "page_count": len(request.page_contents),
+            },
+        )
+    except Exception as _track_err:
+        logger.warning(f"track_event failed (non-fatal): {_track_err}")
     return GenerateLucidPromptResponse(prompt=prompt)
 
 
 @router.post("/generate-lucid-prompt-stream")
 async def generate_lucid_prompt_stream(
     request: GenerateLucidPromptRequest,
-    _current_user: dict = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """SSE-streaming variant of /generate-lucid-prompt for progressive UI."""
     if not request.page_contents:
@@ -1939,15 +1955,32 @@ async def generate_lucid_prompt_stream(
         "No preamble, no explanation."
     )
     system_prompt = _get_lucid_system_prompt(request.diagram_type)
+    user_id = current_user.get("id")
 
     def stream():
+        stream_ok = False
         try:
             yield from _invoke_claude_stream(
                 system_prompt, user_message, LUCID_PROMPT_MODEL_ID, LUCID_PROMPT_MAX_TOKENS
             )
+            stream_ok = True
         except Exception as e:
             logger.error(f"[DESIGN] Lucid prompt stream error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        if stream_ok and user_id:
+            try:
+                track_event(
+                    user_id,
+                    module="architecture",
+                    event_type="lucid_prompt_generated",
+                    metadata={
+                        "diagram_type": request.diagram_type,
+                        "page_count": len(request.page_contents),
+                        "stream": True,
+                    },
+                )
+            except Exception as _track_err:
+                logger.warning(f"track_event failed (non-fatal): {_track_err}")
 
     return StreamingResponse(
         stream(),

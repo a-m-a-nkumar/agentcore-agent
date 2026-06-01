@@ -50,7 +50,37 @@ class ConfluenceService:
         # Populated lazily; one entry per space encountered per ConfluenceService
         # instance, so a sync touches the v2 /spaces lookup at most once.
         self._space_id_cache: Dict[str, str] = {}
-    
+
+    def _get_with_retry(self, url: str, **kwargs):
+        """GET with one auto-retry on transient TLS / connection errors.
+
+        Atlassian's edge occasionally drops a TLS handshake mid-flight
+        (SSLEOFError "UNEXPECTED_EOF_WHILE_READING") or resets the
+        connection — particularly after bursts of parallel requests. A
+        single retry after ~400ms is almost always sufficient; if the
+        second attempt also fails, the network is genuinely degraded and
+        we let the caller see the error. We deliberately do NOT retry
+        non-network errors (4xx/5xx response codes) — those are handled
+        by raise_for_status() in the call site.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in (1, 2):
+            try:
+                return requests.get(url, **kwargs)
+            except (requests.exceptions.SSLError,
+                    requests.exceptions.ConnectionError) as e:
+                last_exc = e
+                if attempt == 1:
+                    logger.warning(
+                        f"[Confluence] transient network error on {url} "
+                        f"(attempt {attempt}): {e}. Retrying once."
+                    )
+                    time.sleep(0.4)
+                    continue
+                raise
+        # Unreachable, but mypy-quiet.
+        raise last_exc if last_exc else RuntimeError("retry loop exited unexpectedly")
+
     def test_connection(self) -> bool:
         """Test if credentials are valid by fetching current user info"""
         try:
@@ -255,7 +285,11 @@ class ConfluenceService:
             return self._space_id_cache[space_key]
 
         url = f"{self.v2_base}/spaces"
-        response = requests.get(
+        # _get_with_retry survives Atlassian's occasional TLS handshake drops
+        # that surface as SSL: UNEXPECTED_EOF_WHILE_READING. Without it, a
+        # single edge flake would 500 the entire /confluence/pages call and
+        # the user would see an empty page-picker on the BRD comparison flow.
+        response = self._get_with_retry(
             url,
             params={"keys": space_key, "limit": 1},
             headers={"Accept": "application/json"},
@@ -465,7 +499,10 @@ class ConfluenceService:
         while next_url:
             batch_num += 1
             list_calls += 1
-            resp = requests.get(
+            # _get_with_retry survives the occasional Atlassian TLS-edge drop
+            # mid-pagination. Without it a flake on batch N abandons every
+            # batch < N already fetched.
+            resp = self._get_with_retry(
                 next_url,
                 headers={"Accept": "application/json"},
                 auth=self.auth, timeout=30,
@@ -509,7 +546,7 @@ class ConfluenceService:
             batch_num += 1
             list_calls += 1
             try:
-                resp = requests.get(
+                resp = self._get_with_retry(
                     next_url,
                     headers={"Accept": "application/json"},
                     auth=self.auth, timeout=30,

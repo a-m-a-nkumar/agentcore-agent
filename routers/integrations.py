@@ -506,7 +506,15 @@ def unlink_github_account(current_user: dict = Depends(get_current_user)):
 
 class LinkBitbucketRequest(BaseModel):
     email: str = Field(..., min_length=1, description="Atlassian login email")
-    app_password: str = Field(..., min_length=1, description="Bitbucket App Password")
+    # Naming kept as `app_password` for back-compat with stored data + legacy
+    # callers. Atlassian's API tokens (with scopes) are now the supported
+    # credential — App Passwords are deprecated — and they use the exact same
+    # HTTP Basic Auth flow, so no change is needed beyond field labelling.
+    app_password: str = Field(
+        ...,
+        min_length=1,
+        description="Atlassian API token with Bitbucket scopes (read:user / read:workspace / read:repository / write:repository / write:pullrequest). Legacy App Passwords still work but are being retired.",
+    )
 
 
 @router.post("/bitbucket/link")
@@ -514,28 +522,33 @@ def link_bitbucket_account(
     req: LinkBitbucketRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Validate and persist the user's Bitbucket credentials (App Password KMS-encrypted)."""
-    email = req.email.strip()
-    app_password = req.app_password.strip()
-    if not email or not app_password:
-        raise HTTPException(status_code=400, detail="Email and App Password are required")
+    """Validate and persist the user's Bitbucket credentials (KMS-encrypted).
 
-    svc = BitbucketService(email, app_password)
+    Atlassian deprecated Bitbucket App Passwords in favour of scoped API tokens.
+    Both work with HTTP Basic Auth so the validation path is unchanged; only
+    the credential the user pastes has changed.
+    """
+    email = req.email.strip()
+    api_token = req.app_password.strip()
+    if not email or not api_token:
+        raise HTTPException(status_code=400, detail="Email and API token are required")
+
+    svc = BitbucketService(email, api_token)
     ok, error_msg = svc.test_connection()
     if not ok:
         raise HTTPException(
             status_code=400,
-            detail=error_msg or "Invalid Bitbucket credentials. Please check your email and App Password.",
+            detail=error_msg or "Invalid Bitbucket credentials. Please check your email and API token (scopes: read:user, read:workspace, read:repository, write:repository, write:pullrequest).",
         )
 
-    update_user_bitbucket_credentials(current_user["id"], email, app_password)
+    update_user_bitbucket_credentials(current_user["id"], email, api_token)
     logger.info(f"[BITBUCKET] Linked for user {current_user['id']}")
     return {"status": "success", "message": "Bitbucket account linked"}
 
 
 @router.get("/bitbucket/status")
 def get_bitbucket_status(current_user: dict = Depends(get_current_user)):
-    """Return whether the user has stored Bitbucket credentials. App Password is never returned."""
+    """Return whether the user has stored Bitbucket credentials. The token is never returned."""
     creds = get_user_bitbucket_credentials(current_user["id"])
     if not creds or not creds.get("bitbucket_app_password"):
         return {"linked": False}

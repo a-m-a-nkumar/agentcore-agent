@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from typing import Optional
 from auth import verify_azure_token
 from environment import chat_completion, chat_completion_with_tools
+from db_helper import track_event
 
 logger = logging.getLogger(__name__)
 
@@ -1288,7 +1289,13 @@ CRITICAL JSON RULES:
 
     try:
         messages = [{"role": "user", "content": prompt}]
-        text = chat_completion(messages=messages, temperature=0, max_tokens=1000, user_id=current_user.get("oid") or current_user.get("sub")).strip()
+        text = chat_completion(
+            messages=messages,
+            temperature=0,
+            max_tokens=1000,
+            user_id=current_user.get("oid") or current_user.get("sub"),
+            token_source="harness_ai_analyze_pipeline",
+        ).strip()
 
         # Strip markdown fences if present (```json ... ``` or ``` ... ```)
         if text.startswith("```"):
@@ -1389,7 +1396,13 @@ Return ONLY the complete YAML. No explanation, no markdown fences, no comments."
 
     try:
         messages = [{"role": "user", "content": prompt}]
-        modified = chat_completion(messages=messages, temperature=0, max_tokens=8000, user_id=current_user.get("oid") or current_user.get("sub")).strip()
+        modified = chat_completion(
+            messages=messages,
+            temperature=0,
+            max_tokens=8000,
+            user_id=current_user.get("oid") or current_user.get("sub"),
+            token_source="harness_ai_edit_pipeline",
+        ).strip()
 
         # Strip markdown fences if Claude added them
         if modified.startswith("```"):
@@ -1425,6 +1438,18 @@ Return ONLY the complete YAML. No explanation, no markdown fences, no comments."
             return "\n".join(result_lines)
 
         modified = fix_failure_strategies(modified)
+        try:
+            track_event(
+                current_user.get("oid") or current_user.get("sub"),
+                module="deployment",
+                event_type="harness_pipeline_ai_edited",
+                metadata={
+                    "instruction_length": len(req.instruction or ""),
+                    "yaml_chars": len(modified or ""),
+                },
+            )
+        except Exception as _track_err:
+            logger.warning(f"track_event failed (non-fatal): {_track_err}")
         return {"yaml": modified}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"AI edit failed: {str(e)}")
@@ -1466,7 +1491,13 @@ Keep it brief and actionable."""
         # Truncate large payloads to avoid token limits
         prompt_safe = prompt[:12000] if len(prompt) > 12000 else prompt
         messages = [{"role": "user", "content": prompt_safe}]
-        text = chat_completion(messages=messages, temperature=0, max_tokens=1000, user_id=current_user.get("oid") or current_user.get("sub"))
+        text = chat_completion(
+            messages=messages,
+            temperature=0,
+            max_tokens=1000,
+            user_id=current_user.get("oid") or current_user.get("sub"),
+            token_source="harness_ai_execution_summary",
+        )
         return {"summary": text.strip()}
     except Exception as e:
         import traceback
@@ -1687,6 +1718,7 @@ Rules:
                 temperature=0,
                 max_tokens=4000,
                 user_id=current_user.get("oid") or current_user.get("sub"),
+                token_source="harness_chat_with_tools",
             )
             msg = result["message"]
             finish_reason = result["finish_reason"]
@@ -1726,7 +1758,13 @@ Rules:
                 })
 
         # If we exhausted all iterations, return the last message
-        final = chat_completion(messages=messages, temperature=0, max_tokens=4000, user_id=current_user.get("oid") or current_user.get("sub"))
+        final = chat_completion(
+            messages=messages,
+            temperature=0,
+            max_tokens=4000,
+            user_id=current_user.get("oid") or current_user.get("sub"),
+            token_source="harness_chat_final",
+        )
         messages.append({"role": "assistant", "content": final})
         return {"answer": final.strip(), "tool_calls": tool_calls_log, "history": messages}
 

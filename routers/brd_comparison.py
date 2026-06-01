@@ -22,7 +22,7 @@ import uuid
 from html import unescape
 
 from auth import verify_azure_token
-from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
+from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project, track_event
 from services.confluence_service import ConfluenceService
 from services.lineage_service import record_lineage
 from utils.content_hashing import hash_text
@@ -199,10 +199,14 @@ def _extract_json(raw: str) -> dict:
 # ── Endpoints ────────────────────────────────────────────────────────────────
 
 @router.post("/compare", response_model=CompareResponse)
-async def compare_brd_with_code_summary(
+def compare_brd_with_code_summary(
     request: CompareRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    # `def` (not `async def`) — FastAPI dispatches sync handlers to a 40-thread
+    # threadpool so the 30-90s LLM call doesn't block the event loop. If this
+    # were `async def`, a single in-flight compare would freeze every other
+    # request on the same uvicorn worker until it returned.
     credentials = get_user_atlassian_credentials(current_user["id"])
     if not credentials or not credentials.get("atlassian_api_token"):
         raise HTTPException(status_code=400, detail="Atlassian account not linked.")
@@ -217,9 +221,16 @@ async def compare_brd_with_code_summary(
         api_token=credentials["atlassian_api_token"],
     )
 
+    # The two page fetches are independent — fan them out in parallel
+    # (~1-3s each → ~1-3s total instead of ~2-6s serial). ThreadPoolExecutor
+    # is fine here since requests.get releases the GIL on the socket read.
     try:
-        code_summary_page = confluence.get_page_content(request.code_summary_page_id)
-        brd_page = confluence.get_page_content(request.brd_page_id)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            cs_fut = pool.submit(confluence.get_page_content, request.code_summary_page_id)
+            brd_fut = pool.submit(confluence.get_page_content, request.brd_page_id)
+            code_summary_page = cs_fut.result()
+            brd_page = brd_fut.result()
     except Exception as e:
         logger.exception("Failed to fetch Confluence page(s)")
         raise HTTPException(status_code=502, detail=f"Confluence fetch error: {e}")
@@ -242,6 +253,7 @@ async def compare_brd_with_code_summary(
         temperature=0,
         max_tokens=8000,
         user_id=current_user["id"],
+        token_source="brd_compare",
     )
 
     try:
@@ -265,6 +277,21 @@ async def compare_brd_with_code_summary(
             )
         )
 
+    try:
+        track_event(
+            current_user["id"],
+            module="brd-sync",
+            event_type="brd_compared",
+            project_id=request.project_id if hasattr(request, "project_id") else None,
+            metadata={
+                "brd_page_id": brd_page["id"],
+                "code_summary_page_id": code_summary_page["id"],
+                "suggestion_count": len(suggestions),
+            },
+        )
+    except Exception as _track_err:
+        logger.warning(f"track_event failed (non-fatal): {_track_err}")
+
     return CompareResponse(
         brd_page_id=brd_page["id"],
         brd_title=brd_page["title"],
@@ -275,10 +302,12 @@ async def compare_brd_with_code_summary(
 
 
 @router.post("/apply", response_model=ApplyResponse)
-async def apply_approved_changes(
+def apply_approved_changes(
     request: ApplyRequest,
     current_user: dict = Depends(get_current_user),
 ):
+    # Sync def for the same reason as /compare — the LLM merge call inside
+    # would otherwise block the event loop for every concurrent request.
     if not request.approved_suggestions:
         raise HTTPException(status_code=400, detail="No approved suggestions to apply.")
 
@@ -318,6 +347,7 @@ async def apply_approved_changes(
         temperature=0,
         max_tokens=16000,
         user_id=current_user["id"],
+        token_source="brd_merge",
     )
 
     if not merged_markdown or not merged_markdown.strip():
@@ -374,6 +404,20 @@ async def apply_approved_changes(
             logger.warning(f"Background lineage write failed (non-fatal): {e}")
 
     threading.Thread(target=_write_lineage, daemon=True).start()
+
+    try:
+        track_event(
+            current_user["id"],
+            module="brd-sync",
+            event_type="brd_merged",
+            project_id=request.project_id,
+            metadata={
+                "brd_page_id": brd_page["id"],
+                "approved_count": len(request.approved_suggestions or []),
+            },
+        )
+    except Exception as _track_err:
+        logger.warning(f"track_event failed (non-fatal): {_track_err}")
 
     return ApplyResponse(
         page_id=updated["id"],
