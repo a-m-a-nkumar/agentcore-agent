@@ -2,12 +2,16 @@
 Sync Router - API endpoints for syncing Confluence and Jira data
 """
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
-from services.sync_service import sync_project
+
 from auth import verify_azure_token
-import logging
+from db_helper import create_or_update_user, get_project
+from db_helper_vector import get_sync_status_counts
+from services.sync_service import sync_project, get_sync_progress
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +27,6 @@ def get_current_user(token_data: dict = Depends(verify_azure_token)):
     Get current user from Azure AD token.
     Using def (not async def) so FastAPI runs this in a thread pool.
     """
-    from db_helper import create_or_update_user
-
     if token_data is None:
         raise HTTPException(status_code=401, detail="Authentication required")
 
@@ -91,10 +93,6 @@ def get_sync_status(
     Returns counts of synced pages/issues and whether a sync is currently in progress.
     """
     try:
-        from db_helper_vector import get_sync_status_counts
-        from db_helper import get_project
-        from services.sync_service import get_sync_progress
-
         # Check in-memory sync progress first (lightweight, no DB hit)
         progress = get_sync_progress(project_id)
         is_syncing = progress.get('is_syncing', False) if progress else False

@@ -12,6 +12,9 @@ import re
 import zipfile
 from typing import Optional
 
+import pypdf
+from docx import Document as DocxDocument
+
 import boto3
 import httpx
 from botocore.config import Config as BotoConfig
@@ -193,7 +196,6 @@ async def parse_document(file: UploadFile = File(...), _=Depends(verify_azure_to
 
     try:
         if filename.endswith(".pdf"):
-            import pypdf
             reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
             pages = []
             for page in reader.pages:
@@ -203,7 +205,6 @@ async def parse_document(file: UploadFile = File(...), _=Depends(verify_azure_to
             text = "\n\n".join(pages)
 
         elif filename.endswith(".docx"):
-            from docx import Document as DocxDocument
             doc = DocxDocument(io.BytesIO(raw_bytes))
             paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
             # Also extract text from tables

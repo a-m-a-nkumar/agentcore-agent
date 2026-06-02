@@ -3,19 +3,20 @@ RAG Service - Retrieval-Augmented Generation for question answering
 Combines semantic search with LLM responses for intelligent Q&A
 """
  
+import os
+import re
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Optional, Any
-from services.search_service import search_service
-from langfuse_client import get_langfuse
-# Environment-specific LLM (local: direct Bedrock | VDI: Deluxe API Gateway)
+
 from environment import chat_completion
+from langfuse_client import get_langfuse
+from services.search_service import search_service
 from utils.recency import (
     recency_multiplier,
     W_TEMPORAL_QA,
     W_TEMPORAL_PROMPT_ENHANCE,
 )
-import os
-import re
-import logging
  
 logger = logging.getLogger(__name__)
  
@@ -333,19 +334,15 @@ class RAGService:
             for i, chunk in enumerate(context_chunks, 1):
                 context_text += f"\n<source_{i}>\nTitle: {chunk['source']}\nContent:\n{chunk['content']}\n</source_{i}>\n"
  
-            # ── DEBUG: show what RAG retrieved and what tech stack was passed in ──
-            print("\n" + "="*70)
-            print("[RAG ENHANCE] === CONTEXT SENT TO CLAUDE ===")
-            print(f"[RAG ENHANCE] User Query     : {user_query}")
-            print(f"[RAG ENHANCE] Frontend Reqs  : {frontend_requirements or '(not specified)'}")
-            print(f"[RAG ENHANCE] Backend Reqs   : {backend_requirements or '(not specified)'}")
-            print(f"[RAG ENHANCE] RAG chunks ({len(context_chunks)}) via multi-query hybrid search:")
-            for i, chunk in enumerate(context_chunks, 1):
-                snippet = chunk['content'][:300].replace('\n', ' ')
-                print(f"  [{i}] {chunk['source']}")
-                print(f"      {snippet}{'...' if len(chunk['content']) > 300 else ''}")
-            print("="*70 + "\n")
-            # ── END DEBUG ──
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("[RAG ENHANCE] === CONTEXT SENT TO CLAUDE ===")
+                logger.debug(f"[RAG ENHANCE] User Query     : {user_query}")
+                logger.debug(f"[RAG ENHANCE] Frontend Reqs  : {frontend_requirements or '(not specified)'}")
+                logger.debug(f"[RAG ENHANCE] Backend Reqs   : {backend_requirements or '(not specified)'}")
+                logger.debug(f"[RAG ENHANCE] RAG chunks ({len(context_chunks)}) via multi-query hybrid search:")
+                for i, chunk in enumerate(context_chunks, 1):
+                    snippet = chunk['content'][:300].replace('\n', ' ')
+                    logger.debug(f"  [{i}] {chunk['source']}: {snippet}{'...' if len(chunk['content']) > 300 else ''}")
  
             # 4. Ask Claude to generate the Perfect Prompt
             meta_prompt = f"""You are an expert AI prompt engineer. Your goal is to create a highly optimized prompt for an AI coding assistant.
@@ -377,12 +374,7 @@ Relevant Context (from Confluence/Jira):
  
 Optimized Prompt:"""
  
-            # ── DEBUG: full meta-prompt sent to Claude ──
-            print("\n" + "="*70)
-            print("[RAG ENHANCE] === FULL META-PROMPT SENT TO CLAUDE ===")
-            print(meta_prompt)
-            print("="*70 + "\n")
-            # ── END DEBUG ──
+            logger.debug("[RAG ENHANCE] === FULL META-PROMPT SENT TO CLAUDE ===\n%s", meta_prompt)
  
             # 5. Call LLM to generate the prompt
             generated_prompt = ""
@@ -483,8 +475,6 @@ Return ONLY the 3 queries, one per line, numbered 1-3. No explanations."""
                         Pass W_TEMPORAL_PROMPT_ENHANCE (0.5) from get_enhanced_prompt
                         for a stronger recency tilt in the pair-programming flow.
         """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
         # Step 1: Generate query variants (original + up to 3 rewrites)
         rewritten_queries = self._rewrite_query(user_query, user_id=user_id)
         all_queries = [user_query] + rewritten_queries

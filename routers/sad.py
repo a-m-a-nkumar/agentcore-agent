@@ -1,4 +1,4 @@
-"""
+﻿"""
 FastAPI router for the SAD phase of the multi-session Design Assistant.
 
 All endpoints below are scoped by `session_id` (from `design_sessions`).
@@ -8,15 +8,15 @@ diagrams, facts, DOCX export) stay in this router and read directly from
 S3.
 
 Endpoints (all under /api/sad):
-  POST    /turn                      → unified chat box (multipart, JSON or SSE-style chunks)
-  POST    /generate                  → kick off section workers (returns final SAD JSON)
-  POST    /audit                     → run audit, persist results, return badges + details
-  POST    /revert-section            → pop one entry off a section's previous_versions stack
-  GET     /{session_id}/sections     → first paint
-  GET     /{session_id}/section/{n}  → single-section refresh
-  GET     /{session_id}/diagram/{kind} → returns SVG bytes (kind ∈ logical|security|infrastructure; v1 reuses logical)
-  GET     /{session_id}/facts        → facts panel
-  GET     /download-sad/{session_id} → DOCX export (cairosvg → PNG, python-docx)
+  POST    /turn                      â†’ unified chat box (multipart, JSON or SSE-style chunks)
+  POST    /generate                  â†’ kick off section workers (returns final SAD JSON)
+  POST    /audit                     â†’ run audit, persist results, return badges + details
+  POST    /revert-section            â†’ pop one entry off a section's previous_versions stack
+  GET     /{session_id}/sections     â†’ first paint
+  GET     /{session_id}/section/{n}  â†’ single-section refresh
+  GET     /{session_id}/diagram/{kind} â†’ returns SVG bytes (kind âˆˆ logical|security|infrastructure; v1 reuses logical)
+  GET     /{session_id}/facts        â†’ facts panel
+  GET     /download-sad/{session_id} â†’ DOCX export (cairosvg â†’ PNG, python-docx)
 """
 
 import io
@@ -24,15 +24,27 @@ import json
 import logging
 import os
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
+from botocore.config import Config as BotoConfig
+from docx import Document
+from docx.shared import Inches
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
-from db_helper import get_design_session, get_user_atlassian_credentials, update_design_session, track_event
+from db_helper import (
+    get_design_session,
+    get_diagram_slots,
+    get_user_atlassian_credentials,
+    track_event,
+    update_design_session,
+)
 from environment import S3_BUCKET_NAME
+from services.confluence_service import ConfluenceService
+from services.s3_service import s3_put_object
 
 # Reuse the projects-router auth dependency (DB user row with key "id")
 from .projects import get_current_user
@@ -51,7 +63,6 @@ _s3_client = None
 def _lambda():
     global _lambda_client
     if _lambda_client is None:
-        from botocore.config import Config as BotoConfig
         _lambda_client = boto3.client(
             "lambda", region_name=AWS_REGION,
             config=BotoConfig(read_timeout=300, connect_timeout=20, retries={"max_attempts": 1}),
@@ -103,11 +114,11 @@ def _invoke_sad_lambda(payload: Dict[str, Any]) -> Dict[str, Any]:
 # When a user pastes a Confluence URL into the SAD chat, we treat it the
 # same way as an uploaded file: fetch the page body, strip the HTML, build
 # a `{filename, extracted_text}` payload, and forward it to the Lambda's
-# INGEST_DOC handler. Multiple URLs in one message are supported — they
+# INGEST_DOC handler. Multiple URLs in one message are supported â€” they
 # become multiple file_payloads, the Lambda emits one doc_ingested card
 # per URL, and the auto-regen flag fires only on the last card.
 
-# Atlassian Cloud only — `https://<tenant>.atlassian.net/wiki/spaces/<SPACE>/pages/<PAGE_ID>(/...)`.
+# Atlassian Cloud only â€” `https://<tenant>.atlassian.net/wiki/spaces/<SPACE>/pages/<PAGE_ID>(/...)`.
 # Confluence Server / DC out of scope per plan decision.
 _CONFLUENCE_URL_PATTERN = re.compile(
     r"https?://([\w\-]+\.atlassian\.net)/wiki/spaces/[^/\s]+/pages/(\d+)(?:/[^\s]*)?",
@@ -134,7 +145,7 @@ def _extract_confluence_urls(message: str) -> List[Tuple[str, str]]:
 def _strip_confluence_html(html: str) -> str:
     """Strip Confluence storage HTML to plain text.
 
-    Reuses the same approach as `services.rag_service._strip_html` —
+    Reuses the same approach as `services.rag_service._strip_html` â€”
     drop tags, collapse whitespace. Inlined here to avoid pulling the
     full RAG service into this module's import graph.
     """
@@ -188,7 +199,6 @@ def _fetch_confluence_page(
         return _ConfluenceFetchResult("tenant_mismatch", domain=domain)
 
     try:
-        from services.confluence_service import ConfluenceService
         confluence = ConfluenceService(
             domain,
             creds["atlassian_email"],
@@ -208,7 +218,6 @@ def _fetch_confluence_page(
     # Audit trail: persist to the same `sources/` prefix file uploads use.
     if session_id:
         try:
-            from services.s3_service import s3_put_object
             safe_title = re.sub(r"[^\w\-. ]+", "_", title)[:120].strip() or page_id
             key = f"sessions/{session_id}/sources/{safe_title}.confluence.txt"
             s3_put_object(key=key, body=plain.encode("utf-8"), content_type="text/plain")
@@ -241,7 +250,7 @@ def _confluence_warning_card(reason: str, *, domain: Optional[str] = None, page_
     text_by_reason = {
         "not_linked": "To ingest Confluence pages from chat, link your Atlassian account in Settings.",
         "tenant_mismatch": (
-            f"That URL is in another Atlassian tenant ({domain}) — "
+            f"That URL is in another Atlassian tenant ({domain}) â€” "
             "link your account there to ingest from it. The rest of your message was processed normally."
         ),
         "fetch_failed": (
@@ -296,19 +305,19 @@ async def sad_turn(
     current_user: dict = Depends(get_current_user),
 ):
     """One chat-box turn. The Lambda always sees a single source of input:
-      • An uploaded file → INGEST_DOC (legacy single-file path).
-      • One or more Confluence URLs in the message → INGEST_DOC for each
+      â€¢ An uploaded file â†’ INGEST_DOC (legacy single-file path).
+      â€¢ One or more Confluence URLs in the message â†’ INGEST_DOC for each
         (multi-file path; Lambda iterates and emits one card per page).
-      • Neither → plain-text turn (intent router classifies).
+      â€¢ Neither â†’ plain-text turn (intent router classifies).
 
-    File upload takes priority — if a file is attached, URLs in the
+    File upload takes priority â€” if a file is attached, URLs in the
     message are ignored that turn. Response shape is always
     `{cards: [...]}` so the frontend can render multiple bubbles per turn.
     """
     user_id = current_user["id"]
     session = _ensure_session_owned(session_id, user_id)
 
-    # ── 1. Single file upload (legacy path) ────────────────────────────
+    # â”€â”€ 1. Single file upload (legacy path) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     file_payload: Optional[Dict[str, Any]] = None
     if file is not None:
         try:
@@ -327,14 +336,13 @@ async def sad_turn(
             "extracted_text": text,
         }
         try:
-            from services.s3_service import s3_put_object
             key = f"sessions/{session_id}/sources/{file.filename or 'uploaded'}"
             s3_put_object(key=key, body=raw, content_type=file.content_type or "application/octet-stream")
             file_payload["s3_key"] = key
         except Exception as e:
             logger.warning(f"[SAD] failed to persist source file {file.filename}: {e}")
 
-    # ── 2. Confluence URLs in the message (skipped when a file is attached) ──
+    # â”€â”€ 2. Confluence URLs in the message (skipped when a file is attached) â”€â”€
     files_payload: List[Dict[str, Any]] = []
     pre_cards: List[Dict[str, Any]] = []
     if file_payload is None and message:
@@ -349,7 +357,7 @@ async def sad_turn(
                         _confluence_warning_card(result.status, domain=domain, page_id=page_id)
                     )
 
-    # ── 3. Forward to Lambda ───────────────────────────────────────────
+    # â”€â”€ 3. Forward to Lambda â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     payload = {
         "action": "turn",
         "session_id": session_id,
@@ -365,17 +373,17 @@ async def sad_turn(
     }
     lambda_result = _invoke_sad_lambda(payload)
 
-    # ── 4. Normalise response into {cards: [...]} ──────────────────────
+    # â”€â”€ 4. Normalise response into {cards: [...]} â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Lambda may return either:
-    #   • Legacy single card: {"type": "...", "payload": {...}}
-    #   • Multi-ingest envelope: {"cards": [{"type", "payload"}, ...]}
+    #   â€¢ Legacy single card: {"type": "...", "payload": {...}}
+    #   â€¢ Multi-ingest envelope: {"cards": [{"type", "payload"}, ...]}
     if isinstance(lambda_result, dict) and isinstance(lambda_result.get("cards"), list):
         lambda_cards = lambda_result["cards"]
     else:
         lambda_cards = [lambda_result] if isinstance(lambda_result, dict) else []
     all_cards = pre_cards + lambda_cards
 
-    # ── 5. Stage transitions based on the most-significant card ────────
+    # â”€â”€ 5. Stage transitions based on the most-significant card â”€â”€â”€â”€â”€â”€â”€â”€
     # Use the LAST card so a doc_ingested with auto_regen=true correctly
     # transitions to SAD_GATHERING / SAD_GENERATING.
     last_card_type_resp = (all_cards[-1] or {}).get("type") if all_cards else None
@@ -404,11 +412,10 @@ def sad_generate(
     update_design_session(session_id=body.session_id, stage="SAD_GENERATING", bump_activity=True)
 
     # SAD-redesign: surface per-type diagram slots to the Lambda so each
-    # section reads from the matching slot (logical→§4, security→§6,
-    # infrastructure→§7). Missing or skipped slots render an explicit
+    # section reads from the matching slot (logicalâ†’Â§4, securityâ†’Â§6,
+    # infrastructureâ†’Â§7). Missing or skipped slots render an explicit
     # placeholder, never silently substitute another type's artifact.
     try:
-        from db_helper import get_diagram_slots
         slots_state = get_diagram_slots(body.session_id)
     except Exception as e:
         logger.warning(f"[SAD] failed to load diagram slots for {body.session_id}: {e}")
@@ -447,7 +454,7 @@ def sad_audit(
     current_user: dict = Depends(get_current_user),
 ):
     """Run audit on demand. When `section_number` is set, only that section
-    is audited (cheap — one LLM call). Otherwise the full 10-section audit
+    is audited (cheap â€” one LLM call). Otherwise the full 10-section audit
     runs in parallel. Lambda persists audit_latest.json + decorates the
     section objects in sad_structure.json."""
     session = _ensure_session_owned(body.session_id, current_user["id"])
@@ -491,7 +498,7 @@ def sad_save_section(
     body: SADSaveSectionRequest,
     current_user: dict = Depends(get_current_user),
 ):
-    """Persist user-edited section content directly. Bypasses the LLM —
+    """Persist user-edited section content directly. Bypasses the LLM â€”
     the user has typed the exact content they want. Pushes the previous
     content onto the section's `previous_versions` stack so the Revert
     button still works to undo this edit."""
@@ -501,7 +508,7 @@ def sad_save_section(
     if not (1 <= body.section_number <= len(sections)):
         raise HTTPException(status_code=404, detail=f"Section {body.section_number} not found")
 
-    # Validate content shape — each block must have a recognised `type`.
+    # Validate content shape â€” each block must have a recognised `type`.
     valid_types = {"paragraph", "heading", "ordered_list", "bullet_list", "table", "diagram"}
     for i, block in enumerate(body.content):
         if not isinstance(block, dict) or block.get("type") not in valid_types:
@@ -530,13 +537,11 @@ def sad_save_section(
         section["previous_versions"] = stack[:5]
     section["content"] = body.content
     section["status"] = "user_edited"
-    import time as _time
-    section["last_modified_ts"] = int(_time.time())
+    section["last_modified_ts"] = int(time.time())
 
-    # Write back to S3 via the centralized helper — the bucket policy
+    # Write back to S3 via the centralized helper â€” the bucket policy
     # explicit-denies any PutObject that isn't SSE-KMS with our key.
     try:
-        from services.s3_service import s3_put_object
         s3_put_object(
             key=f"sessions/{body.session_id}/sad/sad_structure.json",
             body=json.dumps(sad).encode("utf-8"),
@@ -555,7 +560,7 @@ def sad_save_section(
 
 
 # ============================================
-# Reads — direct S3 (no Lambda)
+# Reads â€” direct S3 (no Lambda)
 # ============================================
 
 def _read_sad(session_id: str) -> Dict[str, Any]:
@@ -615,9 +620,9 @@ def get_diagram(
     """Serve the per-type SVG for a SAD diagram-block.
 
     P3 (honour every saved diagram in its own section): each type reads its
-    own slot. §4 → logical.svg, §6 → security.svg, §7 → infrastructure.svg.
+    own slot. Â§4 â†’ logical.svg, Â§6 â†’ security.svg, Â§7 â†’ infrastructure.svg.
     Falls back to logical.svg ONLY when explicitly asked for `logical` and the
-    per-type file is missing — for the other two we 404 honestly so the SAD
+    per-type file is missing â€” for the other two we 404 honestly so the SAD
     viewer can render an explicit "<view> not authored" placeholder rather
     than silently substituting the Logical artifact.
     """
@@ -641,7 +646,7 @@ def get_diagram(
             continue
 
     logger.info(f"[SAD] no diagram artifact for kind={kind} session={session_id}")
-    # 404 — don't substitute another type's image. The SAD generator's
+    # 404 â€” don't substitute another type's image. The SAD generator's
     # placeholder paragraph already covers skipped slots in the section
     # JSON; the viewer should render that placeholder instead of a
     # misleading image.
@@ -676,13 +681,11 @@ def download_sad(
     session_id: str,
     current_user: dict = Depends(get_current_user),
 ):
-    """Render sad_structure.json into a DOCX. Diagram blocks are SVG → PNG via cairosvg."""
+    """Render sad_structure.json into a DOCX. Diagram blocks are SVG â†’ PNG via cairosvg."""
     _ensure_session_owned(session_id, current_user["id"])
     sad = _read_sad(session_id)
 
     try:
-        from docx import Document
-        from docx.shared import Inches
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"python-docx not installed: {e}")
 
@@ -727,15 +730,15 @@ def download_sad(
                 # the diagram_slots[type].artifact_key field), so we trust
                 # that path and dispatch on the file extension:
                 #
-                #   - .png / .jpg / .jpeg  →  embed directly via python-docx
+                #   - .png / .jpg / .jpeg  â†’  embed directly via python-docx
                 #                             (Lucid imports + future drawio
                 #                              PNG exports both land here)
-                #   - .svg                 →  cairosvg → PNG → embed
+                #   - .svg                 â†’  cairosvg â†’ PNG â†’ embed
                 #                             (current drawio path)
                 #
                 # Earlier this code hardcoded `sessions/{id}/diagram/logical.png`
-                # which silently fed the §4 logical image into §6 (security)
-                # and §7 (infrastructure) DOCX exports. Bug fixed by using
+                # which silently fed the Â§4 logical image into Â§6 (security)
+                # and Â§7 (infrastructure) DOCX exports. Bug fixed by using
                 # the section-specific s3_key.
                 artifact_key = block.get("s3_key", "")
                 embedded = False
@@ -768,7 +771,7 @@ def download_sad(
                         )
                 if not embedded:
                     doc.add_paragraph(
-                        "[diagram unavailable — open the SAD in the app to "
+                        "[diagram unavailable â€” open the SAD in the app to "
                         "render it, then re-export the DOCX]"
                     )
         doc.add_paragraph("")  # spacer

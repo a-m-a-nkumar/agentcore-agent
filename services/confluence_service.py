@@ -1,9 +1,12 @@
+import re
 import time
+import html
+import logging
+import concurrent.futures
+
 import requests
 from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Optional, Tuple
-import logging
-import html
 
 logger = logging.getLogger(__name__)
 
@@ -182,7 +185,6 @@ class ConfluenceService:
         Filters personal spaces (keys starting with `~`) at ingestion time
         so the cache holds only what's actually pickable.
         """
-        import concurrent.futures
         all_spaces: List[Dict] = []
         page_size = 100   # Confluence Cloud per-page cap
         wave_size = 3     # Empirically safe under Atlassian's burst limit
@@ -1379,8 +1381,6 @@ class ConfluenceService:
         Anything else is escaped and emitted as paragraph text — good enough for
         the locked-shape Code Documentation template.
         """
-        import re as _re
-
         lines = markdown.split("\n")
         out: List[str] = []
         i = 0
@@ -1394,8 +1394,8 @@ class ConfluenceService:
 
         def inline(text: str) -> str:
             escaped = html.escape(text)
-            escaped = _re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
-            escaped = _re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
+            escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+            escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
             return escaped
 
         while i < len(lines):
@@ -1424,7 +1424,7 @@ class ConfluenceService:
                 i += 1
                 continue
 
-            m = _re.match(r"^(#{1,3})\s+(.*)$", stripped)
+            m = re.match(r"^(#{1,3})\s+(.*)$", stripped)
             if m:
                 close_list()
                 level = len(m.group(1))
@@ -1432,11 +1432,11 @@ class ConfluenceService:
                 i += 1
                 continue
 
-            if _re.match(r"^[-*]\s+", stripped):
+            if re.match(r"^[-*]\s+", stripped):
                 if not in_list:
                     out.append("<ul>")
                     in_list = True
-                content = _re.sub(r"^[-*]\s+", "", stripped)
+                content = re.sub(r"^[-*]\s+", "", stripped)
                 out.append(f"<li>{inline(content)}</li>")
                 i += 1
                 continue
@@ -1453,7 +1453,7 @@ class ConfluenceService:
                 nxt = lines[i].strip()
                 if not nxt:
                     break
-                if (_re.match(r"^(#{1,3})\s+", nxt) or _re.match(r"^[-*]\s+", nxt)
+                if (re.match(r"^(#{1,3})\s+", nxt) or re.match(r"^[-*]\s+", nxt)
                         or nxt.startswith("```")):
                     break
                 para_lines.append(lines[i])

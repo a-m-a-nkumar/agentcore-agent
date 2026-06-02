@@ -17,6 +17,7 @@ Endpoints (all under /api/design/sessions):
 
 import logging
 import os
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -27,10 +28,12 @@ from pydantic import BaseModel
 from db_helper import (
     create_design_session,
     delete_design_session,
+    get_db_connection,
     get_design_session,
     get_diagram_slots,
     get_project,
     list_design_sessions,
+    release_db_connection,
     set_session_authoring_tool,
     update_design_session,
     update_diagram_slot,
@@ -127,8 +130,6 @@ def _next_session_name(project_id: str, user_id: str) -> str:
     already exists from an earlier batch. Numbers must be monotonic across
     the lifetime of the project, not just the visible set.
     """
-    import re
-    from db_helper import get_db_connection, release_db_connection
     conn = get_db_connection()
     try:
         with conn.cursor() as cursor:

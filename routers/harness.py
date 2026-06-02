@@ -1,11 +1,17 @@
-"""
+﻿"""
 Harness CI/CD Proxy Router
 Proxies requests to the Harness API to avoid CORS issues from the browser.
 All calls to app.harness.io are made server-side.
 """
 
+import asyncio
+import json
 import logging
 import os
+import re
+import traceback
+import urllib.parse
+import yaml
 import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
@@ -18,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/harness", tags=["harness"])
 
-# Harness Cloud base URL — overridable via env so:
+# Harness Cloud base URL â€” overridable via env so:
 #   1) self-hosted Harness deployments can point at their own host
 #   2) dev/test environments behind a corporate proxy that brokers SaaS
 #      access can route through a different hostname
@@ -31,7 +37,7 @@ HARNESS_BASE = os.getenv("HARNESS_BASE_URL", "https://app.harness.io").rstrip("/
 HARNESS_HTTP_TIMEOUT = float(os.getenv("HARNESS_HTTP_TIMEOUT_SECS", "30"))
 
 
-# ─── Auth dependency ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Auth dependency â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 async def get_current_user(token_data: dict = Depends(verify_azure_token)):
     user_id = token_data.get("oid") or token_data.get("sub")
@@ -40,7 +46,7 @@ async def get_current_user(token_data: dict = Depends(verify_azure_token)):
     return token_data
 
 
-# ─── Request Models ───────────────────────────────────────────────────────────
+# â”€â”€â”€ Request Models â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class HarnessQueryRequest(BaseModel):
     api_key: str
@@ -49,7 +55,7 @@ class HarnessQueryRequest(BaseModel):
     project_id: Optional[str] = None
 
 
-# ─── Helpers ──────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def harness_headers(api_key: str) -> dict:
     # Strip any whitespace/newlines that may have been included when copying the token
@@ -63,7 +69,6 @@ def harness_headers(api_key: str) -> dict:
 def _parse_harness_error(text: str) -> str:
     """Extract a clean message from Harness error response JSON."""
     try:
-        import json
         data = json.loads(text)
         msg = data.get("message") or data.get("detail") or text
         return str(msg)
@@ -87,7 +92,7 @@ def _connect_timeout_detail() -> str:
 
 
 # Retryable transient errors. Distinct from upstream-4xx/5xx responses
-# which we surface immediately — those mean Harness answered, just with
+# which we surface immediately â€” those mean Harness answered, just with
 # an error, and we don't want to retry e.g. a 401.
 _RETRYABLE_HTTPX_EXCEPTIONS = (
     httpx.ConnectTimeout,
@@ -124,10 +129,9 @@ async def _request_with_retry(
                     f"[Harness] transient network error on {method} {url} "
                     f"(attempt {attempt}/{max_attempts}): {type(e).__name__}: {e}. Retrying."
                 )
-                # Exponential-ish backoff: 0.4s, 0.9s — keep total < 1.5s
+                # Exponential-ish backoff: 0.4s, 0.9s â€” keep total < 1.5s
                 # so the user doesn't see a long stall on top of the
                 # already-slow Harness call.
-                import asyncio
                 await asyncio.sleep(0.4 * attempt + 0.1)
                 continue
             logger.warning(
@@ -152,7 +156,7 @@ async def harness_post(api_key: str, url: str, body: dict) -> dict:
     return resp.json()
 
 
-# ─── Endpoints ────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Endpoints â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/account")
 async def get_account(req: HarnessQueryRequest, _=Depends(get_current_user)):
@@ -430,7 +434,7 @@ async def get_execution_logs(req: ExecutionDetailRequest, _=Depends(get_current_
     return result
 
 
-# ─── IDP (Internal Developer Portal) ─────────────────────────────────────────
+# â”€â”€â”€ IDP (Internal Developer Portal) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class IdpRequest(BaseModel):
     api_key: str
@@ -471,7 +475,7 @@ async def idp_list_catalog(req: IdpRequest, _=Depends(get_current_user)):
         for url in _idp_catalog_urls(req.account_id):
             try:
                 resp = await client.get(url, headers=hdrs)
-                logger.info(f"IDP catalog: GET {url} → {resp.status_code} | {resp.text[:120]}")
+                logger.info(f"IDP catalog: GET {url} â†’ {resp.status_code} | {resp.text[:120]}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data if isinstance(data, list) else data.get("items", data.get("data", data.get("entities", [])))
@@ -494,7 +498,7 @@ async def idp_list_scorecards(req: IdpRequest, _=Depends(get_current_user)):
         ]:
             try:
                 resp = await client.get(url, headers=hdrs)
-                logger.info(f"IDP scorecards: GET {url} → {resp.status_code} | {resp.text[:120]}")
+                logger.info(f"IDP scorecards: GET {url} â†’ {resp.status_code} | {resp.text[:120]}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data if isinstance(data, list) else data.get("items", data.get("data", data.get("scorecards", [])))
@@ -518,7 +522,7 @@ async def idp_list_workflows(req: IdpRequest, _=Depends(get_current_user)):
         ]:
             try:
                 resp = await client.get(url, headers=hdrs)
-                logger.info(f"IDP workflows: GET {url} → {resp.status_code} | {resp.text[:120]}")
+                logger.info(f"IDP workflows: GET {url} â†’ {resp.status_code} | {resp.text[:120]}")
                 if resp.status_code == 200:
                     data = resp.json()
                     items = data if isinstance(data, list) else data.get("items", data.get("data", data.get("workflows", [])))
@@ -540,7 +544,7 @@ async def idp_get_entity(req: IdpRequest, kind: str, namespace: str, name: str, 
         raise HTTPException(status_code=resp.status_code, detail=_parse_harness_error(resp.text))
 
 
-# ─── Create Harness Code Repository ───────────────────────────────────────────
+# â”€â”€â”€ Create Harness Code Repository â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class CreateRepoRequest(BaseModel):
     api_key: str
@@ -590,7 +594,7 @@ async def create_harness_repo(req: CreateRepoRequest, _=Depends(verify_azure_tok
             status_code=400,
             detail=(
                 "Permission denied (403). Your Harness PAT token does not have Code Repository write access. "
-                "Go to Harness → My Profile → API Keys → edit your token → enable 'Code' scope with 'Write' permission, then regenerate."
+                "Go to Harness â†’ My Profile â†’ API Keys â†’ edit your token â†’ enable 'Code' scope with 'Write' permission, then regenerate."
             ),
         )
     if resp.status_code == 409:
@@ -621,7 +625,7 @@ async def create_harness_repo(req: CreateRepoRequest, _=Depends(verify_azure_tok
     }
 
 
-# ─── Trigger Pipeline Execution ───────────────────────────────────────────────
+# â”€â”€â”€ Trigger Pipeline Execution â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class TriggerExecutionRequest(BaseModel):
     api_key: str
@@ -653,7 +657,7 @@ def _build_codebase_yaml(pipeline_id: str, branch: str) -> str:
 
 def _build_codebase_yaml_v2(branch: str) -> str:
     """
-    Alternative format — no pipeline wrapper, just the input values.
+    Alternative format â€” no pipeline wrapper, just the input values.
     Some Harness versions expect this flat format.
     """
     return (
@@ -669,9 +673,6 @@ def _build_codebase_yaml_v2(branch: str) -> str:
 
 @router.post("/trigger-execution")
 async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_user)):
-    import json as _json
-    import urllib.parse as _up
-
     pid = req.pipeline_id
     branch = req.branch or "main"
     base_params = (
@@ -679,13 +680,13 @@ async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_
         f"&orgIdentifier={req.org_id}"
         f"&projectIdentifier={req.project_id}"
     )
-    notes_param = f"&notesForPipelineExecution={_up.quote(req.notes)}" if req.notes else ""
+    notes_param = f"&notesForPipelineExecution={urllib.parse.quote(req.notes)}" if req.notes else ""
     codebase_yaml = _build_codebase_yaml(pid, branch)
     base_hdrs = harness_headers(req.api_key)
 
     async with httpx.AsyncClient(timeout=30) as client:
 
-        # ── Step 1: fetch pipeline detail to know storeType + git details ─────
+        # â”€â”€ Step 1: fetch pipeline detail to know storeType + git details â”€â”€â”€â”€â”€
         pipeline_branch = branch   # branch where pipeline YAML lives in git
         pipeline_repo   = ""
         pipeline_connector = ""
@@ -710,20 +711,20 @@ async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_
         except Exception as e:
             logger.warning(f"Could not fetch pipeline detail: {e}")
 
-        # ── Step 2: build candidate list based on storeType ───────────────────
+        # â”€â”€ Step 2: build candidate list based on storeType â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # For REMOTE pipelines the run URL needs pipelineBranch + repoID params
         # so Harness can locate the YAML in Git before executing.
         remote_extra = ""
         remote_hdrs  = {}
         if store_type == "REMOTE" and pipeline_branch:
-            remote_extra = f"&pipelineBranch={_up.quote(pipeline_branch)}"
+            remote_extra = f"&pipelineBranch={urllib.parse.quote(pipeline_branch)}"
             if pipeline_repo:
-                remote_extra += f"&pipelineRepoID={_up.quote(pipeline_repo)}"
+                remote_extra += f"&pipelineRepoID={urllib.parse.quote(pipeline_repo)}"
             if pipeline_connector:
-                remote_extra += f"&connectorRef={_up.quote(pipeline_connector)}"
+                remote_extra += f"&connectorRef={urllib.parse.quote(pipeline_connector)}"
             remote_hdrs = {"Harness-Entity-Git-Branch": pipeline_branch}
 
-        # Two possible base paths — Harness versions differ on /execute vs /execution/run
+        # Two possible base paths â€” Harness versions differ on /execute vs /execution/run
         execute_bases = [
             f"{HARNESS_BASE}/pipeline/api/pipelines/execute",           # older NG / most common
             f"{HARNESS_BASE}/pipeline/api/pipelines/execution/run",     # newer NG
@@ -736,18 +737,18 @@ async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_
             # With codebase YAML (CI pipelines need branch input)
             candidates += [
                 (f"{base}/{pid}?{base_params}{remote_extra}{notes_param}",
-                 remote_hdrs, "application/yaml", codebase_yaml.encode()),
+                 remote_hdrs, "application/yaml", codebaseyaml.encode()),
                 (f"{base}/{pid}?{base_params}{remote_extra}&moduleType=ci{notes_param}",
-                 remote_hdrs, "application/yaml", codebase_yaml.encode()),
+                 remote_hdrs, "application/yaml", codebaseyaml.encode()),
                 # No remote params (inline)
                 (f"{base}/{pid}?{base_params}&moduleType=ci{notes_param}",
-                 {}, "application/yaml", codebase_yaml.encode()),
+                 {}, "application/yaml", codebaseyaml.encode()),
                 (f"{base}/{pid}?{base_params}{notes_param}",
-                 {}, "application/yaml", codebase_yaml.encode()),
+                 {}, "application/yaml", codebaseyaml.encode()),
                 # JSON body variant
                 (f"{base}/{pid}?{base_params}{notes_param}",
-                 {}, "application/json", _json.dumps({"inputSetPipelineYaml": codebase_yaml}).encode()),
-                # Empty body — for pipelines with no runtime inputs needed
+                 {}, "application/json", json.dumps({"inputSetPipelineYaml": codebase_yaml}).encode()),
+                # Empty body â€” for pipelines with no runtime inputs needed
                 (f"{base}/{pid}?{base_params}{notes_param}",
                  {}, "application/yaml", b""),
             ]
@@ -755,7 +756,7 @@ async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_
         for url, extra_hdrs, ct, body in candidates:
             hdrs = {**base_hdrs, "Content-Type": ct, **extra_hdrs}
             resp = await client.post(url, headers=hdrs, content=body)
-            logger.info(f"Trigger [{store_type}/{ct.split('/')[-1]}] → {resp.status_code} | {resp.text[:300]}")
+            logger.info(f"Trigger [{store_type}/{ct.split('/')[-1]}] â†’ {resp.status_code} | {resp.text[:300]}")
 
             if resp.status_code in (200, 201):
                 data = resp.json()
@@ -769,7 +770,7 @@ async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_
         status_code=400,
         detail=(
             f"Could not trigger pipeline '{pid}' (storeType={store_type}). "
-            "All execution endpoints returned 4xx — see backend logs for Harness error details."
+            "All execution endpoints returned 4xx â€” see backend logs for Harness error details."
         )
     )
 
@@ -777,10 +778,9 @@ async def trigger_execution(req: TriggerExecutionRequest, _=Depends(get_current_
 @router.post("/trigger-probe")
 async def trigger_probe(req: TriggerExecutionRequest, _=Depends(get_current_user)):
     """
-    Diagnostic endpoint — tries every known trigger URL and returns
+    Diagnostic endpoint â€” tries every known trigger URL and returns
     all status codes + full response bodies so we can see what Harness says.
     """
-    import json as _json
     pid = req.pipeline_id
     branch = req.branch or "main"
     base_params = (
@@ -792,7 +792,7 @@ async def trigger_probe(req: TriggerExecutionRequest, _=Depends(get_current_user
     base_hdrs = harness_headers(req.api_key)
 
     probe_urls = [
-        # /execute/ path (older Harness NG — most likely correct)
+        # /execute/ path (older Harness NG â€” most likely correct)
         f"{HARNESS_BASE}/pipeline/api/pipelines/execute/{pid}?{base_params}",
         f"{HARNESS_BASE}/pipeline/api/pipelines/execute/{pid}?{base_params}&moduleType=ci",
         f"{HARNESS_BASE}/gateway/pipeline/api/pipelines/execute/{pid}?{base_params}",
@@ -809,10 +809,10 @@ async def trigger_probe(req: TriggerExecutionRequest, _=Depends(get_current_user
     async with httpx.AsyncClient(timeout=20) as client:
         for url in probe_urls:
             for ct, body, label in [
-                ("application/yaml", codebase_yaml.encode(), "pipeline_wrapper_yaml"),
+                ("application/yaml", codebaseyaml.encode(), "pipeline_wrapper_yaml"),
                 ("application/yaml", codebase_yaml_v2.encode(), "flat_yaml"),
                 ("application/yaml", b"", "empty"),
-                ("application/json", _json.dumps({"inputSetPipelineYaml": codebase_yaml}).encode(), "json_wrapped"),
+                ("application/json", json.dumps({"inputSetPipelineYaml": codebase_yaml}).encode(), "json_wrapped"),
             ]:
                 hdrs = {**base_hdrs, "Content-Type": ct}
                 try:
@@ -836,7 +836,7 @@ async def trigger_probe(req: TriggerExecutionRequest, _=Depends(get_current_user
     return {"pipeline_id": pid, "branch": branch, "results": results}
 
 
-# ─── Fetch Pipeline Triggers (webhook URLs) ───────────────────────────────────
+# â”€â”€â”€ Fetch Pipeline Triggers (webhook URLs) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class PipelineTriggersRequest(BaseModel):
     api_key: str
@@ -863,7 +863,7 @@ async def get_pipeline_triggers(req: PipelineTriggersRequest, _=Depends(get_curr
     )
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.get(url, headers=harness_headers(req.api_key))
-        logger.info(f"Pipeline triggers: GET {url} → {resp.status_code}")
+        logger.info(f"Pipeline triggers: GET {url} â†’ {resp.status_code}")
         if resp.status_code != 200:
             raise HTTPException(status_code=resp.status_code, detail=_parse_harness_error(resp.text))
         data = resp.json()
@@ -982,7 +982,7 @@ async def get_input_set_detail(req: InputSetDetailRequest, _=Depends(get_current
 async def trigger_via_webhook(req: PipelineTriggersRequest, branch: str = "main", _=Depends(get_current_user)):
     """
     Fire the pipeline's first enabled Custom/Manual webhook trigger.
-    This bypasses RBAC execute permissions — only needs the webhook secret.
+    This bypasses RBAC execute permissions â€” only needs the webhook secret.
     """
     # First fetch triggers
     triggers_url = (
@@ -1013,7 +1013,7 @@ async def trigger_via_webhook(req: PipelineTriggersRequest, branch: str = "main"
                 status_code=400,
                 detail=(
                     "No enabled webhook trigger found for this pipeline. "
-                    "Go to Harness → pipeline → Triggers → add a Custom Webhook trigger, "
+                    "Go to Harness â†’ pipeline â†’ Triggers â†’ add a Custom Webhook trigger, "
                     "or ask your admin to grant Pipeline Execute permission to your user."
                 )
             )
@@ -1028,7 +1028,7 @@ async def trigger_via_webhook(req: PipelineTriggersRequest, branch: str = "main"
 
         wh_body = {"branch": branch}
         wh_resp = await client.post(webhook_url, headers=wh_headers, json=wh_body)
-        logger.info(f"Webhook trigger: POST {webhook_url} → {wh_resp.status_code} | {wh_resp.text[:200]}")
+        logger.info(f"Webhook trigger: POST {webhook_url} â†’ {wh_resp.status_code} | {wh_resp.text[:200]}")
 
         if wh_resp.status_code in (200, 201):
             return {"status": "triggered", "method": "webhook", "trigger": webhook_trigger.get("name", "")}
@@ -1039,7 +1039,7 @@ async def trigger_via_webhook(req: PipelineTriggersRequest, branch: str = "main"
         )
 
 
-# ─── Fetch Pipeline Codebase Info ─────────────────────────────────────────────
+# â”€â”€â”€ Fetch Pipeline Codebase Info â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class PipelineCodebaseRequest(BaseModel):
     api_key: str
@@ -1055,7 +1055,6 @@ async def get_pipeline_codebase(req: PipelineCodebaseRequest, _=Depends(get_curr
     Fetch a pipeline's YAML and extract the codebase section so the frontend
     can display the connected repo/branch before the user triggers a run.
     """
-    import yaml as _yaml
 
     url = (
         f"{HARNESS_BASE}/pipeline/api/pipelines/{req.pipeline_id}"
@@ -1072,7 +1071,7 @@ async def get_pipeline_codebase(req: PipelineCodebaseRequest, _=Depends(get_curr
         "repo_name": "",
         "default_branch": "main",
         "build_type": "",        # "branch" | "tag" | "PR" | "<+input>" | ""
-        "branch_value": "",      # actual value — may be "<+input>" or "<+trigger.branch>"
+        "branch_value": "",      # actual value â€” may be "<+input>" or "<+trigger.branch>"
         "is_runtime_input": False,
         "store_type": pipeline_data.get("storeType", "INLINE"),
         "git_branch": "",        # pipeline YAML's own git branch (for REMOTE pipelines)
@@ -1086,7 +1085,7 @@ async def get_pipeline_codebase(req: PipelineCodebaseRequest, _=Depends(get_curr
         return result
 
     try:
-        parsed = _yaml.safe_load(raw_yaml)
+        parsed = yaml.safe_load(raw_yaml)
         pipeline = parsed.get("pipeline", {})
         props = pipeline.get("properties", {})
         codebase = props.get("ci", {}).get("codebase", {})
@@ -1119,7 +1118,7 @@ async def get_pipeline_codebase(req: PipelineCodebaseRequest, _=Depends(get_curr
     return result
 
 
-# ─── List Branches for a Pipeline's Connected Repo ───────────────────────────
+# â”€â”€â”€ List Branches for a Pipeline's Connected Repo â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class RepoBranchesRequest(BaseModel):
     api_key: str
@@ -1158,7 +1157,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
     async with httpx.AsyncClient(timeout=15) as client:
         hdrs = harness_headers(req.api_key)
 
-        # ── Step 1: Fetch the Harness connector to extract GitHub base URL ────
+        # â”€â”€ Step 1: Fetch the Harness connector to extract GitHub base URL â”€â”€â”€â”€
         # connector_ref format: "account.ConnectorId" | "org.ConnectorId" | "ConnectorId"
         connector_id = req.connector_ref.split(".")[-1]
         github_base_url = ""
@@ -1171,7 +1170,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
                 f"&projectIdentifier={req.project_id}"
             )
             conn_resp = await client.get(conn_url, headers=hdrs)
-            logger.info(f"Connector fetch: GET {conn_url} → {conn_resp.status_code}")
+            logger.info(f"Connector fetch: GET {conn_url} â†’ {conn_resp.status_code}")
             if conn_resp.status_code == 200:
                 spec = conn_resp.json().get("data", {}).get("connector", {}).get("spec", {})
                 github_base_url = spec.get("url", "").rstrip("/")
@@ -1180,7 +1179,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
         except Exception as e:
             logger.warning(f"Connector fetch failed: {e}")
 
-        # ── Step 2: Build full repo URL from connector base URL + repo name ─────
+        # â”€â”€ Step 2: Build full repo URL from connector base URL + repo name â”€â”€â”€â”€â”€
         repo_path = req.repo_name.strip("/")
         full_repo_url = ""
         full_repo_path = ""   # "org/repo" for GitHub API
@@ -1199,8 +1198,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
             full_repo_path = repo_path
             full_repo_url = f"https://github.com/{repo_path}"
 
-        # ── Step 3: Harness SCM proxy — uses connector's stored GitHub token ──
-        import urllib.parse
+        # â”€â”€ Step 3: Harness SCM proxy â€” uses connector's stored GitHub token â”€â”€
         scm_base = (
             f"accountIdentifier={req.account_id}"
             f"&orgIdentifier={req.org_id}"
@@ -1221,7 +1219,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
         ]:
             try:
                 resp = await client.post(scm_url, headers=hdrs, json=scm_post_body)
-                logger.info(f"SCM listBranches: POST {scm_url} → {resp.status_code}")
+                logger.info(f"SCM listBranches: POST {scm_url} â†’ {resp.status_code}")
                 if resp.status_code == 200:
                     names = _normalise_branches(resp.json())
                     if names:
@@ -1237,7 +1235,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
             ]:
                 try:
                     resp = await client.get(conn_url, headers=hdrs)
-                    logger.info(f"Connector listBranches: GET {conn_url} → {resp.status_code}")
+                    logger.info(f"Connector listBranches: GET {conn_url} â†’ {resp.status_code}")
                     if resp.status_code == 200:
                         names = _normalise_branches(resp.json())
                         if names:
@@ -1245,12 +1243,12 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
                 except Exception as e:
                     logger.warning(f"Connector listBranches error: {e}")
 
-        # ── Step 4: GitHub API (works for public repos, or if repo is public) ─
+        # â”€â”€ Step 4: GitHub API (works for public repos, or if repo is public) â”€
         if full_repo_path and "/" in full_repo_path:
             try:
                 gh_url = f"https://api.github.com/repos/{full_repo_path}/branches?per_page=100"
                 gh_resp = await client.get(gh_url, headers={"Accept": "application/vnd.github+json"})
-                logger.info(f"GitHub branches API: GET {gh_url} → {gh_resp.status_code}")
+                logger.info(f"GitHub branches API: GET {gh_url} â†’ {gh_resp.status_code}")
                 if gh_resp.status_code == 200:
                     names = [b["name"] for b in gh_resp.json() if isinstance(b, dict) and b.get("name")]
                     if names:
@@ -1258,7 +1256,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
             except Exception as e:
                 logger.warning(f"GitHub branches error: {e}")
 
-        # ── Step 5: Harness gitSync fallback ──────────────────────────────────
+        # â”€â”€ Step 5: Harness gitSync fallback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         qs = (
             f"accountIdentifier={req.account_id}"
             f"&orgIdentifier={req.org_id}"
@@ -1273,7 +1271,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
         ]:
             try:
                 resp = await client.get(url, headers=hdrs)
-                logger.info(f"Harness gitSync branches: GET {url} → {resp.status_code}")
+                logger.info(f"Harness gitSync branches: GET {url} â†’ {resp.status_code}")
                 if resp.status_code == 200:
                     names = _normalise_branches(resp.json())
                     if names:
@@ -1284,7 +1282,7 @@ async def list_repo_branches(req: RepoBranchesRequest, _=Depends(get_current_use
     return {"branches": []}
 
 
-# ─── Update Pipeline YAML ─────────────────────────────────────────────────────
+# â”€â”€â”€ Update Pipeline YAML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class UpdatePipelineRequest(BaseModel):
     api_key: str
@@ -1312,7 +1310,7 @@ async def update_pipeline(req: UpdatePipelineRequest, _=Depends(get_current_user
     return {"success": True, "message": "Pipeline updated successfully"}
 
 
-# ─── AI Analyze Pipeline YAML ────────────────────────────────────────────────
+# â”€â”€â”€ AI Analyze Pipeline YAML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class AiAnalyzePipelineRequest(BaseModel):
     api_key: str
@@ -1323,8 +1321,6 @@ class AiAnalyzePipelineRequest(BaseModel):
 
 @router.post("/ai-analyze-pipeline")
 async def ai_analyze_pipeline(req: AiAnalyzePipelineRequest, current_user: dict = Depends(get_current_user)):
-    import json as _json
-    import re as _re
 
     prompt = f"""You are a Harness CI/CD pipeline expert. Analyze this pipeline YAML and the error, then identify ONLY the minimal fix needed.
 
@@ -1337,8 +1333,8 @@ Error from failed execution:
 Your task:
 1. Detect pipeline type: Is this a CI pipeline (has stages with type: CI) or CD pipeline (has stages with type: Deployment)?
 2. Find the EXACT failing step by matching the step name/identifier from the error.
-3. Identify the root cause — look only at that specific step's fields (image, command, shell, connectorRef, etc).
-4. Propose the minimal fix — only the field(s) that need to change.
+3. Identify the root cause â€” look only at that specific step's fields (image, command, shell, connectorRef, etc).
+4. Propose the minimal fix â€” only the field(s) that need to change.
 5. Do NOT suggest changes to: connectorRef, templateRef, stage variables (<+stage.variables.*>), infrastructure, resource limits, or any other step.
 
 CRITICAL JSON RULES:
@@ -1346,7 +1342,7 @@ CRITICAL JSON RULES:
 - If the value is a multi-line command, show ONLY the specific line that contains the error (e.g. "npn run build").
 - For proposed_value show only the corrected line (e.g. "npm run build").
 - Never include newlines, tabs, or unescaped quotes inside any JSON string value.
-- Respond with ONLY valid JSON — no markdown fences, no explanation text before or after.
+- Respond with ONLY valid JSON â€” no markdown fences, no explanation text before or after.
 
 {{
   "pipeline_type": "CI",
@@ -1384,8 +1380,8 @@ CRITICAL JSON RULES:
 
         # Try direct parse first
         try:
-            return _json.loads(text)
-        except _json.JSONDecodeError:
+            return json.loads(text)
+        except json.JSONDecodeError:
             pass
 
         # Sanitize: replace literal newlines/tabs inside JSON string values
@@ -1417,16 +1413,16 @@ CRITICAL JSON RULES:
 
         sanitized = _sanitize_json_strings(text)
         try:
-            return _json.loads(sanitized)
-        except _json.JSONDecodeError:
+            return json.loads(sanitized)
+        except json.JSONDecodeError:
             pass
 
         # Last resort: extract first JSON object by braces
-        json_match = _re.search(r'\{[\s\S]*\}', sanitized)
+        json_match = re.search(r'\{[\s\S]*\}', sanitized)
         if json_match:
             try:
-                return _json.loads(json_match.group())
-            except _json.JSONDecodeError:
+                return json.loads(json_match.group())
+            except json.JSONDecodeError:
                 pass
 
         raise ValueError(f"No JSON object found in model response. Raw text (first 500 chars): {text[:500]}")
@@ -1436,7 +1432,7 @@ CRITICAL JSON RULES:
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 
-# ─── AI Edit Pipeline YAML ────────────────────────────────────────────────────
+# â”€â”€â”€ AI Edit Pipeline YAML â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class AiEditPipelineRequest(BaseModel):
     api_key: str
@@ -1447,19 +1443,17 @@ class AiEditPipelineRequest(BaseModel):
 
 @router.post("/ai-edit-pipeline")
 async def ai_edit_pipeline(req: AiEditPipelineRequest, current_user: dict = Depends(get_current_user)):
-    import json as _json
-    import re as _re
 
     prompt = f"""You are a Harness YAML pipeline expert performing a MINIMAL surgical fix.
 
-STRICT RULES — you MUST follow all of these:
+STRICT RULES â€” you MUST follow all of these:
 
-1. PRESERVE EVERYTHING — copy the entire YAML exactly as-is. Only change the specific lines that directly cause the error described in the instruction.
+1. PRESERVE EVERYTHING â€” copy the entire YAML exactly as-is. Only change the specific lines that directly cause the error described in the instruction.
 2. DO NOT change: connectorRef values, image references, template references (templateRef, versionLabel, gitBranch), stage variables (<+stage.variables.*>), pipeline variables (<+pipeline.*>), secrets (<+secrets.*>), infrastructure config, cloneCodebase, sharedPaths, resource limits, when conditions, failureStrategies, or any step/stage not mentioned in the error.
 3. DO NOT add new steps, stages, variables, or configuration.
 4. DO NOT remove existing steps, stages, variables, or configuration.
 5. DO NOT reformat, reorder, or re-indent lines you are not changing.
-6. Harness expressions like `<+stage.variables.Node_Version>`, `<+input>`, `<+pipeline.sequenceId>` are VALID — never replace them with hardcoded values.
+6. Harness expressions like `<+stage.variables.Node_Version>`, `<+input>`, `<+pipeline.sequenceId>` are VALID â€” never replace them with hardcoded values.
 7. `failureStrategies` is ALWAYS a list (each item starts with `-`).
 8. Fix ONLY the minimum number of lines needed to resolve the error.
 
@@ -1486,7 +1480,7 @@ Return ONLY the complete YAML. No explanation, no markdown fences, no comments."
             modified = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
 
         # Post-process: fix failureStrategies written as a map instead of a list.
-        # Pattern: "failureStrategies:\n      onFailure:" → add "- " before onFailure
+        # Pattern: "failureStrategies:\n      onFailure:" â†’ add "- " before onFailure
         def fix_failure_strategies(yaml_text: str) -> str:
             lines = yaml_text.split("\n")
             result_lines = []
@@ -1495,15 +1489,15 @@ Return ONLY the complete YAML. No explanation, no markdown fences, no comments."
                 line = lines[i]
                 stripped = line.rstrip()
                 # Detect "failureStrategies:" followed by "onFailure:" without a leading dash
-                if _re.match(r'^(\s*)failureStrategies:\s*$', stripped):
+                if re.match(r'^(\s*)failureStrategies:\s*$', stripped):
                     result_lines.append(line)
                     i += 1
                     if i < len(lines):
                         next_line = lines[i]
                         next_stripped = next_line.lstrip()
                         indent = len(next_line) - len(next_line.lstrip())
-                        # If next line is "onFailure:" without a dash, it's a map — fix it
-                        if next_stripped.startswith("onFailure:") and not _re.match(r'^\s*-\s+', next_line):
+                        # If next line is "onFailure:" without a dash, it's a map â€” fix it
+                        if next_stripped.startswith("onFailure:") and not re.match(r'^\s*-\s+', next_line):
                             base_indent = " " * (indent - 2) if indent >= 2 else ""
                             result_lines.append(f"{base_indent}- {next_stripped}")
                             i += 1
@@ -1531,7 +1525,7 @@ Return ONLY the complete YAML. No explanation, no markdown fences, no comments."
         raise HTTPException(status_code=500, detail=f"AI edit failed: {str(e)}")
 
 
-# ─── AI Summarize Execution Logs ──────────────────────────────────────────────
+# â”€â”€â”€ AI Summarize Execution Logs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class AiSummarizeLogsRequest(BaseModel):
     api_key: str
@@ -1541,7 +1535,6 @@ class AiSummarizeLogsRequest(BaseModel):
 
 @router.post("/ai-summarize-logs")
 async def ai_summarize_logs(req: AiSummarizeLogsRequest, current_user: dict = Depends(get_current_user)):
-    import json as _json
 
     data = req.execution_data
     prompt = f"""A Harness CI/CD pipeline execution failed. Analyze this data and provide a concise, plain-English summary of what went wrong and how to fix it.
@@ -1551,10 +1544,10 @@ Status: {data.get("status", "unknown")}
 Error: {data.get("errorMessage", "none")}
 
 Failed steps:
-{_json.dumps(data.get("failed_nodes", []), indent=2)}
+{json.dumps(data.get("failed_nodes", []), indent=2)}
 
 All stages:
-{_json.dumps(data.get("stages", []), indent=2)}
+{json.dumps(data.get("stages", []), indent=2)}
 
 Provide:
 1. What failed (1-2 sentences)
@@ -1576,11 +1569,10 @@ Keep it brief and actionable."""
         )
         return {"summary": text.strip()}
     except Exception as e:
-        import traceback
         raise HTTPException(status_code=500, detail=f"AI summary failed: {str(e)} | {traceback.format_exc()[-500:]}")
 
 
-# ─── Natural Language Chat Agent ──────────────────────────────────────────────
+# â”€â”€â”€ Natural Language Chat Agent â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class HarnessChatRequest(BaseModel):
     api_key: str
@@ -1692,7 +1684,6 @@ HARNESS_CHAT_TOOLS = [
 
 
 async def _execute_chat_tool(req: HarnessChatRequest, tool_name: str, tool_input: dict) -> dict:
-    import json as _json
     hdrs = harness_headers(req.api_key)
     acct = req.account_id
     org  = tool_input.get("org_id")  or req.org_id or "default"
@@ -1724,7 +1715,7 @@ async def _execute_chat_tool(req: HarnessChatRequest, tool_name: str, tool_input
 
         elif tool_name == "list_pipelines":
             url = f"{HARNESS_BASE}/pipeline/api/pipelines/list?{base}&orgIdentifier={org}&projectIdentifier={proj}"
-            r = await c.post(url, headers={**hdrs, "Content-Type": "application/json"}, content=_json.dumps({"filterType": "PipelineSetup"}).encode())
+            r = await c.post(url, headers={**hdrs, "Content-Type": "application/json"}, content=json.dumps({"filterType": "PipelineSetup"}).encode())
             if r.status_code == 200:
                 items = r.json().get("data", {}).get("content", [])
                 return {"pipelines": [{"identifier": p["identifier"], "name": p["name"], "lastExecutionStatus": p.get("executionSummaryInfo",{}).get("lastExecutionStatus")} for p in items]}
@@ -1735,7 +1726,7 @@ async def _execute_chat_tool(req: HarnessChatRequest, tool_name: str, tool_input
             exec_body = {"filterType": "PipelineExecution"}
             if tool_input.get("status"):
                 exec_body["status"] = tool_input["status"]
-            r = await c.post(url, headers={**hdrs, "Content-Type": "application/json"}, content=_json.dumps(exec_body).encode())
+            r = await c.post(url, headers={**hdrs, "Content-Type": "application/json"}, content=json.dumps(exec_body).encode())
             if r.status_code == 200:
                 items = r.json().get("data", {}).get("content", [])
                 return {"executions": [{"planExecutionId": e.get("planExecutionId"), "pipelineIdentifier": e.get("pipelineIdentifier"), "status": e.get("status"), "runSequence": e.get("runSequence"), "startTs": e.get("startTs")} for e in items]}
@@ -1765,7 +1756,6 @@ async def _execute_chat_tool(req: HarnessChatRequest, tool_name: str, tool_input
 
 @router.post("/chat")
 async def harness_chat(req: HarnessChatRequest, current_user: dict = Depends(get_current_user)):
-    import json as _json
 
     system_prompt = f"""You are a helpful Harness CI/CD assistant inside an SDLC platform.
 You can query and control the user's Harness account using the tools provided.
@@ -1780,7 +1770,7 @@ Rules:
 - Show pipeline names, statuses, and timestamps when listing.
 - Format epoch timestamps as readable dates (e.g. "4 Feb 2026, 15:44").
 - If a tool returns an error, explain it clearly and suggest what to do.
-- You cannot trigger pipelines — if asked, tell the user to use the Deployments tab instead."""
+- You cannot trigger pipelines â€” if asked, tell the user to use the Deployments tab instead."""
 
     messages = [{"role": "system", "content": system_prompt}] + list(req.history) + [{"role": "user", "content": req.message}]
     tool_calls_log = []
@@ -1799,7 +1789,7 @@ Rules:
             msg = result["message"]
             finish_reason = result["finish_reason"]
 
-            # No tool calls — return the final text response
+            # No tool calls â€” return the final text response
             if finish_reason != "tool_calls" or not msg.tool_calls:
                 answer = (msg.content or "").strip()
                 messages.append({"role": "assistant", "content": answer})
@@ -1821,7 +1811,7 @@ Rules:
             # Execute each tool call and append results
             for tc in msg.tool_calls:
                 tool_name = tc.function.name
-                tool_input = _json.loads(tc.function.arguments) if tc.function.arguments else {}
+                tool_input = json.loads(tc.function.arguments) if tc.function.arguments else {}
                 logger.info(f"[Harness Chat] Tool call #{iteration}: {tool_name}({tool_input})")
                 tool_calls_log.append({"tool": tool_name, "input": tool_input})
 
@@ -1830,7 +1820,7 @@ Rules:
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tc.id,
-                    "content": _json.dumps(tool_result, default=str),
+                    "content": json.dumps(tool_result, default=str),
                 })
 
         # If we exhausted all iterations, return the last message

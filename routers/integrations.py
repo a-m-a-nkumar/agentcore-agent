@@ -2,13 +2,15 @@ from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 import logging
-import boto3
-import json
+import re
+import io
 import os
+import json
+import boto3
+import requests
 from datetime import datetime, timedelta
 
-import re
-
+from environment import S3_BUCKET_NAME
 from auth import verify_azure_token
 from db_helper import (
     update_user_atlassian_credentials,
@@ -496,12 +498,11 @@ def link_github_account(
     current_user: dict = Depends(get_current_user),
 ):
     """Validate and persist the user's GitHub PAT (KMS-encrypted)."""
-    import requests as _requests
     pat = req.pat.strip()
     if not pat:
         raise HTTPException(status_code=400, detail="GitHub PAT is required")
     try:
-        resp = _requests.get(
+        resp = requests.get(
             "https://api.github.com/user",
             headers={"Authorization": f"token {pat}", "Accept": "application/vnd.github.v3+json"},
             timeout=10,
@@ -947,7 +948,6 @@ def upload_brd_to_confluence(
     # 3. Fetch BRD from S3
     try:
         s3_client = boto3.client('s3', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-        from environment import S3_BUCKET_NAME
         bucket_name = S3_BUCKET_NAME
         
         # Try to fetch JSON structure first
@@ -1084,7 +1084,6 @@ def upload_sad_to_confluence(
 
     # 4. Read SAD JSON from S3.
     s3_client = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
-    from environment import S3_BUCKET_NAME
     sad_key = f"sessions/{request.session_id}/sad/sad_structure.json"
     try:
         sad_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=sad_key)
@@ -1125,8 +1124,7 @@ def upload_sad_to_confluence(
                     )
                     continue
                 try:
-                    import io as _io
-                    png_buf = _io.BytesIO()
+                    png_buf = io.BytesIO()
                     cairosvg.svg2png(bytestring=body, write_to=png_buf, output_width=1200)
                     body = png_buf.getvalue()
                     content_type = "image/png"

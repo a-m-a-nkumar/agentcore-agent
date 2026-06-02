@@ -10,7 +10,7 @@ import logging
 import traceback
 import time
 
-# Import database helper functions - assuming app run from root
+from services.sync_service import sync_project
 from db_helper import (
     create_project,
     get_user_projects,
@@ -139,7 +139,6 @@ def create_new_project(
         
         # Trigger initial sync in background if Jira or Confluence is configured
         if project_data.jira_project_key or project_data.confluence_space_key:
-            from services.sync_service import sync_project
             background_tasks.add_task(
                 sync_project,
                 project_id=project_data.project_id,

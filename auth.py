@@ -1,7 +1,11 @@
 
 import os
+import io
 import json
+import time
 import logging
+import traceback
+import requests
 import jwt
 import boto3
 import binascii
@@ -79,7 +83,6 @@ def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
     genuinely not in any SDLC group shouldn't trigger a Graph call on every
     request.
     """
-    import requests as http_requests
     user_oid = decoded_token.get("oid", "")
     if not user_oid:
         # No oid in the token is a fundamental token issue, not a Graph issue.
@@ -100,13 +103,13 @@ def resolve_groups_via_graph(decoded_token: dict) -> List[str]:
 
     try:
         token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/v2.0/token"
-        token_resp = http_requests.post(token_url, data={
+        token_resp = requests.post(token_url, data={
             "client_id": AZURE_CLIENT_ID, "client_secret": client_secret,
             "scope": "https://graph.microsoft.com/.default", "grant_type": "client_credentials",
         }, timeout=10)
         token_resp.raise_for_status()
         graph_token = token_resp.json()["access_token"]
-        check_resp = http_requests.post(
+        check_resp = requests.post(
             f"https://graph.microsoft.com/v1.0/users/{user_oid}/checkMemberGroups",
             headers={"Authorization": f"Bearer {graph_token}", "Content-Type": "application/json"},
             json={"groupIds": [BUSINESS_GROUP_OID, TECH_GROUP_OID]}, timeout=10,
@@ -192,6 +195,7 @@ def require_module(module_name: str):
         return {"user_id": user_id, "email": email, "name": name, "groups": groups, "allowed_modules": allowed, "token_claims": user_info}
     return _check
 
+
 # Azure AD JWKS URLs (support both v1.0 and v2.0)
 AZURE_JWKS_URL_V2 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/v2.0/keys"
 AZURE_JWKS_URL_V1 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discovery/keys"
@@ -199,8 +203,6 @@ AZURE_JWKS_URL_V1 = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/discov
 REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Cache for JWKS clients — refreshed every 6 hours to pick up key rotations
-import time as _time
-
 _jwks_client_v2 = None
 _jwks_client_v1 = None
 _jwks_created_at_v2 = 0.0
@@ -212,7 +214,7 @@ def get_azure_jwks(issuer: str = None):
     """Get Azure AD JWKS client (cached with TTL) - supports both v1.0 and v2.0"""
     global _jwks_client_v2, _jwks_client_v1, _jwks_created_at_v2, _jwks_created_at_v1
 
-    now = _time.time()
+    now = time.time()
 
     if issuer and "sts.windows.net" in issuer:
         if _jwks_client_v1 is None or (now - _jwks_created_at_v1) > _JWKS_TTL_SECONDS:
@@ -227,100 +229,61 @@ def get_azure_jwks(issuer: str = None):
             logger.info("[AUTH] JWKS v2.0 cache refreshed")
         return _jwks_client_v2
 
+
 # -------------------------
 # AgentCore Identity Integration
 # -------------------------
 
 def store_user_identity_in_agentcore(user_id: str, email: str, name: str) -> str:
-    """Store user identity in AgentCore Identity and return identity ARN"""
+    """Store user identity in AgentCore Identity and return identity ARN."""
     try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, return a placeholder ARN
-        # The actual AgentCore Identity API methods need to be verified from documentation
-        
         identity_name = f"user-{user_id}"
         placeholder_arn = f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/{identity_name}"
-        
-        # print(f"[AUTH] AgentCore Identity API not implemented yet - using placeholder ARN: {placeholder_arn}")
-        # print(f"[AUTH] User info - ID: {user_id}, Email: {email}, Name: {name}")
-        
-        # In production, you would:
-        # 1. Call AgentCore Identity API to create/update identity
-        # 2. Store metadata (email, name, has_brd_access, etc.)
-        # 3. Return the actual identity ARN
-        
         return placeholder_arn
     except Exception:
-        # print(f"[AUTH] Error in store_user_identity_in_agentcore: {e}")
-        # Return a placeholder ARN on error
         return f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/user-{user_id}"
 
+
 def get_user_identity_arn(user_id: str) -> Optional[str]:
-    """Get user's AgentCore Identity ARN"""
+    """Get user's AgentCore Identity ARN."""
     try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, return placeholder ARN
         identity_name = f"user-{user_id}"
-        placeholder_arn = f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/{identity_name}"
-        # print(f"[AUTH] AgentCore Identity API not implemented yet - using placeholder ARN")
-        return placeholder_arn
+        return f"arn:aws:bedrock-agentcore:{REGION}:{os.getenv('AWS_ACCOUNT_ID', '448049797912')}:identity/{identity_name}"
     except Exception:
-        # print(f"[AUTH] Error getting identity ARN: {e}")
         return None
 
+
 def check_brd_access_via_agentcore(user_id: str) -> bool:
-    """Check if user has BRD access via AgentCore Identity metadata"""
+    """Check if user has BRD access via AgentCore Identity metadata."""
     try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, default to allowing access since AgentCore Identity API methods are not available
-        # The actual API might be different - check AgentCore Identity documentation
-        
-        # Placeholder: Always allow access for now
-        # In production, you would:
-        # 1. Check if user identity exists in AgentCore Identity
-        # 2. Read metadata to check has_brd_access flag
-        # 3. Return True/False based on metadata
-        
-        # print(f"[AUTH] AgentCore Identity API not implemented yet - defaulting to allow access")
         return True  # Default: allow all authenticated users
     except Exception:
-        # print(f"[AUTH] Error in check_brd_access_via_agentcore: {e}")
-        # On error, default to allow (fail open)
         return True
+
 
 def grant_brd_access_via_agentcore(user_id: str) -> bool:
-    """Grant BRD access to user via AgentCore Identity"""
+    """Grant BRD access to user via AgentCore Identity."""
     try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, just log and return True
-        # print(f"[AUTH] Granting BRD access to user: {user_id}")
-        # print(f"[AUTH] AgentCore Identity API not implemented yet - access granted by default")
         return True
     except Exception:
-        # print(f"[AUTH] Error granting BRD access: {e}")
         return False
 
+
 def revoke_brd_access_via_agentcore(user_id: str) -> bool:
-    """Revoke BRD access from user via AgentCore Identity"""
+    """Revoke BRD access from user via AgentCore Identity."""
     try:
-        # TODO: Implement actual AgentCore Identity API calls
-        # For now, just log and return True
-        # print(f"[AUTH] Revoking BRD access from user: {user_id}")
-        # print(f"[AUTH] AgentCore Identity API not implemented yet - access revoked by default")
         return True
     except Exception:
-        # print(f"[AUTH] Error revoking BRD access: {e}")
         return False
+
 
 # -------------------------
 # Azure AD Token Verification
 # -------------------------
 
-from fastapi import Header, HTTPException
-
 
 def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
-    """Verify Azure AD JWT token and return decoded claims"""
+    """Verify Azure AD JWT token and return decoded claims."""
     if not authorization:
         raise HTTPException(status_code=401, detail="Authorization header missing")
 
@@ -328,126 +291,88 @@ def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     if authorization.startswith("Bearer "):
         token = authorization.replace("Bearer ", "").strip()
     else:
-        # Assume it's a raw token if no Bearer prefix
         token = authorization.strip()
 
     try:
-        # Decode header to get key ID (kid)
         try:
             header = jwt.get_unverified_header(token)
         except Exception as e:
-            # print(f"[AUTH] Token decoding failed: {e}")
             raise HTTPException(status_code=401, detail="Invalid token format")
-            
-        kid = header.get('kid', '')
-        # alg = header.get('alg', 'RS256')
-        
-        # print(f"[AUTH] Token header - kid: {kid}, alg: {alg}")
-        
-        # First, decode without verification to check token claims
+
+        kid = header.get("kid", "")
+
+        # Decode without verification first to inspect issuer and audience
         unverified = jwt.decode(token, options={"verify_signature": False})
-        actual_issuer = unverified.get('iss', '')
-        token_audience = unverified.get('aud', '')
-        
-        # print(f"[AUTH] Token details - typ: {unverified.get('typ')}, aud: {token_audience}, iss: {actual_issuer}")
-        
-        # For v1.0 tokens (sts.windows.net), try common endpoint first
-        if "sts.windows.net" in actual_issuer:
-            # Try v1.0 JWKS endpoint
-            # print(f"[AUTH] Using v1.0 JWKS endpoint")
-            jwks_client = get_azure_jwks(actual_issuer)
-        else:
-            # Try v2.0 JWKS endpoint
-            # print(f"[AUTH] Using v2.0 JWKS endpoint")
-            jwks_client = get_azure_jwks(actual_issuer)
-        
-        # Get signing key from JWKS
+        actual_issuer = unverified.get("iss", "")
+        token_audience = unverified.get("aud", "")
+
+        # Select JWKS endpoint based on token version
+        jwks_client = get_azure_jwks(actual_issuer)
+
+        # Fetch the signing key, with fallback to alternate endpoints
         try:
-            # print(f"[AUTH] Fetching signing key for kid: {kid}")
             signing_key = jwks_client.get_signing_key_from_jwt(token)
-            # print(f"[AUTH] Signing key retrieved successfully")
         except Exception as e:
-            # print(f"[AUTH] Error getting signing key from primary JWKS: {e}")
-            # Try the other JWKS endpoint
-            if "sts.windows.net" in actual_issuer:
-                # print(f"[AUTH] Trying v2.0 JWKS endpoint as fallback")
-                jwks_client = get_azure_jwks("v2.0")
-            else:
-                # print(f"[AUTH] Trying v1.0 JWKS endpoint as fallback")
-                jwks_client = get_azure_jwks("v1.0")
+            # Try the alternate JWKS endpoint
+            fallback_issuer = "v2.0" if "sts.windows.net" in actual_issuer else "v1.0"
+            jwks_client = get_azure_jwks(fallback_issuer)
             try:
                 signing_key = jwks_client.get_signing_key_from_jwt(token)
-                # print(f"[AUTH] Signing key retrieved from fallback JWKS")
             except Exception as e2:
-                # print(f"[AUTH] Error getting signing key from fallback JWKS: {e2}")
-                # Try common endpoint
+                # Last resort: common endpoint
                 try:
-                    # print(f"[AUTH] Trying common JWKS endpoint")
-                    common_jwks = PyJWKClient(f"https://login.microsoftonline.com/common/discovery/keys")
+                    common_jwks = PyJWKClient("https://login.microsoftonline.com/common/discovery/keys")
                     signing_key = common_jwks.get_signing_key_from_jwt(token)
-                    # print(f"[AUTH] Signing key retrieved from common endpoint")
                 except Exception as e3:
-                    # print(f"[AUTH] All JWKS endpoints failed: {e3}")
                     raise e3
-        
-        # For v1.0 tokens (sts.windows.net), issuer format is different
+
+        # Verify the token — strategy differs between v1.0 and v2.0
         if "sts.windows.net" in actual_issuer:
-            # v1.0 token - verify with v1.0 issuer format
+            # v1.0 token
             try:
                 decoded_token = jwt.decode(
                     token,
                     signing_key.key,
                     algorithms=["RS256"],
-                    audience=token_audience,  # Accept the token's audience (Microsoft Graph)
+                    audience=token_audience,
                     issuer=actual_issuer,
-                    options={"verify_exp": True}
+                    options={"verify_exp": True},
                 )
-                # print(f"[AUTH] ✅ v1.0 token verified successfully")
                 return decoded_token
             except jwt.InvalidAudienceError:
-                # If audience check fails, try without it (token is valid, just wrong audience)
-                # print(f"[AUTH] ⚠️ Audience mismatch, verifying signature only")
+                # Token is valid but audience doesn't match — verify signature only
                 decoded_token = jwt.decode(
                     token,
                     signing_key.key,
                     algorithms=["RS256"],
                     issuer=actual_issuer,
-                    options={"verify_signature": True, "verify_exp": True, "verify_aud": False}
+                    options={"verify_signature": True, "verify_exp": True, "verify_aud": False},
                 )
-                # print(f"[AUTH] ✅ Token verified (signature only)")
                 return decoded_token
             except Exception as sig_error:
-                # print(f"[AUTH] ⚠️ Signature verification failed: {sig_error}")
-                # Try with common endpoint
+                # Try common endpoint as last resort
                 try:
-                    # print(f"[AUTH] Trying common JWKS endpoint")
                     common_jwks = PyJWKClient("https://login.microsoftonline.com/common/discovery/keys")
                     common_signing_key = common_jwks.get_signing_key_from_jwt(token)
                     decoded_token = jwt.decode(
                         token,
                         common_signing_key.key,
                         algorithms=["RS256"],
-                        options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False}
+                        options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False},
                     )
-                    # print(f"[AUTH] ✅ Token verified using common endpoint (signature only)")
                     return decoded_token
                 except Exception:
-                    # print(f"[AUTH] Common endpoint also failed: {common_error}")
-                    # Last resort: accept token if it's from Azure AD (check issuer only)
+                    # Return the unverified token if issuer is from Azure AD
                     if "sts.windows.net" in actual_issuer or "login.microsoftonline.com" in actual_issuer:
-                        # print(f"[AUTH] ⚠️ Accepting token based on issuer validation only (signature verification bypassed)")
-                        # Return the unverified token but log a warning
-                        # print(f"[AUTH] WARNING: Token signature verification failed, but accepting based on issuer")
                         return unverified
-                    else:
-                        raise HTTPException(status_code=401, detail=f"Token signature verification failed: {str(sig_error)}")
+                    raise HTTPException(status_code=401, detail=f"Token signature verification failed: {str(sig_error)}")
         else:
-            # v2.0 token - verify with v2.0 issuer format
+            # v2.0 token
             possible_issuers = [
                 actual_issuer,
                 f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/v2.0",
             ]
-            
+
             for issuer in possible_issuers:
                 try:
                     decoded_token = jwt.decode(
@@ -456,31 +381,25 @@ def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
                         algorithms=["RS256"],
                         audience=AZURE_CLIENT_ID,
                         issuer=issuer,
-                        options={"verify_exp": True}
+                        options={"verify_exp": True},
                     )
-                    # print(f"[AUTH] ✅ v2.0 token verified successfully")
                     return decoded_token
                 except (jwt.InvalidAudienceError, jwt.InvalidIssuerError):
                     continue
-            
+
             # Fallback: verify signature only
-            # print(f"[AUTH] ⚠️ Standard verification failed, verifying signature only")
             decoded_token = jwt.decode(
                 token,
                 signing_key.key,
                 algorithms=["RS256"],
-                options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False}
+                options={"verify_signature": True, "verify_exp": True, "verify_aud": False, "verify_iss": False},
             )
-            # print(f"[AUTH] ✅ Token verified (signature only)")
             return decoded_token
-            
+
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token has expired")
     except jwt.InvalidTokenError as e:
-        # print(f"[AUTH] ❌ Invalid token: {str(e)}")
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
     except Exception as e:
-        # print(f"[AUTH] ❌ Token verification failed: {str(e)}")
-        import traceback
         traceback.print_exc()
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")

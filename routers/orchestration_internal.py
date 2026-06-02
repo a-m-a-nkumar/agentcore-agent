@@ -64,9 +64,9 @@ async def _build_enhanced_prompt(
     source_label: str,
     owner_user_id: Optional[str],
 ) -> dict:
-    print(f"[ORCHESTRATION:{source_label}] Project: {request.project_id}")
-    print(f"[ORCHESTRATION:{source_label}] User Query: {request.query}")
-    print(f"[ORCHESTRATION:{source_label}] Generating enhanced prompt context...")
+    logger.info(f"[ORCHESTRATION:{source_label}] Project: {request.project_id}")
+    logger.info(f"[ORCHESTRATION:{source_label}] User Query: {request.query}")
+    logger.info(f"[ORCHESTRATION:{source_label}] Generating enhanced prompt context...")
 
     try:
         enhanced_prompt = await rag_service.get_enhanced_prompt(
@@ -82,7 +82,7 @@ async def _build_enhanced_prompt(
         logger.error(f"Error generating enhanced prompt: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    print(
+    logger.info(
         f"[ORCHESTRATION:{source_label}] Constructed enhanced prompt "
         f"({len(enhanced_prompt)} chars). Response sent."
     )
@@ -144,8 +144,8 @@ async def pipeline_rag_internal(
 
     owner_user_id = _resolve_owner(request.project_id)
 
-    print(f"[ORCHESTRATION:pipeline_rag] Project: {request.project_id}")
-    print(f"[ORCHESTRATION:pipeline_rag] User Query: {request.query}")
+    logger.info(f"[ORCHESTRATION:pipeline_rag] Project: {request.project_id}")
+    logger.info(f"[ORCHESTRATION:pipeline_rag] User Query: {request.query}")
 
     try:
         results = rag_service.get_rag_context(
@@ -159,7 +159,7 @@ async def pipeline_rag_internal(
         logger.error(f"Error retrieving pipeline RAG context: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-    print(f"[ORCHESTRATION:pipeline_rag] Returned {len(results)} chunk(s).")
+    logger.info(f"[ORCHESTRATION:pipeline_rag] Returned {len(results)} chunk(s).")
 
     if owner_user_id:
         track_event(

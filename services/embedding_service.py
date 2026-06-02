@@ -411,7 +411,7 @@ class EmbeddingService:
         """
         embeddings = []
         for i, chunk in enumerate(chunks):
-            print(f"  Generating embedding {i+1}/{len(chunks)}...")
+            logger.debug(f"Generating embedding {i + 1}/{len(chunks)}")
             embedding = self.generate_embedding(chunk)
             embeddings.append(embedding)
         return embeddings

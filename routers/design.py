@@ -1442,7 +1442,6 @@ async def save_diagram(
                     logger.warning(f"[DESIGN] Confluence push failed (non-fatal, session save succeeded): {e}")
 
         # Update the per-type slot in JSONB.
-        from db_helper import update_diagram_slot
         slot_patch: Dict[str, Any] = {
             "status": "done",
             "saved_at": int(datetime.now().timestamp()),

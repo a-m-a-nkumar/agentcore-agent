@@ -10,14 +10,16 @@ Two-step flow:
                                 overwrite the BRD's Confluence page.
 """
 
-from fastapi import APIRouter, HTTPException, Depends
-from pydantic import BaseModel, Field
-from typing import Optional, List, Literal
 import logging
 import json
 import os
 import re
 import threading
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import APIRouter, HTTPException, Depends
+from pydantic import BaseModel, Field
+from typing import Optional, List, Literal
 import uuid
 from html import unescape
 
@@ -225,7 +227,6 @@ def compare_brd_with_code_summary(
     # (~1-3s each → ~1-3s total instead of ~2-6s serial). ThreadPoolExecutor
     # is fine here since requests.get releases the GIL on the socket read.
     try:
-        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=2) as pool:
             cs_fut = pool.submit(confluence.get_page_content, request.code_summary_page_id)
             brd_fut = pool.submit(confluence.get_page_content, request.brd_page_id)
