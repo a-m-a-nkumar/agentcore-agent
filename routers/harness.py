@@ -1,4 +1,4 @@
-﻿"""
+"""
 Harness CI/CD Proxy Router
 Proxies requests to the Harness API to avoid CORS issues from the browser.
 All calls to app.harness.io are made server-side.
