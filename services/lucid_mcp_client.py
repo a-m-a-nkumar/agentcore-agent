@@ -15,9 +15,12 @@ A missing token raises ValueError so the FastAPI layer can return 401
 with a "Click 'Connect to Lucid' first" message.
 """
 
+import logging
 import os
 import re
-import logging
+
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +42,6 @@ async def create_diagram_from_description(description: str, title: str, token: s
         token = os.getenv("LUCID_OAUTH_TOKEN", "").strip()
     if not token:
         raise ValueError("Not connected to Lucid. Click 'Connect to Lucid' first.")
-
-    from mcp.client.streamable_http import streamablehttp_client
-    from mcp import ClientSession
 
     headers = {"Authorization": f"Bearer {token}"}
     logger.info(f"[LUCID_MCP] Connecting → {LUCID_MCP_URL}")

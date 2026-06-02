@@ -223,8 +223,7 @@ def update_project_by_id(
     except HTTPException:
         raise
     except Exception as e:
-        traceback.print_exc()
-        logger.error(f"Error updating project: {e}")
+        logger.exception(f"Error updating project: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to update project: {str(e)}")
 
 
@@ -262,8 +261,7 @@ def delete_project_by_id(
     except HTTPException:
         raise
     except Exception as e:
-        traceback.print_exc()
-        logger.error(f"Error deleting project: {e}")
+        logger.exception(f"Error deleting project: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to delete project: {str(e)}")
 
 

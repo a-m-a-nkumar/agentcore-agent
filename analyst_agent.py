@@ -4,9 +4,21 @@ This agent uses Lambda functions as tools for requirements gathering and BRD gen
 """
 
 import json
+import logging
 import os
+import ssl
 import threading
+import traceback
+import uuid
 from typing import Optional
+from urllib import request as _urlreq
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    stream=None,  # defaults to stderr, captured by CloudWatch/AgentCore runtime
+)
+logger = logging.getLogger(__name__)
 
 # Per-invocation user_id (set by entrypoint, read by tools when building Lambda payloads
 # so each Lambda can attribute its own LLM token usage to the right user).
@@ -23,14 +35,11 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
         backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
         api_key = os.getenv("INTERNAL_API_KEY", "")
         if not backend_url or not api_key:
-            print(f"[ANALYST-AGENT] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY not set "
-                  f"(would have recorded {total_tokens} tokens for {user_id})", flush=True)
+            logger.info(f"[ANALYST-AGENT] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY not set "
+                        f"(would have recorded {total_tokens} tokens for {user_id})")
             return
         try:
-            import json as _json
-            import ssl as _ssl
-            from urllib import request as _urlreq
-            body = _json.dumps({
+            body = json.dumps({
                 "user_id": user_id, "tokens": total_tokens, "source": source,
             }).encode("utf-8")
             req = _urlreq.Request(
@@ -41,14 +50,14 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
             )
             ctx = None
             if os.getenv("INTERNAL_TLS_VERIFY", "1") == "0":
-                ctx = _ssl.create_default_context()
+                ctx = ssl.create_default_context()
                 ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
+                ctx.verify_mode = ssl.CERT_NONE
             with _urlreq.urlopen(req, timeout=5, context=ctx) as resp:
                 if resp.status >= 400:
-                    print(f"[ANALYST-AGENT] record-tokens callback {resp.status}: {resp.read()[:200]!r}", flush=True)
+                    logger.error(f"[ANALYST-AGENT] record-tokens callback {resp.status}: {resp.read()[:200]!r}")
         except Exception as e:
-            print(f"[ANALYST-AGENT] record-tokens callback failed for {user_id}: {e}", flush=True)
+            logger.error(f"[ANALYST-AGENT] record-tokens callback failed for {user_id}: {e}")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -70,25 +79,25 @@ def _capture_strands_metrics(agent_obj, user_id: Optional[str], source: str) -> 
         else:
             total = getattr(usage, "totalTokens", 0) or getattr(usage, "total_tokens", 0)
         if total:
-            print(f"[ANALYST-AGENT] Strands tokens={total} user={user_id} source={source}", flush=True)
+            logger.info(f"[ANALYST-AGENT] Strands tokens={total} user={user_id} source={source}")
             _record_tokens_via_callback(user_id, int(total), source)
     except Exception as e:
-        print(f"[ANALYST-AGENT] _capture_strands_metrics failed: {e}", flush=True)
+        logger.error(f"[ANALYST-AGENT] _capture_strands_metrics failed: {e}")
 
 # Defensive import strategy for BedrockAgentCoreApp (same as my_agent)
 try:
     from bedrock_agentcore.runtime import BedrockAgentCoreApp
-    print("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore.runtime", flush=True)
+    logger.info("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore.runtime")
 except ImportError:
     try:
         from bedrock_agentcore import BedrockAgentCoreApp
-        print("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore", flush=True)
+        logger.info("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore")
     except ImportError:
         try:
             from bedrock_agentcore.runtime.app import BedrockAgentCoreApp
-            print("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore.runtime.app", flush=True)
+            logger.info("[ANALYST-AGENT] Imported BedrockAgentCoreApp from bedrock_agentcore.runtime.app")
         except ImportError as e:
-            print(f"[ANALYST-AGENT] Failed to import BedrockAgentCoreApp: {e}", flush=True)
+            logger.error(f"[ANALYST-AGENT] Failed to import BedrockAgentCoreApp: {e}")
             raise
 
 from strands import Agent, tool
@@ -153,8 +162,8 @@ def invoke_lambda_tool(function_name: str, payload: dict) -> dict:
     """
     try:
         lambda_client = _get_lambda_client()
-        print(f"[ANALYST-AGENT] Invoking Lambda: {function_name}", flush=True)
-        print(f"[ANALYST-AGENT] Payload keys: {list(payload.keys())}", flush=True)
+        logger.info(f"[ANALYST-AGENT] Invoking Lambda: {function_name}")
+        logger.info(f"[ANALYST-AGENT] Payload keys: {list(payload.keys())}")
         
         response = lambda_client.invoke(
             FunctionName=function_name,
@@ -166,16 +175,15 @@ def invoke_lambda_tool(function_name: str, payload: dict) -> dict:
         
         if 'FunctionError' in response:
             error_msg = response_payload.get('errorMessage', 'Unknown Lambda error')
-            print(f"[ANALYST-AGENT] Lambda error: {error_msg}", flush=True)
+            logger.error(f"[ANALYST-AGENT] Lambda error: {error_msg}")
             raise Exception(f"Lambda function error: {error_msg}")
-        
-        print(f"[ANALYST-AGENT] Lambda response received successfully", flush=True)
+
+        logger.info(f"[ANALYST-AGENT] Lambda response received successfully")
         return response_payload
         
     except Exception as e:
-        print(f"[ANALYST-AGENT] Error invoking Lambda {function_name}: {str(e)}", flush=True)
-        import traceback
-        print(traceback.format_exc(), flush=True)
+        logger.error(f"[ANALYST-AGENT] Error invoking Lambda {function_name}: {str(e)}")
+        logger.exception("Exception details:")
         raise
 
 
@@ -230,7 +238,7 @@ def gather_requirements(session_id: str, user_message: str) -> str:
         
     except Exception as e:
         error_msg = f"Error in requirements gathering: {str(e)}"
-        print(f"[ANALYST-AGENT] {error_msg}", flush=True)
+        logger.error(f"[ANALYST-AGENT] {error_msg}")
         return error_msg
 
 
@@ -293,7 +301,7 @@ def generate_brd_from_history(session_id: str, brd_id: Optional[str] = None) -> 
         
     except Exception as e:
         error_msg = f"Error generating BRD: {str(e)}"
-        print(f"[ANALYST-AGENT] {error_msg}", flush=True)
+        logger.error(f"[ANALYST-AGENT] {error_msg}")
         return error_msg
 
 
@@ -348,16 +356,15 @@ IMPORTANT:
             
             if not fresh:
                 _agent_instance = agent
-                print("[ANALYST-AGENT] Strands agent initialized with Lambda tools", flush=True)
+                logger.info("[ANALYST-AGENT] Strands agent initialized with Lambda tools")
             else:
-                print("[ANALYST-AGENT] Created fresh Strands agent instance", flush=True)
-            
+                logger.info("[ANALYST-AGENT] Created fresh Strands agent instance")
+
             return agent
-            
+
         except Exception as e:
-            print(f"[ANALYST-AGENT] Error initializing agent: {str(e)}", flush=True)
-            import traceback
-            print(traceback.format_exc(), flush=True)
+            logger.error(f"[ANALYST-AGENT] Error initializing agent: {str(e)}")
+            logger.exception("Exception details:")
             raise
     
     return _agent_instance
@@ -380,28 +387,27 @@ def invoke(payload):
     """
     global _current_user_id
     try:
-        print("=" * 80, flush=True)
-        print("[ANALYST-AGENT] Handler invoked (Strands + Lambda Tools)", flush=True)
-        print("=" * 80, flush=True)
+        logger.info("=" * 80)
+        logger.info("[ANALYST-AGENT] Handler invoked (Strands + Lambda Tools)")
+        logger.info("=" * 80)
 
         # Stash user_id so tools can attribute Lambda LLM calls.
         _current_user_id = payload.get("user_id") or None
-        print(f"[ANALYST-AGENT] user_id={_current_user_id or 'unknown'}", flush=True)
+        logger.info(f"[ANALYST-AGENT] user_id={_current_user_id or 'unknown'}")
 
         # Extract user message
         user_message = payload.get("prompt") or payload.get("text") or payload.get("message", "Hello! I'd like to create a BRD.")
 
-        print(f"[ANALYST-AGENT] User message: {user_message[:200]}...", flush=True)
-        print(f"[ANALYST-AGENT] Payload keys: {list(payload.keys())}", flush=True)
+        logger.info(f"[ANALYST-AGENT] User message: {user_message[:200]}...")
+        logger.info(f"[ANALYST-AGENT] Payload keys: {list(payload.keys())}")
         
         # Get or create session ID
         session_id = payload.get("session_id") or payload.get("runtime_session_id")
         if not session_id:
-            import uuid
             session_id = f"analyst-session-{str(uuid.uuid4())}"
-            print(f"[ANALYST-AGENT] Generated new session ID: {session_id}", flush=True)
+            logger.info(f"[ANALYST-AGENT] Generated new session ID: {session_id}")
         else:
-            print(f"[ANALYST-AGENT] Using session ID: {session_id}", flush=True)
+            logger.info(f"[ANALYST-AGENT] Using session ID: {session_id}")
         
         # Check if this is a BRD generation request
         is_generate_request = any(keyword in user_message.lower() for keyword in [
@@ -411,7 +417,7 @@ def invoke(payload):
         
         # If it's a generate request, use the generate_brd_from_history tool directly
         if is_generate_request:
-            print(f"[ANALYST-AGENT] Detected BRD generation request, calling generate_brd_from_history tool", flush=True)
+            logger.info(f"[ANALYST-AGENT] Detected BRD generation request, calling generate_brd_from_history tool")
             try:
                 result_text = generate_brd_from_history(session_id=session_id)
                 return json.dumps({
@@ -421,7 +427,7 @@ def invoke(payload):
                 })
             except Exception as e:
                 error_msg = f"Error generating BRD: {str(e)}"
-                print(f"[ANALYST-AGENT] {error_msg}", flush=True)
+                logger.error(f"[ANALYST-AGENT] {error_msg}")
                 return json.dumps({
                     "result": error_msg,
                     "session_id": session_id,
@@ -429,7 +435,7 @@ def invoke(payload):
                 })
         
         # For all other messages, ALWAYS call gather_requirements to ensure messages are stored
-        print(f"[ANALYST-AGENT] Calling gather_requirements tool to store message and get response", flush=True)
+        logger.info(f"[ANALYST-AGENT] Calling gather_requirements tool to store message and get response")
         try:
             result_text = gather_requirements(session_id=session_id, user_message=user_message)
             
@@ -441,12 +447,11 @@ def invoke(payload):
             }
         except Exception as e:
             error_msg = f"Error in requirements gathering: {str(e)}"
-            print(f"[ANALYST-AGENT] {error_msg}", flush=True)
-            import traceback
-            print(traceback.format_exc(), flush=True)
-            
+            logger.error(f"[ANALYST-AGENT] {error_msg}")
+            logger.exception("Exception details:")
+
             # Fallback: try using the agent directly if tool call fails
-            print(f"[ANALYST-AGENT] Falling back to direct agent call", flush=True)
+            logger.info(f"[ANALYST-AGENT] Falling back to direct agent call")
             agent = _get_agent()
             
             # Build prompt for the agent with session context
@@ -471,7 +476,7 @@ Please help the user with their BRD requirements gathering or generation request
             else:
                 result_text = str(result)
             
-            print(f"[ANALYST-AGENT] Agent response generated successfully", flush=True)
+            logger.info(f"[ANALYST-AGENT] Agent response generated successfully")
             
             # Return dict with session_id (not JSON string - let AgentCore handle serialization)
             return {
@@ -482,9 +487,8 @@ Please help the user with their BRD requirements gathering or generation request
             
         except Exception as e:
             error_msg = f"I apologize, but I encountered an error: {str(e)}"
-            print(f"[ANALYST-AGENT] Error in agent execution: {str(e)}", flush=True)
-            import traceback
-            print(traceback.format_exc(), flush=True)
+            logger.error(f"[ANALYST-AGENT] Error in agent execution: {str(e)}")
+            logger.exception("Exception details:")
             
             return {
                 "result": error_msg,
@@ -493,9 +497,8 @@ Please help the user with their BRD requirements gathering or generation request
             }
     
     except Exception as e:
-        print(f"[ANALYST-AGENT] Error in invoke: {str(e)}", flush=True)
-        import traceback
-        print(traceback.format_exc(), flush=True)
+        logger.error(f"[ANALYST-AGENT] Error in invoke: {str(e)}")
+        logger.exception("Exception details:")
 
         session_id = payload.get("session_id", "unknown")
         return {
@@ -508,8 +511,8 @@ Please help the user with their BRD requirements gathering or generation request
 
 
 # Run the app when module is loaded (always run, not just when executed directly)
-print("[ANALYST-AGENT] Initializing AgentCore Runtime app...", flush=True)
-print(f"[ANALYST-AGENT] Gateway Model: {GATEWAY_MODEL} via {DLXAI_GATEWAY_URL}", flush=True)
-print(f"[ANALYST-AGENT] Lambda Requirements Gathering ARN: {LAMBDA_REQUIREMENTS_GATHERING_ARN}", flush=True)
-print(f"[ANALYST-AGENT] Lambda BRD from History ARN: {LAMBDA_BRD_FROM_HISTORY_ARN}", flush=True)
+logger.info("[ANALYST-AGENT] Initializing AgentCore Runtime app...")
+logger.info(f"[ANALYST-AGENT] Gateway Model: {GATEWAY_MODEL} via {DLXAI_GATEWAY_URL}")
+logger.info(f"[ANALYST-AGENT] Lambda Requirements Gathering ARN: {LAMBDA_REQUIREMENTS_GATHERING_ARN}")
+logger.info(f"[ANALYST-AGENT] Lambda BRD from History ARN: {LAMBDA_BRD_FROM_HISTORY_ARN}")
 app.run()

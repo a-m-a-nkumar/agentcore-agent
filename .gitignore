@@ -37,10 +37,12 @@ env/
 *.swo
 *~
 
-# Logs
+# Logs and diagnostic output
 *.log
 logs.txt
 latest_logs.txt
+db_test_results.txt
+diagnostic.txt
 
 # OS
 .DS_Store
@@ -51,12 +53,25 @@ lambda_*_package/
 lambda_builds/
 *.zip
 
+# Agent backup snapshots (auto-generated, never commit)
+.agent_backup_*/
+
 # AgentCore
 .bedrock_agentcore/
 
 # Temporary files
 *.tmp
 *.bak
+
+# AWS credentials and secrets — NEVER commit these
+credentials.txt
+credentials
+*.pem
+
+# Recovered / temporary data files
+BRD_recovered.json
+BRD_recovered.txt
+_recovered_messages.json
 
 # Cloned upstream MCP repo (independent git repo, tracked separately)
 src/mcp/

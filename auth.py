@@ -401,5 +401,5 @@ def verify_azure_token(authorization: Optional[str] = Header(None)) -> dict:
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {str(e)}")
     except Exception as e:
-        traceback.print_exc()
+        logger.exception(f"Token verification failed: {e}")
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")

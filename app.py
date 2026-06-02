@@ -1,28 +1,36 @@
-import os
-import uuid
+﻿import asyncio
+import base64
+import email
 import hashlib
-import json
-import re
-import asyncio
-import time
-import boto3
-from botocore.exceptions import ClientError
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
-from pydantic import BaseModel
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.staticfiles import StaticFiles
-from fastapi.templating import Jinja2Templates
-from fastapi.requests import Request
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-from docx import Document
 import io
-import jwt
-from jwt import PyJWKClient
+import json
+import logging
+import os
+import re
+import time
+import traceback
+import uuid
+from datetime import datetime
 from functools import wraps
 from typing import Optional, List
+
+import boto3
+import jwt
 import requests
-from datetime import datetime
+from botocore.config import Config
+from botocore.exceptions import ClientError
+from docx import Document
+from dotenv import load_dotenv
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.requests import Request
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, Response
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from jwt import PyJWKClient
+from pydantic import BaseModel
+from pypdf import PdfReader
 
 # Import API routers
 from routers.projects import router as projects_router
@@ -43,10 +51,24 @@ from routers.harness import router as harness_router
 from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
 from routers.figma import router as figma_router
+from routers.internal_utils import validate_api_key
 # Import database helpers for session persistence
-from db_helper import save_project_brd_session, create_or_update_user, update_user_access_role
+from db_helper import (
+    save_project_brd_session,
+    create_or_update_user,
+    update_user_access_role,
+    track_event,
+    get_user_usage,
+    get_user_module_rollup,
+    get_user_recent_events,
+    list_all_users_usage,
+    increment_user_token_usage,
+    KMSCredentialsExpiredError,
+)
 # Environment-specific S3 implementation (local: plain boto3 | VDI: SSE-KMS)
 from environment import s3_put_object, get_s3_client  # noqa: F401
+
+logger = logging.getLogger(__name__)
 
 load_dotenv(override=True)
 
@@ -96,26 +118,27 @@ def _build_bmad_prompt(base_prompt: str, workflow_key: str = "create-prd") -> st
 # Add CORS middleware. The localhost origins cover the typical Vite + CRA dev
 # servers. The two deployed frontend hosts are included so a developer can
 # point the deployed UI at their LOCAL backend (running this file directly)
-# during integration testing — without that, the browser blocks the cross-
+# during integration testing â€” without that, the browser blocks the cross-
 # origin POST with "Response to preflight request doesn't pass access control
 # check: No 'Access-Control-Allow-Origin' header is present".
+_DEFAULT_ORIGINS = [
+    “http://localhost:8080”, “http://localhost:8081”, “http://localhost:8082”,
+    “http://localhost:8083”, “http://localhost:5173”,
+    “http://127.0.0.1:8080”, “http://127.0.0.1:8081”, “http://127.0.0.1:8082”,
+    “http://127.0.0.1:8083”, “http://127.0.0.1:5173”,
+    “https://sdlc-dev.deluxe.com”,
+    “https://ai-labs.deluxe.com”,
+]
+_raw_origins = os.getenv(“ALLOWED_ORIGINS”, “”)
+_allowed_origins = [o.strip() for o in _raw_origins.split(“,”) if o.strip()] or _DEFAULT_ORIGINS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        # Local dev servers — Vite falls back to next available port when 8080 is taken
-        "http://localhost:8080", "http://localhost:8081", "http://localhost:8082",
-        "http://localhost:8083", "http://localhost:5173",
-        "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:8082",
-        "http://127.0.0.1:8083", "http://127.0.0.1:5173",
-        # Deployed frontends — needed when testing local backend against
-        # the deployed UI in the browser.
-        "https://sdlc-dev.deluxe.com",
-        "https://ai-labs.deluxe.com",
-    ],
+    allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*", "Authorization", "Content-Type"],
-    expose_headers=["*"],
+    allow_methods=[“*”],
+    allow_headers=[“*”, “Authorization”, “Content-Type”],
+    expose_headers=[“*”],
 )
 
 # Register API routers
@@ -147,18 +170,18 @@ async def log_requests(request: Request, call_next):
         request.url.path.startswith("/api/analyst-chat") or
         request.url.path.startswith("/api/analyst-chat-stream")):
         auth_header = request.headers.get("authorization") or request.headers.get("Authorization")
-        print(f"\n[REQUEST] {request.method} {request.url.path}")
-        print(f"[REQUEST] Authorization header present: {bool(auth_header)}")
+        logger.debug("[REQUEST] %s %s", request.method, request.url.path)
+        logger.debug("[REQUEST] Authorization header present: %s", bool(auth_header))
         if auth_header:
-            print(f"[REQUEST] Auth header (first 30 chars): {auth_header[:30]}...")
+            logger.debug("[REQUEST] Auth header (first 30 chars): %s...", auth_header[:30])
         else:
-            print(f"[REQUEST] All headers: {list(request.headers.keys())}")
+            logger.debug("[REQUEST] All headers: %s", list(request.headers.keys()))
     
     response = await call_next(request)
     return response
 
 # Configuration (from .env / environment switch)
-# ARN defaults come from environment.py — local account (448049797912) or VDI account (590184044598)
+# ARN defaults come from environment.py â€” local account (448049797912) or VDI account (590184044598)
 from environment import (  # noqa: E402
     DEFAULT_AGENT_ARN, DEFAULT_ANALYST_AGENT_ARN,
     DEFAULT_LAMBDA_BRD_CHAT, DEFAULT_LAMBDA_BRD_FROM_HISTORY,
@@ -178,9 +201,9 @@ AGENTCORE_MEMORY_ID = os.getenv("AGENTCORE_MEMORY_ID", DEFAULT_AGENTCORE_MEMORY_
 AGENTCORE_ACTOR_ID = os.getenv("AGENTCORE_ACTOR_ID", DEFAULT_AGENTCORE_ACTOR_ID)
 
 # Log agent ARNs on startup
-print(f"\n[CONFIG] Agent ARN: {AGENT_ARN}")
-print(f"[CONFIG] Analyst Agent ARN: {ANALYST_AGENT_ARN}")
-print(f"[CONFIG] Region: {REGION}\n")
+logger.info("[CONFIG] Agent ARN: %s", AGENT_ARN)
+logger.info("[CONFIG] Analyst Agent ARN: %s", ANALYST_AGENT_ARN)
+logger.info("[CONFIG] Region: %s", REGION)
 
 # Azure AD Configuration
 AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
@@ -212,27 +235,21 @@ _LAST_ACCESS_ROLE_CACHE: dict[str, str] = {}
 templates = Jinja2Templates(directory="templates")
 
 # Exception handler for validation errors
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     """Log detailed validation errors"""
-    print(f"\n[VALIDATION ERROR] Path: {request.url.path}")
-    print(f"[VALIDATION ERROR] Details: {json.dumps(exc.errors(), indent=2)}")
+    logger.warning("[VALIDATION ERROR] Path: %s", request.url.path)
+    logger.warning("[VALIDATION ERROR] Details: %s", json.dumps(exc.errors(), indent=2))
     try:
         body = await request.json()
-        print(f"[VALIDATION ERROR] Body: {json.dumps(body, indent=2)}")
+        logger.warning("[VALIDATION ERROR] Body: %s", json.dumps(body, indent=2))
     except Exception:
-        print(f"[VALIDATION ERROR] Body: <could not parse json>")
+        logger.warning("[VALIDATION ERROR] Body: <could not parse json>")
 
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": "Check server logs for details"},
     )
-
-
-from db_helper import KMSCredentialsExpiredError
 
 
 @app.exception_handler(KMSCredentialsExpiredError)
@@ -264,7 +281,6 @@ def check_aws_credentials():
 
 def get_agent_core_client():
     """Get a fresh AgentCore client with increased timeout for long-running operations"""
-    from botocore.config import Config
     # Increase timeout to 5 minutes (300 seconds) for BRD generation
     config = Config(
         read_timeout=300,
@@ -275,7 +291,6 @@ def get_agent_core_client():
 
 def get_lambda_client():
     """Get a fresh Lambda client with extended timeout for long-running Lambda functions"""
-    from botocore.config import Config
     # Increase timeout to 15 minutes (900 seconds) - max Lambda execution time
     config = Config(
         read_timeout=900,
@@ -304,47 +319,47 @@ async def get_current_user(request: Request) -> dict:
     authorization = request.headers.get("authorization") or request.headers.get("Authorization")
     
     if not authorization:
-        print(f"[AUTH] Authorization header missing. Headers: {list(request.headers.keys())}")
+        logger.warning("[AUTH] Authorization header missing. Headers: %s", list(request.headers.keys()))
         raise HTTPException(status_code=401, detail="Authorization header missing")
-    
+
     if not authorization.startswith("Bearer "):
-        print(f"[AUTH] Invalid authorization header format: {authorization[:20]}...")
+        logger.warning("[AUTH] Invalid authorization header format: %s...", authorization[:20])
         raise HTTPException(status_code=401, detail="Invalid authorization header format")
-    
+
     token = authorization.replace("Bearer ", "").strip()
-    print(f"[AUTH] Token received (first 20 chars): {token[:20]}...")
-    
+    logger.debug("[AUTH] Token received (first 20 chars): %s...", token[:20])
+
     try:
         user_info = verify_azure_token(token)
-        print(f"[AUTH] Token verified successfully for user: {user_info.get('email') or user_info.get('preferred_username')}")
+        logger.debug("[AUTH] Token verified successfully for user: %s", user_info.get('email') or user_info.get('preferred_username'))
     except HTTPException as e:
-        print(f"[AUTH] Token verification failed: {e.detail}")
+        logger.warning("[AUTH] Token verification failed: %s", e.detail)
         raise
     except Exception as e:
-        print(f"[AUTH] Unexpected error during token verification: {str(e)}")
+        logger.warning("[AUTH] Unexpected error during token verification: %s", str(e))
         raise HTTPException(status_code=401, detail=f"Token verification failed: {str(e)}")
-    
+
     user_id = user_info.get("oid") or user_info.get("sub")
     email = user_info.get("email") or user_info.get("preferred_username")
     name = user_info.get("name")
 
-    print(f"[AUTH] User ID: {user_id}, Email: {email}")
+    logger.debug("[AUTH] User ID: %s, Email: %s", user_id, email)
 
     try:
         groups = extract_user_groups(user_info)
     except GraphResolutionError as e:
         # Overage user (>200 groups) whose Graph fallback failed. Do NOT
-        # silently return empty modules — that would render AccessDenied
+        # silently return empty modules â€” that would render AccessDenied
         # (a lie). 503 lets the frontend retry; transient Graph hiccups
         # then self-heal without anyone seeing the permanent denied page.
-        print(f"[AUTH] Graph resolution failed for {email}: {e}")
+        logger.warning("[AUTH] Graph resolution failed for %s: %s", email, e)
         raise HTTPException(
             status_code=503,
-            detail="Permission check temporarily unavailable — please retry in a moment.",
+            detail="Permission check temporarily unavailable â€” please retry in a moment.",
         )
     allowed_modules = compute_allowed_modules(groups)
     access_role = compute_access_role(groups)
-    print(f"[AUTH] Groups: {groups}, Allowed modules: {allowed_modules}, access_role: {access_role}")
+    logger.debug("[AUTH] Groups: %s, Allowed modules: %s, access_role: %s", groups, allowed_modules, access_role)
 
     # Persist access_role to users.access_role (cached per worker so we only
     # write when the role actually changes for this user).
@@ -353,20 +368,20 @@ async def get_current_user(request: Request) -> dict:
     # branch can satisfy users.email NOT NULL on a brand-new (or admin-
     # deleted) row. Without these, PostgreSQL's NOT NULL check on the
     # prospective INSERT row would fire BEFORE ON CONFLICT detection,
-    # blocking the write even when the row already exists — that was the
+    # blocking the write even when the row already exists â€” that was the
     # "stuck NONE / NO GROUPS" pill scenario.
     if user_id and _LAST_ACCESS_ROLE_CACHE.get(user_id) != access_role:
         try:
             if update_user_access_role(user_id, access_role, email=email, name=name):
                 _LAST_ACCESS_ROLE_CACHE[user_id] = access_role
         except Exception as e:
-            print(f"[AUTH] Warning: Failed to persist access_role for {user_id}: {e}")
+            logger.info(f"[AUTH] Warning: Failed to persist access_role for {user_id}: {e}")
 
     # Store user identity in AgentCore if not exists
     try:
         store_user_identity_in_agentcore(user_id=user_id, email=email, name=name or "")
     except Exception as e:
-        print(f"[AUTH] Warning: Failed to store user identity in AgentCore: {e}")
+        logger.info(f"[AUTH] Warning: Failed to store user identity in AgentCore: {e}")
 
     return {
         "user_id": user_id,
@@ -493,7 +508,6 @@ def clean_markdown_text(text: str) -> str:
 
 def parse_markdown_table(text: str):
     """Parse markdown table format into rows"""
-    import re
     lines = text.strip().split('\n')
     rows = []
     
@@ -756,34 +770,33 @@ try:
     # Verify credentials on startup
     creds_valid, creds_info = check_aws_credentials()
     if creds_valid:
-        print(f"[APP] ✅ AWS credentials valid. Account: {creds_info.get('Account', 'Unknown')}")
-        print(f"[APP] User: {creds_info.get('Arn', 'Unknown')}")
+        logger.info(f"[APP] âœ… AWS credentials valid. Account: {creds_info.get('Account', 'Unknown')}")
+        logger.info(f"[APP] User: {creds_info.get('Arn', 'Unknown')}")
     else:
-        print(f"[APP] [WARN] AWS credentials check failed: {creds_info}")
-        print("[APP] Please configure AWS credentials using:")
-        print("  - AWS CLI: aws configure")
-        print("  - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
-        print("  - Or use AWS SSO/credentials file")
+        logger.info(f"[APP] [WARN] AWS credentials check failed: {creds_info}")
+        logger.info("[APP] Please configure AWS credentials using:")
+        logger.info("  - AWS CLI: aws configure")
+        logger.info("  - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
+        logger.info("  - Or use AWS SSO/credentials file")
     
     # Test client initialization
     test_client = get_agent_core_client()
-    print(f"[APP] ✅ AgentCore client initialized successfully")
+    logger.info(f"[APP] âœ… AgentCore client initialized successfully")
 except Exception as e:
-    print(f"[APP] [ERROR] Failed to initialize AWS clients: {e}")
-    print("[APP] Please configure AWS credentials using:")
-    print("  - AWS CLI: aws configure")
-    print("  - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
-    print("  - Or use AWS SSO/credentials file")
+    logger.info(f"[APP] [ERROR] Failed to initialize AWS clients: {e}")
+    logger.info("[APP] Please configure AWS credentials using:")
+    logger.info("  - AWS CLI: aws configure")
+    logger.info("  - Environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY")
+    logger.info("  - Or use AWS SSO/credentials file")
 
 def read_docx(file_content):
     doc = Document(io.BytesIO(file_content))
     return "\n".join([p.text for p in doc.paragraphs])
 
 def read_pdf(file_content):
-    # Use `pypdf` (the modern fork) — it's what requirements.txt installs.
+    # Use `pypdf` (the modern fork) â€” it's what requirements.txt installs.
     # Importing `PyPDF2` instead would ImportError at runtime since that
     # package is not in the deployed image.
-    from pypdf import PdfReader
     reader = PdfReader(io.BytesIO(file_content))
     return "\n".join([page.extract_text() or "" for page in reader.pages])
 
@@ -808,24 +821,24 @@ async def generate_brd(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        print("\n" + "="*80)
-        print("[APP] Starting BRD generation")
-        print("="*80)
+        logger.info("\n" + "="*80)
+        logger.info("[APP] Starting BRD generation")
+        logger.info("="*80)
         
         # 1. Read files
         transcript_content = await transcript.read()
         template_content = await template.read()
         
-        print(f"[APP] Transcript file: {transcript.filename} ({len(transcript_content)} bytes)")
-        print(f"[APP] Template file: {template.filename} ({len(template_content)} bytes)")
+        logger.info(f"[APP] Transcript file: {transcript.filename} ({len(transcript_content)} bytes)")
+        logger.info(f"[APP] Template file: {template.filename} ({len(template_content)} bytes)")
         
         # 2. Extract text (supports .docx, .pdf, .txt)
         transcript_text = extract_text(transcript_content, transcript.filename)
 
         template_text = read_docx(template_content)
 
-        print(f"[APP] Transcript text: {len(transcript_text)} chars")
-        print(f"[APP] Template text: {len(template_text)} chars")
+        logger.info(f"[APP] Transcript text: {len(transcript_text)} chars")
+        logger.info(f"[APP] Template text: {len(template_text)} chars")
 
         # Validate transcript is not empty
         if not transcript_text or len(transcript_text.strip()) < 50:
@@ -844,14 +857,14 @@ async def generate_brd(
         }
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
-        print(f"[APP] Payload size: {len(payload_bytes)} bytes")
+        logger.info(f"[APP] Payload size: {len(payload_bytes)} bytes")
         
         # 4. Invoke Agent
         session_id = str(uuid.uuid4())
-        print(f"[APP] Session ID: {session_id}")
-        print(f"[APP] Agent ARN: {AGENT_ARN}")
-        print(f"[APP] Calling agent...")
-        print(f"[APP] Note: BRD generation may take 1-3 minutes. Please wait...")
+        logger.info(f"[APP] Session ID: {session_id}")
+        logger.info(f"[APP] Agent ARN: {AGENT_ARN}")
+        logger.info(f"[APP] Calling agent...")
+        logger.info(f"[APP] Note: BRD generation may take 1-3 minutes. Please wait...")
         
         # Get fresh client to ensure we use latest credentials
         # Increased timeout to 5 minutes for BRD generation
@@ -870,9 +883,9 @@ async def generate_brd(
             )
         except Exception as timeout_error:
             if "timeout" in str(timeout_error).lower() or "ReadTimeoutError" in str(type(timeout_error).__name__):
-                print(f"[APP] ⚠️  Request timed out. The agent may still be processing.")
-                print(f"[APP] This can happen if the BRD is very large or the agent is slow.")
-                print(f"[APP] Try checking CloudWatch logs or reducing the transcript/template size.")
+                logger.info(f"[APP] âš ï¸  Request timed out. The agent may still be processing.")
+                logger.info(f"[APP] This can happen if the BRD is very large or the agent is slow.")
+                logger.info(f"[APP] Try checking CloudWatch logs or reducing the transcript/template size.")
                 return JSONResponse(status_code=504, content={
                     "error": "Request timeout - agent took too long to respond",
                     "message": "BRD generation is taking longer than expected. The agent may still be processing. Try:\n1. Checking CloudWatch logs\n2. Reducing transcript/template size\n3. Retrying the request",
@@ -880,7 +893,7 @@ async def generate_brd(
                 })
             raise
         
-        print(f"[APP] Agent response received")
+        logger.info(f"[APP] Agent response received")
         
         # 5. Parse Response
         content = []
@@ -889,34 +902,34 @@ async def generate_brd(
             
         full_response_str = ''.join(content)
         
-        print(f"[APP] Response length: {len(full_response_str)} chars")
-        print(f"[APP] Response preview: {full_response_str[:300]}")
+        logger.info(f"[APP] Response length: {len(full_response_str)} chars")
+        logger.info(f"[APP] Response preview: {full_response_str[:300]}")
         
         # The agent now returns clean JSON with the BRD
         try:
             # First parse the outer response
             result_json = json.loads(full_response_str)
-            print(f"[APP] Parsed as JSON, keys: {list(result_json.keys())}")
+            logger.info(f"[APP] Parsed as JSON, keys: {list(result_json.keys())}")
             
             # The result field contains the agent's response
             if 'result' in result_json:
                 result_str = result_json['result']
-                print(f"[APP] Result preview: {result_str[:200]}")
+                logger.info(f"[APP] Result preview: {result_str[:200]}")
                 
                 # Agent now returns JSON with {status, brd, brd_id}
                 try:
                     agent_data = json.loads(result_str)
-                    print(f"[APP] Agent data keys: {list(agent_data.keys())}")
+                    logger.info(f"[APP] Agent data keys: {list(agent_data.keys())}")
                     
                     if agent_data.get('brd'):
-                        print(f"[APP] Found BRD! Length: {len(agent_data['brd'])} chars")
+                        logger.info(f"[APP] Found BRD! Length: {len(agent_data['brd'])} chars")
                         brd_id = agent_data.get('brd_id')
                         
                         # Create AgentCore Memory session for this BRD
                         session_id = None
                         if brd_id:
                             try:
-                                print(f"[APP] Creating AgentCore Memory session for BRD {brd_id}")
+                                logger.info(f"[APP] Creating AgentCore Memory session for BRD {brd_id}")
                                 # Call Lambda to create session
                                 lambda_client = get_lambda_client()
                                 session_payload = {
@@ -934,11 +947,11 @@ async def generate_brd(
                                 if session_result.get('statusCode') == 200:
                                     session_body = json.loads(session_result.get('body', '{}'))
                                     session_id = session_body.get('session_id')
-                                    print(f"[APP] ✅ Created session: {session_id}")
+                                    logger.info(f"[APP] âœ… Created session: {session_id}")
                                 else:
-                                    print(f"[APP] ⚠️  Session creation failed, will auto-create on first chat")
+                                    logger.info(f"[APP] âš ï¸  Session creation failed, will auto-create on first chat")
                             except Exception as e:
-                                print(f"[APP] ⚠️  Failed to create session: {e}, will auto-create on first chat")
+                                logger.info(f"[APP] âš ï¸  Failed to create session: {e}, will auto-create on first chat")
                         
                         return JSONResponse(content={
                             'result': agent_data['brd'],
@@ -953,14 +966,13 @@ async def generate_brd(
             return JSONResponse(content=result_json)
             
         except json.JSONDecodeError as e:
-            print(f"[APP] JSON decode error: {e}")
+            logger.info(f"[APP] JSON decode error: {e}")
             return JSONResponse(content={"result": full_response_str})
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[APP] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[APP] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         # Check if it's a credentials issue
         if "AccessDeniedException" in error_msg or "security token" in error_msg.lower() or "invalid" in error_msg.lower():
@@ -984,10 +996,10 @@ async def upload_transcript_to_s3(
 ):
     """Upload one or more transcript files to S3 and return S3 paths"""
     try:
-        print("\n" + "="*80)
-        print(f"[UPLOAD] Uploading {len(transcripts)} transcript(s) to S3")
-        print(f"[UPLOAD] User: {current_user.get('email')} ({current_user.get('user_id')})")
-        print("="*80)
+        logger.info("\n" + "="*80)
+        logger.info(f"[UPLOAD] Uploading {len(transcripts)} transcript(s) to S3")
+        logger.info(f"[UPLOAD] User: {current_user.get('email')} ({current_user.get('user_id')})")
+        logger.info("="*80)
 
         bucket_name = S3_BUCKET_NAME
         uploaded_files = []
@@ -997,8 +1009,8 @@ async def upload_transcript_to_s3(
             transcript_key = f"transcripts/{transcript_id}/{transcript.filename}"
             transcript_content = await transcript.read()
 
-            print(f"[UPLOAD] Uploading to S3: s3://{bucket_name}/{transcript_key}")
-            print(f"[UPLOAD] File: {transcript.filename}, Size: {len(transcript_content)} bytes")
+            logger.info(f"[UPLOAD] Uploading to S3: s3://{bucket_name}/{transcript_key}")
+            logger.info(f"[UPLOAD] File: {transcript.filename}, Size: {len(transcript_content)} bytes")
 
             s3_put_object(
                 key=transcript_key,
@@ -1013,7 +1025,7 @@ async def upload_transcript_to_s3(
                 "filename": transcript.filename
             })
 
-        print(f"[UPLOAD] ✅ Successfully uploaded {len(uploaded_files)} file(s) to S3")
+        logger.info(f"[UPLOAD] âœ… Successfully uploaded {len(uploaded_files)} file(s) to S3")
 
         # Return both multi-file format and single-file backward compat
         result = {
@@ -1031,9 +1043,8 @@ async def upload_transcript_to_s3(
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[UPLOAD] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[UPLOAD] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         return JSONResponse(status_code=500, content={
             "error": error_msg,
             "message": f"Failed to upload transcript to S3: {error_msg}"
@@ -1049,9 +1060,9 @@ async def generate_brd_from_s3(
     """Generate BRD from transcript(s) in S3 and template in S3"""
     t0 = time.time()
     try:
-        print("\n" + "="*80)
-        print("[APP] Starting BRD generation from S3")
-        print("="*80)
+        logger.info("\n" + "="*80)
+        logger.info("[APP] Starting BRD generation from S3")
+        logger.info("="*80)
 
         # Support both plural (new) and singular (backward compat) field names.
         # Filenames can contain commas (e.g. "Monday, March 30, part 2.txt"), so a
@@ -1077,34 +1088,34 @@ async def generate_brd_from_s3(
         # Template path in S3
         template_s3_path_key = "templates/Deluxe_BRD_Template.docx"
 
-        print(f"[APP] Transcript S3 paths ({len(s3_paths)}): {s3_paths}")
-        print(f"[APP] Template S3 path: {template_s3_path_key}")
+        logger.info(f"[APP] Transcript S3 paths ({len(s3_paths)}): {s3_paths}")
+        logger.info(f"[APP] Template S3 path: {template_s3_path_key}")
 
         # 1. Fetch and extract text from all transcript files
         transcript_texts = []
         for s3_path in s3_paths:
-            print(f"[APP] Fetching transcript from S3: {s3_path}")
+            logger.info(f"[APP] Fetching transcript from S3: {s3_path}")
             resp = s3_client.get_object(Bucket=bucket_name, Key=s3_path)
             content = resp['Body'].read()
-            print(f"[APP] File: {s3_path}, Size: {len(content)} bytes")
+            logger.info(f"[APP] File: {s3_path}, Size: {len(content)} bytes")
             text = extract_text(content, s3_path)
             transcript_texts.append(text)
 
         transcript_text = "\n\n---\n\n".join(transcript_texts)
 
         # 2. Fetch template from S3
-        print(f"[APP] Fetching template from S3...")
+        logger.info(f"[APP] Fetching template from S3...")
         template_response = s3_client.get_object(Bucket=bucket_name, Key=template_s3_path_key)
         template_content = template_response['Body'].read()
 
-        print(f"[APP] Combined transcript text: {len(transcript_text)} chars")
-        print(f"[APP] Template file: {len(template_content)} bytes")
+        logger.info(f"[APP] Combined transcript text: {len(transcript_text)} chars")
+        logger.info(f"[APP] Template file: {len(template_content)} bytes")
 
         # 3. Extract template text
         template_text = read_docx(template_content)
 
-        print(f"[APP] Transcript text: {len(transcript_text)} chars")
-        print(f"[APP] Template text: {len(template_text)} chars")
+        logger.info(f"[APP] Transcript text: {len(transcript_text)} chars")
+        logger.info(f"[APP] Template text: {len(template_text)} chars")
 
         # Validate transcript is not empty
         if not transcript_text or len(transcript_text.strip()) < 50:
@@ -1123,14 +1134,14 @@ async def generate_brd_from_s3(
         }
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
-        print(f"[APP] Payload size: {len(payload_bytes)} bytes")
+        logger.info(f"[APP] Payload size: {len(payload_bytes)} bytes")
         
         # 5. Invoke Agent (same as /generate endpoint)
         session_id = str(uuid.uuid4())
-        print(f"[APP] Session ID: {session_id}")
-        print(f"[APP] Agent ARN: {AGENT_ARN}")
-        print(f"[APP] Calling agent...")
-        print(f"[APP] Note: BRD generation may take 1-3 minutes. Please wait...")
+        logger.info(f"[APP] Session ID: {session_id}")
+        logger.info(f"[APP] Agent ARN: {AGENT_ARN}")
+        logger.info(f"[APP] Calling agent...")
+        logger.info(f"[APP] Note: BRD generation may take 1-3 minutes. Please wait...")
         
         agent_core_client = get_agent_core_client()
         
@@ -1147,7 +1158,7 @@ async def generate_brd_from_s3(
             )
         except Exception as timeout_error:
             if "timeout" in str(timeout_error).lower() or "ReadTimeoutError" in str(type(timeout_error).__name__):
-                print(f"[APP] ⚠️  Request timed out. The agent may still be processing.")
+                logger.info(f"[APP] âš ï¸  Request timed out. The agent may still be processing.")
                 return JSONResponse(status_code=504, content={
                     "error": "Request timeout - agent took too long to respond",
                     "message": "BRD generation is taking longer than expected. The agent may still be processing.",
@@ -1155,7 +1166,7 @@ async def generate_brd_from_s3(
                 })
             raise
         
-        print(f"[APP] Agent response received")
+        logger.info(f"[APP] Agent response received")
         
         # 6. Parse Response (same as /generate endpoint)
         content = []
@@ -1164,30 +1175,30 @@ async def generate_brd_from_s3(
             
         full_response_str = ''.join(content)
         
-        print(f"[APP] Response length: {len(full_response_str)} chars")
-        print(f"[APP] Response preview: {full_response_str[:300]}")
+        logger.info(f"[APP] Response length: {len(full_response_str)} chars")
+        logger.info(f"[APP] Response preview: {full_response_str[:300]}")
         
         try:
             result_json = json.loads(full_response_str)
-            print(f"[APP] Parsed as JSON, keys: {list(result_json.keys())}")
+            logger.info(f"[APP] Parsed as JSON, keys: {list(result_json.keys())}")
             
             if 'result' in result_json:
                 result_str = result_json['result']
-                print(f"[APP] Result preview: {result_str[:200]}")
+                logger.info(f"[APP] Result preview: {result_str[:200]}")
                 
                 try:
                     agent_data = json.loads(result_str)
-                    print(f"[APP] Agent data keys: {list(agent_data.keys())}")
+                    logger.info(f"[APP] Agent data keys: {list(agent_data.keys())}")
                     
                     if agent_data.get('brd'):
-                        print(f"[APP] Found BRD! Length: {len(agent_data['brd'])} chars")
+                        logger.info(f"[APP] Found BRD! Length: {len(agent_data['brd'])} chars")
                         brd_id = agent_data.get('brd_id')
                         
                         # Create AgentCore Memory session for this BRD
                         session_id_memory = None
                         if brd_id:
                             try:
-                                print(f"[APP] Creating AgentCore Memory session for BRD {brd_id}")
+                                logger.info(f"[APP] Creating AgentCore Memory session for BRD {brd_id}")
                                 lambda_client = get_lambda_client()
                                 session_payload = {
                                     'action': 'create_session',
@@ -1204,11 +1215,11 @@ async def generate_brd_from_s3(
                                 if session_result.get('statusCode') == 200:
                                     session_body = json.loads(session_result.get('body', '{}'))
                                     session_id_memory = session_body.get('session_id')
-                                    print(f"[APP] ✅ Created session: {session_id_memory}")
+                                    logger.info(f"[APP] âœ… Created session: {session_id_memory}")
                                 else:
-                                    print(f"[APP] ⚠️  Session creation failed, will auto-create on first chat")
+                                    logger.info(f"[APP] âš ï¸  Session creation failed, will auto-create on first chat")
                             except Exception as e:
-                                print(f"[APP] ⚠️  Failed to create session: {e}, will auto-create on first chat")
+                                logger.info(f"[APP] âš ï¸  Failed to create session: {e}, will auto-create on first chat")
                         
                         # Persist BRD session to project for future restoration
                         if project_id and brd_id:
@@ -1218,9 +1229,9 @@ async def generate_brd_from_s3(
                                     brd_id=brd_id,
                                     agentcore_session_id=session_id_memory
                                 )
-                                print(f"[APP] ✅ Persisted BRD session to project {project_id}")
+                                logger.info(f"[APP] âœ… Persisted BRD session to project {project_id}")
                             except Exception as e:
-                                print(f"[APP] ⚠️  Failed to persist BRD session: {e}")
+                                logger.info(f"[APP] âš ï¸  Failed to persist BRD session: {e}")
                         
                         try:
                             from db_helper import track_event
@@ -1237,7 +1248,7 @@ async def generate_brd_from_s3(
                                 },
                             )
                         except Exception as _track_err:
-                            print(f"[APP] track_event failed (non-fatal): {_track_err}")
+                            logger.info(f"[APP] track_event failed (non-fatal): {_track_err}")
 
                         return JSONResponse(content={
                             'result': agent_data['brd'],
@@ -1251,14 +1262,13 @@ async def generate_brd_from_s3(
             return JSONResponse(content=result_json)
             
         except json.JSONDecodeError as e:
-            print(f"[APP] JSON decode error: {e}")
+            logger.info(f"[APP] JSON decode error: {e}")
             return JSONResponse(content={"result": full_response_str})
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[APP] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[APP] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         if "AccessDeniedException" in error_msg or "security token" in error_msg.lower() or "invalid" in error_msg.lower():
             creds_valid, creds_info = check_aws_credentials()
@@ -1281,9 +1291,9 @@ async def chat_with_agent(
     current_user: dict = Depends(get_current_user)
 ):
     try:
-        print(f"\n[CHAT] Message: {message}")
-        print(f"[CHAT] BRD ID: {brd_id}")
-        print(f"[CHAT] Session ID: {session_id} (length: {len(session_id)})")
+        logger.info(f"\n[CHAT] Message: {message}")
+        logger.info(f"[CHAT] BRD ID: {brd_id}")
+        logger.info(f"[CHAT] Session ID: {session_id} (length: {len(session_id)})")
         
         # Ensure brd_id is valid (not "none")
         if brd_id == "none" or not brd_id:
@@ -1296,7 +1306,7 @@ async def chat_with_agent(
         if session_id == "none" or not session_id:
             # Generate a session ID based on BRD ID for consistency
             session_id = f"brd-session-{brd_id}"
-            print(f"[CHAT] Session ID was 'none', generated: {session_id}")
+            logger.info(f"[CHAT] Session ID was 'none', generated: {session_id}")
         
         # Format the message to be clear for the agent
         # Include session_id in the payload so the agent can pass it to the Lambda
@@ -1312,8 +1322,8 @@ async def chat_with_agent(
         }
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
-        print(f"[CHAT] Payload: {payload_dict}")
-        print(f"[CHAT] Calling agent...")
+        logger.info(f"[CHAT] Payload: {payload_dict}")
+        logger.info(f"[CHAT] Calling agent...")
         
         # Get fresh client to ensure we use latest credentials
         agent_core_client = get_agent_core_client()
@@ -1321,7 +1331,7 @@ async def chat_with_agent(
         # Use the consistent session_id as runtimeSessionId so that conversation
         # events are stored in AgentCore Memory under this session and can be
         # retrieved later by /api/brd-history.
-        print(f"[CHAT] Using runtimeSessionId: {session_id}")
+        logger.info(f"[CHAT] Using runtimeSessionId: {session_id}")
 
         loop = asyncio.get_event_loop()
         response = await loop.run_in_executor(
@@ -1339,16 +1349,16 @@ async def chat_with_agent(
             content.append(chunk.decode('utf-8'))
             
         full_response_str = ''.join(content)
-        print(f"[CHAT] Raw response: {full_response_str[:500]}")
-        print(f"[CHAT] Raw response type: {type(full_response_str)}")
-        print(f"[CHAT] Raw response length: {len(full_response_str)}")
+        logger.info(f"[CHAT] Raw response: {full_response_str[:500]}")
+        logger.info(f"[CHAT] Raw response type: {type(full_response_str)}")
+        logger.info(f"[CHAT] Raw response length: {len(full_response_str)}")
         
         # Parse the agent response to extract the actual text content
         final_text = None
         try:
             result_json = json.loads(full_response_str)
-            print(f"[CHAT] Parsed JSON, keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
-            print(f"[CHAT] Parsed JSON type: {type(result_json)}")
+            logger.info(f"[CHAT] Parsed JSON, keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
+            logger.info(f"[CHAT] Parsed JSON type: {type(result_json)}")
 
             # AgentCore returns responses in format: {'role': 'assistant', 'content': [{'text': '...'}]}
             # Extract the text from the content array
@@ -1383,14 +1393,14 @@ async def chat_with_agent(
 
             # Determine final_text from extraction results
             if extracted_text:
-                print(f"[CHAT] ✅ Extracted text successfully: {extracted_text[:200]}")
-                print(f"[CHAT] Extracted text type: {type(extracted_text)}")
-                print(f"[CHAT] Extracted text length: {len(extracted_text)}")
+                logger.info(f"[CHAT] âœ… Extracted text successfully: {extracted_text[:200]}")
+                logger.info(f"[CHAT] Extracted text type: {type(extracted_text)}")
+                logger.info(f"[CHAT] Extracted text length: {len(extracted_text)}")
                 if not isinstance(extracted_text, str):
                     extracted_text = str(extracted_text)
                 final_text = extracted_text
             else:
-                print(f"[CHAT] Could not extract text, trying to format response")
+                logger.info(f"[CHAT] Could not extract text, trying to format response")
                 if isinstance(result_json, dict):
                     for key in ['text', 'message', 'content', 'result', 'response', 'answer']:
                         if key in result_json:
@@ -1407,7 +1417,7 @@ async def chat_with_agent(
                     final_text = json.dumps(result_json, indent=2) if isinstance(result_json, dict) else full_response_str
 
         except json.JSONDecodeError:
-            print(f"[CHAT] Response is not JSON, returning as text")
+            logger.info(f"[CHAT] Response is not JSON, returning as text")
             final_text = full_response_str
 
         return JSONResponse(content={
@@ -1418,9 +1428,8 @@ async def chat_with_agent(
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[CHAT] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[CHAT] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         # Check if it's a credentials issue
         if "AccessDeniedException" in error_msg or "security token" in error_msg.lower() or "invalid" in error_msg.lower():
@@ -1442,47 +1451,47 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
     Handles both direct analyst agent responses and AgentCore-wrapped responses.
     Returns: (message_text, session_id)
     """
-    print(f"[extract_text] Called with response length: {len(response_str) if response_str else 0}")
+    logger.info(f"[extract_text] Called with response length: {len(response_str) if response_str else 0}")
     
     if not response_str or not isinstance(response_str, str):
-        print(f"[extract_text] Response is None or not string")
+        logger.info(f"[extract_text] Response is None or not string")
         return None, None
     
     response_trimmed = response_str.strip()
     if not response_trimmed.startswith('{'):
-        print(f"[extract_text] Response doesn't start with '{{', returning as plain text")
+        logger.info(f"[extract_text] Response doesn't start with '{{', returning as plain text")
         return response_str, None
     
-    print(f"[extract_text] Response starts with '{{'', attempting JSON parse")
-    print(f"[extract_text] First 200 chars: {response_trimmed[:200]}")
+    logger.info(f"[extract_text] Response starts with '{{'', attempting JSON parse")
+    logger.info(f"[extract_text] First 200 chars: {response_trimmed[:200]}")
     
     try:
         parsed = json.loads(response_trimmed)
-        print(f"[extract_text] JSON parse successful, type: {type(parsed)}")
+        logger.info(f"[extract_text] JSON parse successful, type: {type(parsed)}")
         
         if isinstance(parsed, dict):
-            print(f"[extract_text] Parsed dict keys: {list(parsed.keys())}")
+            logger.info(f"[extract_text] Parsed dict keys: {list(parsed.keys())}")
             
             # Case 1: Direct analyst agent response: {"result": "...", "session_id": "...", "message": "..."}
             has_message = 'message' in parsed
             has_result_and_session = ('result' in parsed and 'session_id' in parsed)
-            print(f"[extract_text] has_message: {has_message}, has_result_and_session: {has_result_and_session}")
+            logger.info(f"[extract_text] has_message: {has_message}, has_result_and_session: {has_result_and_session}")
             
             if has_message or has_result_and_session:
                 message_text = parsed.get('message') or parsed.get('result')
                 session_id = parsed.get('session_id')
-                print(f"[extract_text] Extracted message_text type: {type(message_text)}, length: {len(message_text) if isinstance(message_text, str) else 'N/A'}")
-                print(f"[extract_text] Extracted session_id: {session_id}")
+                logger.info(f"[extract_text] Extracted message_text type: {type(message_text)}, length: {len(message_text) if isinstance(message_text, str) else 'N/A'}")
+                logger.info(f"[extract_text] Extracted session_id: {session_id}")
                 
                 if message_text and isinstance(message_text, str):
-                    print(f"[extract_text] ✅ Returning message_text (string)")
+                    logger.info(f"[extract_text] âœ… Returning message_text (string)")
                     return message_text, session_id
                 elif message_text:
                     # If message_text is not a string, convert it
-                    print(f"[extract_text] ✅ Returning message_text (converted to string)")
+                    logger.info(f"[extract_text] âœ… Returning message_text (converted to string)")
                     return str(message_text), session_id
                 else:
-                    print(f"[extract_text] ⚠️ message_text is None or empty")
+                    logger.info(f"[extract_text] âš ï¸ message_text is None or empty")
             
             # Case 2: AgentCore wrapped response: {"result": "{\"result\": \"...\", \"session_id\": \"...\", \"message\": \"...\"}"}
             if 'result' in parsed:
@@ -1509,23 +1518,22 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
     except json.JSONDecodeError:
         pass
     except Exception as e:
-        print(f"[extract_text_from_analyst_response] Error: {e}")
+        logger.info(f"[extract_text_from_analyst_response] Error: {e}")
     
     return None, None
 
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Lambda Warm-Up endpoint
 # Called silently when the BRD Analyst page opens to pre-warm Lambda containers
 # before the user sends their first message.
-# ─────────────────────────────────────────────────────────────────────────────
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 @app.post("/api/analyst-warm")
 async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
     """
     Pre-warm Lambda functions used by the BRD Analyst Agent.
     Sends a lightweight 'ping' payload to both Lambdas in parallel.
-    Responds immediately with status — Lambda errors are non-fatal.
+    Responds immediately with status â€” Lambda errors are non-fatal.
     """
-    import asyncio
 
     LAMBDA_REQ = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
     LAMBDA_BRD = DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN
@@ -1534,7 +1542,6 @@ async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
 
     def _invoke_lambda(function_name: str) -> dict:
         try:
-            from botocore.config import Config
             config = Config(read_timeout=10, connect_timeout=5, retries={"max_attempts": 0})
             lc = boto3.client("lambda", region_name=os.getenv("AWS_REGION", "us-east-1"), config=config)
             resp = lc.invoke(
@@ -1543,13 +1550,13 @@ async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
                 Payload=ping_payload
             )
             status = resp.get("StatusCode", 0)
-            print(f"[WARM-UP] ✅ {function_name.split(':')[-1]} → HTTP {status}", flush=True)
+            logger.info(f"[WARM-UP] âœ… {function_name.split(':')[-1]} â†’ HTTP {status}")
             return {"function": function_name.split(":")[-1], "status": status, "warmed": True}
         except Exception as e:
-            print(f"[WARM-UP] ⚠️  {function_name.split(':')[-1]} ping failed (non-fatal): {e}", flush=True)
+            logger.info(f"[WARM-UP] âš ï¸  {function_name.split(':')[-1]} ping failed (non-fatal): {e}")
             return {"function": function_name.split(":")[-1], "status": "error", "warmed": False}
 
-    print("[WARM-UP] Warming Lambda containers in parallel...", flush=True)
+    logger.info("[WARM-UP] Warming Lambda containers in parallel...")
 
     loop = asyncio.get_event_loop()
     results = await asyncio.gather(
@@ -1557,7 +1564,7 @@ async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
         loop.run_in_executor(None, _invoke_lambda, LAMBDA_BRD),
     )
 
-    print(f"[WARM-UP] Done. Results: {results}", flush=True)
+    logger.info(f"[WARM-UP] Done. Results: {results}")
 
     return JSONResponse(content={
         "status": "warmed",
@@ -1574,10 +1581,10 @@ async def analyst_chat(
 ):
     """Chat with the Business Analyst agent for requirements gathering"""
     try:
-        print(f"\n[ANALYST-CHAT] Message: {message}")
-        print(f"[ANALYST-CHAT] Session ID: {session_id}")
-        print(f"[ANALYST-CHAT] Project ID: {project_id}")
-        print(f"[ANALYST-CHAT] User ID: {current_user.get('user_id', 'unknown')}")
+        logger.info(f"\n[ANALYST-CHAT] Message: {message}")
+        logger.info(f"[ANALYST-CHAT] Session ID: {session_id}")
+        logger.info(f"[ANALYST-CHAT] Project ID: {project_id}")
+        logger.info(f"[ANALYST-CHAT] User ID: {current_user.get('user_id', 'unknown')}")
         
         # PROJECT-SCOPED SESSION MANAGEMENT
         # Generate a deterministic session ID based on project_id + user_id
@@ -1593,12 +1600,11 @@ async def analyst_chat(
         # Validate session_id
         if not session_id or session_id == "none":
             # This shouldn't happen with correct frontend, but fallback safety
-            import uuid
             runtime_session_id = str(uuid.uuid4())
-            print(f"[ANALYST-CHAT] ⚠️ No session_id provided, created new: {runtime_session_id}")
+            logger.info(f"[ANALYST-CHAT] âš ï¸ No session_id provided, created new: {runtime_session_id}")
         else:
             runtime_session_id = session_id
-            print(f"[ANALYST-CHAT] ✅ Using provided session ID: {runtime_session_id}")
+            logger.info(f"[ANALYST-CHAT] âœ… Using provided session ID: {runtime_session_id}")
         
         formatted_message = message.strip()
         
@@ -1613,9 +1619,9 @@ async def analyst_chat(
         
         payload_bytes = json.dumps(payload_dict).encode('utf-8')
         
-        print(f"[ANALYST-CHAT] Payload: {payload_dict}")
-        print(f"[ANALYST-CHAT] Calling analyst agent...")
-        print(f"[ANALYST-CHAT] Analyst Agent ARN: {ANALYST_AGENT_ARN}")
+        logger.info(f"[ANALYST-CHAT] Payload: {payload_dict}")
+        logger.info(f"[ANALYST-CHAT] Calling analyst agent...")
+        logger.info(f"[ANALYST-CHAT] Analyst Agent ARN: {ANALYST_AGENT_ARN}")
         
         # Get fresh client
         agent_core_client = get_agent_core_client()
@@ -1631,11 +1637,10 @@ async def analyst_chat(
                     qualifier="DEFAULT"
                 )
             )
-            print(f"[ANALYST-CHAT] ✅ Successfully called analyst agent")
+            logger.info(f"[ANALYST-CHAT] âœ… Successfully called analyst agent")
         except Exception as invoke_error:
-            print(f"[ANALYST-CHAT] ❌ Error invoking analyst agent: {invoke_error}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[ANALYST-CHAT] âŒ Error invoking analyst agent: {invoke_error}")
+            logger.exception("Exception details:")
             # Check if it's a health check error
             if "health check" in str(invoke_error).lower() or "RuntimeClientError" in str(type(invoke_error).__name__):
                 return JSONResponse(status_code=503, content={
@@ -1650,51 +1655,51 @@ async def analyst_chat(
             content.append(chunk.decode('utf-8'))
             
         full_response_str = ''.join(content)
-        print(f"[ANALYST-CHAT] ========== DEBUG START ==========")
-        print(f"[ANALYST-CHAT] Raw response type: {type(full_response_str)}")
-        print(f"[ANALYST-CHAT] Raw response length: {len(full_response_str)}")
-        print(f"[ANALYST-CHAT] Raw response first 500 chars: {full_response_str[:500]}")
-        print(f"[ANALYST-CHAT] Raw response last 100 chars: {full_response_str[-100:]}")
+        logger.info(f"[ANALYST-CHAT] ========== DEBUG START ==========")
+        logger.info(f"[ANALYST-CHAT] Raw response type: {type(full_response_str)}")
+        logger.info(f"[ANALYST-CHAT] Raw response length: {len(full_response_str)}")
+        logger.info(f"[ANALYST-CHAT] Raw response first 500 chars: {full_response_str[:500]}")
+        logger.info(f"[ANALYST-CHAT] Raw response last 100 chars: {full_response_str[-100:]}")
         
         # Parse the agent response
         try:
             result_json = json.loads(full_response_str)
-            print(f"[ANALYST-CHAT] ✅ Successfully parsed JSON (first parse)")
-            print(f"[ANALYST-CHAT] result_json type: {type(result_json)}")
+            logger.info(f"[ANALYST-CHAT] âœ… Successfully parsed JSON (first parse)")
+            logger.info(f"[ANALYST-CHAT] result_json type: {type(result_json)}")
             
             # CRITICAL FIX: Handle double-encoded JSON
             # If json.loads() returns a string, it means we have double-encoded JSON
             if isinstance(result_json, str):
-                print(f"[ANALYST-CHAT] ⚠️ First parse returned a string - double-encoded JSON detected!")
-                print(f"[ANALYST-CHAT] Attempting second parse...")
+                logger.info(f"[ANALYST-CHAT] âš ï¸ First parse returned a string - double-encoded JSON detected!")
+                logger.info(f"[ANALYST-CHAT] Attempting second parse...")
                 try:
                     result_json = json.loads(result_json)
-                    print(f"[ANALYST-CHAT] ✅ Successfully parsed JSON (second parse)")
-                    print(f"[ANALYST-CHAT] result_json type after second parse: {type(result_json)}")
+                    logger.info(f"[ANALYST-CHAT] âœ… Successfully parsed JSON (second parse)")
+                    logger.info(f"[ANALYST-CHAT] result_json type after second parse: {type(result_json)}")
                 except json.JSONDecodeError as e:
-                    print(f"[ANALYST-CHAT] ❌ Second parse failed: {e}")
+                    logger.info(f"[ANALYST-CHAT] âŒ Second parse failed: {e}")
                     # If second parse fails, treat the string as the final response
                     pass
             
-            print(f"[ANALYST-CHAT] result_json keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
+            logger.info(f"[ANALYST-CHAT] result_json keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
             
             extracted_text = None
             extracted_brd_id = None
             response_session_id = None
             
             if isinstance(result_json, dict):
-                print(f"[ANALYST-CHAT] result_json IS a dict")
-                print(f"[ANALYST-CHAT] Checking for 'message' field...")
+                logger.info(f"[ANALYST-CHAT] result_json IS a dict")
+                logger.info(f"[ANALYST-CHAT] Checking for 'message' field...")
                 if 'message' in result_json:
-                    print(f"[ANALYST-CHAT] 'message' field exists, type: {type(result_json['message'])}")
-                    print(f"[ANALYST-CHAT] 'message' first 100 chars: {str(result_json['message'])[:100]}")
-                print(f"[ANALYST-CHAT] Checking for 'result' field...")
+                    logger.info(f"[ANALYST-CHAT] 'message' field exists, type: {type(result_json['message'])}")
+                    logger.info(f"[ANALYST-CHAT] 'message' first 100 chars: {str(result_json['message'])[:100]}")
+                logger.info(f"[ANALYST-CHAT] Checking for 'result' field...")
                 if 'result' in result_json:
-                    print(f"[ANALYST-CHAT] 'result' field exists, type: {type(result_json['result'])}")
-                    print(f"[ANALYST-CHAT] 'result' first 100 chars: {str(result_json['result'])[:100]}")
-                print(f"[ANALYST-CHAT] Checking for 'session_id' field...")
+                    logger.info(f"[ANALYST-CHAT] 'result' field exists, type: {type(result_json['result'])}")
+                    logger.info(f"[ANALYST-CHAT] 'result' first 100 chars: {str(result_json['result'])[:100]}")
+                logger.info(f"[ANALYST-CHAT] Checking for 'session_id' field...")
                 if 'session_id' in result_json:
-                    print(f"[ANALYST-CHAT] 'session_id' field exists: {result_json['session_id']}")
+                    logger.info(f"[ANALYST-CHAT] 'session_id' field exists: {result_json['session_id']}")
                 # Extract session_id from top level
                 response_session_id = result_json.get('session_id')
                 
@@ -1703,8 +1708,8 @@ async def analyst_chat(
                 extracted_text = result_json.get('message') or result_json.get('result') or result_json.get('text')
                 
                 if extracted_text and isinstance(extracted_text, str):
-                    print(f"[ANALYST-CHAT] ✅ Extracted text from top-level field: {len(extracted_text)} chars")
-                    print(f"[ANALYST-CHAT] First 100 chars: {extracted_text[:100]}")
+                    logger.info(f"[ANALYST-CHAT] âœ… Extracted text from top-level field: {len(extracted_text)} chars")
+                    logger.info(f"[ANALYST-CHAT] First 100 chars: {extracted_text[:100]}")
                     
                     # Early return - we found the text, no need for complex parsing
                     # Determine final session_id
@@ -1727,56 +1732,55 @@ async def analyst_chat(
                 
                 # CRITICAL: Check if result is a JSON string FIRST - this is the most common case
                 # The analyst agent returns: {"result": "{\"result\": \"...\", \"session_id\": \"...\", \"message\": \"...\"}"}
-                print(f"[ANALYST-CHAT] Checking result_json keys: {list(result_json.keys())}")
+                logger.info(f"[ANALYST-CHAT] Checking result_json keys: {list(result_json.keys())}")
                 if 'result' in result_json:
                     result_value = result_json.get('result')
-                    print(f"[ANALYST-CHAT] result_value type: {type(result_value)}")
-                    print(f"[ANALYST-CHAT] result_value length: {len(result_value) if isinstance(result_value, str) else 'N/A'}")
-                    print(f"[ANALYST-CHAT] result_value first 200 chars: {result_value[:200] if isinstance(result_value, str) else result_value}")
+                    logger.info(f"[ANALYST-CHAT] result_value type: {type(result_value)}")
+                    logger.info(f"[ANALYST-CHAT] result_value length: {len(result_value) if isinstance(result_value, str) else 'N/A'}")
+                    logger.info(f"[ANALYST-CHAT] result_value first 200 chars: {result_value[:200] if isinstance(result_value, str) else result_value}")
                     
                     if isinstance(result_value, str):
                         # Try to parse it as JSON - this is the agent's JSON response
                         try:
                             parsed_result = json.loads(result_value)
-                            print(f"[ANALYST-CHAT] ✅ Successfully parsed result_value as JSON")
-                            print(f"[ANALYST-CHAT] parsed_result keys: {list(parsed_result.keys()) if isinstance(parsed_result, dict) else 'Not a dict'}")
+                            logger.info(f"[ANALYST-CHAT] âœ… Successfully parsed result_value as JSON")
+                            logger.info(f"[ANALYST-CHAT] parsed_result keys: {list(parsed_result.keys()) if isinstance(parsed_result, dict) else 'Not a dict'}")
                             
                             if isinstance(parsed_result, dict):
                                 # Extract session_id from nested JSON
                                 if not response_session_id:
                                     response_session_id = parsed_result.get('session_id')
                                     if response_session_id:
-                                        print(f"[ANALYST-CHAT] ✅ Found session_id in nested JSON string: {response_session_id}")
+                                        logger.info(f"[ANALYST-CHAT] âœ… Found session_id in nested JSON string: {response_session_id}")
                                 
                                 # CRITICAL: Extract the actual message text from the nested JSON
                                 # Priority: message > result > text
                                 nested_message = (parsed_result.get('message') or 
                                                 parsed_result.get('result') or 
                                                 parsed_result.get('text'))
-                                print(f"[ANALYST-CHAT] nested_message: {nested_message[:100] if nested_message else 'None'}")
+                                logger.info(f"[ANALYST-CHAT] nested_message: {nested_message[:100] if nested_message else 'None'}")
                                 
                                 if nested_message and isinstance(nested_message, str):
                                     # This is the actual text we want to return
                                     extracted_text = nested_message
-                                    print(f"[ANALYST-CHAT] ✅ Extracted message from nested JSON result field: {len(extracted_text)} chars")
-                                    print(f"[ANALYST-CHAT] First 100 chars: {extracted_text[:100]}")
+                                    logger.info(f"[ANALYST-CHAT] âœ… Extracted message from nested JSON result field: {len(extracted_text)} chars")
+                                    logger.info(f"[ANALYST-CHAT] First 100 chars: {extracted_text[:100]}")
                                 else:
-                                    print(f"[ANALYST-CHAT] ⚠️ nested_message is None or not a string. Type: {type(nested_message)}")
+                                    logger.info(f"[ANALYST-CHAT] âš ï¸ nested_message is None or not a string. Type: {type(nested_message)}")
                         except json.JSONDecodeError as e:
                             # Not JSON, might be plain text - use as-is
-                            print(f"[ANALYST-CHAT] result field is not JSON, using as text: {e}")
+                            logger.info(f"[ANALYST-CHAT] result field is not JSON, using as text: {e}")
                             if not extracted_text:
                                 extracted_text = result_value
                         except Exception as e:
-                            print(f"[ANALYST-CHAT] Error parsing result field: {e}")
-                            import traceback
-                            traceback.print_exc()
+                            logger.info(f"[ANALYST-CHAT] Error parsing result field: {e}")
+                            logger.exception("Exception details:")
                             if not extracted_text:
                                 extracted_text = result_value
                     else:
-                        print(f"[ANALYST-CHAT] ⚠️ result_value is not a string, it's: {type(result_value)}")
+                        logger.info(f"[ANALYST-CHAT] âš ï¸ result_value is not a string, it's: {type(result_value)}")
                 else:
-                    print(f"[ANALYST-CHAT] ⚠️ 'result' key not found in result_json")
+                    logger.info(f"[ANALYST-CHAT] âš ï¸ 'result' key not found in result_json")
                 
                 # Handle nested structure: {"result": {"role": "assistant", "content": [{"text": "..."}]}}
                 if 'result' in result_json and isinstance(result_json['result'], dict):
@@ -1806,7 +1810,7 @@ async def analyst_chat(
                     brd_id_match = re.search(r'BRD ID:\s*([a-f0-9-]+)', extracted_text, re.IGNORECASE)
                     if brd_id_match:
                         extracted_brd_id = brd_id_match.group(1)
-                        print(f"[ANALYST-CHAT] Found BRD ID in response: {extracted_brd_id}")
+                        logger.info(f"[ANALYST-CHAT] Found BRD ID in response: {extracted_brd_id}")
                 
                 # Fallback: check for direct 'result', 'text', or 'message' fields (as strings)
                 if not extracted_text:
@@ -1830,8 +1834,8 @@ async def analyst_chat(
             
             # Use extracted text or fallback to full response
             final_response = extracted_text or full_response_str
-            print(f"[ANALYST-CHAT] After initial extraction - extracted_text: {extracted_text[:100] if extracted_text else 'None'}")
-            print(f"[ANALYST-CHAT] After initial extraction - final_response type: {type(final_response)}, length: {len(final_response) if final_response else 0}")
+            logger.info(f"[ANALYST-CHAT] After initial extraction - extracted_text: {extracted_text[:100] if extracted_text else 'None'}")
+            logger.info(f"[ANALYST-CHAT] After initial extraction - final_response type: {type(final_response)}, length: {len(final_response) if final_response else 0}")
             
             # CRITICAL: If final_response is still a JSON string, parse it and extract the text
             # This handles cases where the agent returns JSON strings that weren't parsed earlier
@@ -1841,7 +1845,7 @@ async def analyst_chat(
                 if (final_response_trimmed.startswith('{') and 
                     ('"result"' in final_response_trimmed or "'result'" in final_response_trimmed or
                      '"message"' in final_response_trimmed or "'message'" in final_response_trimmed)):
-                    print(f"[ANALYST-CHAT] ⚠️ final_response is still a JSON string, attempting to parse...")
+                    logger.info(f"[ANALYST-CHAT] âš ï¸ final_response is still a JSON string, attempting to parse...")
                     try:
                         parsed_final = json.loads(final_response_trimmed)
                         if isinstance(parsed_final, dict):
@@ -1852,37 +1856,37 @@ async def analyst_chat(
                                                   parsed_final.get('text'))
                             if extracted_from_json and isinstance(extracted_from_json, str):
                                 final_response = extracted_from_json
-                                print(f"[ANALYST-CHAT] ✅ Extracted text from JSON string in final_response: {len(final_response)} chars")
-                                print(f"[ANALYST-CHAT] First 200 chars of extracted text: {final_response[:200]}")
+                                logger.info(f"[ANALYST-CHAT] âœ… Extracted text from JSON string in final_response: {len(final_response)} chars")
+                                logger.info(f"[ANALYST-CHAT] First 200 chars of extracted text: {final_response[:200]}")
                             else:
-                                print(f"[ANALYST-CHAT] ⚠️ Could not extract text from parsed JSON. Keys: {list(parsed_final.keys())}")
+                                logger.info(f"[ANALYST-CHAT] âš ï¸ Could not extract text from parsed JSON. Keys: {list(parsed_final.keys())}")
                             # Also update session_id if found
                             if not response_session_id:
                                 response_session_id = parsed_final.get('session_id')
                     except json.JSONDecodeError as e:
                         # Not valid JSON, keep as-is
-                        print(f"[ANALYST-CHAT] Could not parse final_response as JSON: {e}")
+                        logger.info(f"[ANALYST-CHAT] Could not parse final_response as JSON: {e}")
                         pass
                     except Exception as e:
-                        print(f"[ANALYST-CHAT] Error parsing final_response: {e}")
+                        logger.info(f"[ANALYST-CHAT] Error parsing final_response: {e}")
                         import traceback
-                        traceback.print_exc()
+                        logger.exception("Exception details:")
                         pass
             
             # Final validation: ensure final_response is not a JSON string
             if final_response and isinstance(final_response, str):
                 if final_response.strip().startswith('{') and ('"result"' in final_response or '"message"' in final_response):
-                    print(f"[ANALYST-CHAT] ⚠️ WARNING: final_response is still a JSON string after all parsing attempts!")
-                    print(f"[ANALYST-CHAT] First 300 chars: {final_response[:300]}")
+                    logger.info(f"[ANALYST-CHAT] âš ï¸ WARNING: final_response is still a JSON string after all parsing attempts!")
+                    logger.info(f"[ANALYST-CHAT] First 300 chars: {final_response[:300]}")
             
-            print(f"[ANALYST-CHAT] Final response length: {len(final_response) if final_response else 0} chars")
-            print(f"[ANALYST-CHAT] Final response preview: {final_response[:200] if final_response else 'None'}...")
+            logger.info(f"[ANALYST-CHAT] Final response length: {len(final_response) if final_response else 0} chars")
+            logger.info(f"[ANALYST-CHAT] Final response preview: {final_response[:200] if final_response else 'None'}...")
             
             # Try to extract session_id from the extracted text if it's a JSON string
             # The analyst agent returns: {"result": "...", "session_id": "...", "message": "..."}
             # But AgentCore wraps it in: {"result": {"role": "assistant", "content": [{"text": "<JSON string>"}]}}
             if not response_session_id and extracted_text:
-                print(f"[ANALYST-CHAT] Attempting to parse extracted_text as JSON (first 200 chars): {extracted_text[:200]}")
+                logger.info(f"[ANALYST-CHAT] Attempting to parse extracted_text as JSON (first 200 chars): {extracted_text[:200]}")
                 try:
                     # Check if extracted_text is a JSON string
                     extracted_text_trimmed = extracted_text.strip()
@@ -1891,7 +1895,7 @@ async def analyst_chat(
                         if isinstance(parsed_text, dict):
                             response_session_id = parsed_text.get('session_id')
                             if response_session_id:
-                                print(f"[ANALYST-CHAT] ✅ Found session_id in extracted text JSON: {response_session_id}")
+                                logger.info(f"[ANALYST-CHAT] âœ… Found session_id in extracted text JSON: {response_session_id}")
                                 # Update final_response to use the message/result from parsed JSON
                                 if 'message' in parsed_text:
                                     final_response = parsed_text.get('message')
@@ -1902,63 +1906,63 @@ async def analyst_chat(
                                     else:
                                         final_response = extracted_text  # Keep original if result is not a string
                             else:
-                                print(f"[ANALYST-CHAT] Parsed JSON but no session_id found. Keys: {list(parsed_text.keys())}")
+                                logger.info(f"[ANALYST-CHAT] Parsed JSON but no session_id found. Keys: {list(parsed_text.keys())}")
                     else:
-                        print(f"[ANALYST-CHAT] Extracted text doesn't start with '{{', not JSON")
+                        logger.info(f"[ANALYST-CHAT] Extracted text doesn't start with '{{', not JSON")
                 except json.JSONDecodeError as json_err:
                     # Not JSON, that's fine
-                    print(f"[ANALYST-CHAT] Extracted text is not valid JSON: {json_err}")
+                    logger.info(f"[ANALYST-CHAT] Extracted text is not valid JSON: {json_err}")
                 except Exception as e:
-                    print(f"[ANALYST-CHAT] Error parsing extracted text as JSON: {e}")
+                    logger.info(f"[ANALYST-CHAT] Error parsing extracted text as JSON: {e}")
                     import traceback
-                    traceback.print_exc()
+                    logger.exception("Exception details:")
             
             # CRITICAL FIX: ALWAYS use runtime_session_id (deterministic from project_id + user_id)
             # Ignore any session_id from the agent's response - we control session management
             # This ensures consistent sessions across messages for the same project
             if runtime_session_id:
                 response_session_id = runtime_session_id
-                print(f"[ANALYST-CHAT] ✅ Using deterministic runtime_session_id: {response_session_id}")
+                logger.info(f"[ANALYST-CHAT] âœ… Using deterministic runtime_session_id: {response_session_id}")
             else:
                 # Fallback: use session_id from agent response if runtime_session_id is not set
                 # (This should rarely happen, but handle it gracefully)
                 if response_session_id and response_session_id != "none":
-                    print(f"[ANALYST-CHAT] ⚠️ runtime_session_id not set, using agent's session_id: {response_session_id}")
+                    logger.info(f"[ANALYST-CHAT] âš ï¸ runtime_session_id not set, using agent's session_id: {response_session_id}")
                 else:
                     # Last resort: use request session_id or create new one
                     response_session_id = session_id if session_id and session_id != "none" else str(uuid.uuid4())
-                    print(f"[ANALYST-CHAT] ⚠️ No valid session_id found, using: {response_session_id}")
+                    logger.info(f"[ANALYST-CHAT] âš ï¸ No valid session_id found, using: {response_session_id}")
             
             # If session_id found, log it
             if response_session_id:
-                print(f"[ANALYST-CHAT] ✅ Final session_id to return: {response_session_id}")
+                logger.info(f"[ANALYST-CHAT] âœ… Final session_id to return: {response_session_id}")
             else:
                 # If not found in response, use the one from request (if valid)
                 if session_id and session_id != "none":
                     response_session_id = session_id
-                    print(f"[ANALYST-CHAT] Using session_id from request: {response_session_id}")
+                    logger.info(f"[ANALYST-CHAT] Using session_id from request: {response_session_id}")
                 else:
                     # ALWAYS use runtime_session_id as fallback (it's always set)
                     if runtime_session_id:
                         response_session_id = runtime_session_id
-                        print(f"[ANALYST-CHAT] ✅ Using runtime_session_id as session_id: {response_session_id}")
+                        logger.info(f"[ANALYST-CHAT] âœ… Using runtime_session_id as session_id: {response_session_id}")
                     else:
                         # This should never happen, but just in case
-                        print(f"[ANALYST-CHAT] ⚠️ ERROR: runtime_session_id is None! This should not happen.")
-                        print(f"[ANALYST-CHAT] session_id from request: {session_id}")
-                        print(f"[ANALYST-CHAT] Full response keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
+                        logger.info(f"[ANALYST-CHAT] âš ï¸ ERROR: runtime_session_id is None! This should not happen.")
+                        logger.info(f"[ANALYST-CHAT] session_id from request: {session_id}")
+                        logger.info(f"[ANALYST-CHAT] Full response keys: {list(result_json.keys()) if isinstance(result_json, dict) else 'Not a dict'}")
                         response_session_id = "none"
             
             # Final safety check: ALWAYS use runtime_session_id if response_session_id is still "none"
             if not response_session_id or response_session_id == "none":
                 if runtime_session_id:
                     response_session_id = runtime_session_id
-                    print(f"[ANALYST-CHAT] ✅ Final fallback: Using runtime_session_id: {response_session_id}")
+                    logger.info(f"[ANALYST-CHAT] âœ… Final fallback: Using runtime_session_id: {response_session_id}")
                 else:
-                    print(f"[ANALYST-CHAT] ⚠️ CRITICAL ERROR: Both response_session_id and runtime_session_id are invalid!")
-                    print(f"[ANALYST-CHAT] This should never happen. Creating emergency session_id...")
+                    logger.info(f"[ANALYST-CHAT] âš ï¸ CRITICAL ERROR: Both response_session_id and runtime_session_id are invalid!")
+                    logger.info(f"[ANALYST-CHAT] This should never happen. Creating emergency session_id...")
                     response_session_id = str(uuid.uuid4())
-                    print(f"[ANALYST-CHAT] Created emergency session_id: {response_session_id}")
+                    logger.info(f"[ANALYST-CHAT] Created emergency session_id: {response_session_id}")
             
             return JSONResponse(content={
                 "result": final_response,
@@ -1969,14 +1973,14 @@ async def analyst_chat(
             
         except json.JSONDecodeError:
             # If it's not JSON, return the raw string
-            print(f"[ANALYST-CHAT] Response is not JSON, returning as text")
+            logger.info(f"[ANALYST-CHAT] Response is not JSON, returning as text")
             # ALWAYS use runtime_session_id if available (it should always be set)
             if runtime_session_id:
                 fallback_session_id = runtime_session_id
-                print(f"[ANALYST-CHAT] ✅ Using runtime_session_id for non-JSON response: {fallback_session_id}")
+                logger.info(f"[ANALYST-CHAT] âœ… Using runtime_session_id for non-JSON response: {fallback_session_id}")
             else:
                 fallback_session_id = session_id if session_id and session_id != "none" else str(uuid.uuid4())
-                print(f"[ANALYST-CHAT] ⚠️ runtime_session_id not available, using: {fallback_session_id}")
+                logger.info(f"[ANALYST-CHAT] âš ï¸ runtime_session_id not available, using: {fallback_session_id}")
             return JSONResponse(content={
                 "result": full_response_str,
                 "response": full_response_str,
@@ -1985,9 +1989,8 @@ async def analyst_chat(
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[ANALYST-CHAT] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[ANALYST-CHAT] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         # Check if it's a credentials issue
         if "AccessDeniedException" in error_msg or "security token" in error_msg.lower():
@@ -2012,7 +2015,7 @@ async def analyst_chat_stream(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Streaming SSE analyst chat — calls requirements_gathering Lambda directly,
+    Streaming SSE analyst chat â€” calls requirements_gathering Lambda directly,
     bypassing AgentCore Runtime for faster responses.
     """
     # Normalize project_id
@@ -2024,25 +2027,23 @@ async def analyst_chat_stream(
     # Validate session_id
     if not session_id or session_id == "none":
         runtime_session_id = str(uuid.uuid4())
-        print(f"[ANALYST-STREAM] No session_id provided, created new: {runtime_session_id}")
+        logger.info(f"[ANALYST-STREAM] No session_id provided, created new: {runtime_session_id}")
     else:
         runtime_session_id = session_id
-        print(f"[ANALYST-STREAM] Using session ID: {runtime_session_id}")
+        logger.info(f"[ANALYST-STREAM] Using session ID: {runtime_session_id}")
 
     formatted_message = message.strip()
 
     LAMBDA_REQ_ARN = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
 
     async def generate_sse():
-        """Generate SSE stream — direct Lambda invocation (no AgentCore middleman)"""
-        import asyncio
+        """Generate SSE stream â€” direct Lambda invocation (no AgentCore middleman)"""
 
         try:
-            print(f"[ANALYST-STREAM] Direct Lambda call: session={runtime_session_id}, message={formatted_message[:100]}...")
+            logger.info(f"[ANALYST-STREAM] Direct Lambda call: session={runtime_session_id}, message={formatted_message[:100]}...")
 
             # Call requirements_gathering Lambda directly in a thread
             def _call_lambda():
-                from botocore.config import Config
                 config = Config(
                     read_timeout=900,
                     connect_timeout=60,
@@ -2073,11 +2074,11 @@ async def analyst_chat_stream(
             try:
                 result = await asyncio.get_running_loop().run_in_executor(None, _call_lambda)
             except Exception as invoke_error:
-                print(f"[ANALYST-STREAM] Lambda invoke error: {invoke_error}")
+                logger.info(f"[ANALYST-STREAM] Lambda invoke error: {invoke_error}")
                 yield f"data: {json.dumps({'type': 'error', 'message': str(invoke_error)})}\n\n"
                 return
 
-            print(f"[ANALYST-STREAM] Lambda response received: {type(result)}")
+            logger.info(f"[ANALYST-STREAM] Lambda response received: {type(result)}")
 
             # Extract text from Lambda response
             # Lambda returns: {"statusCode": 200, "body": {"response": "..."}}
@@ -2110,7 +2111,7 @@ async def analyst_chat_stream(
                 except (json.JSONDecodeError, Exception):
                     pass
 
-            print(f"[ANALYST-STREAM] Extracted text: {len(final_text)} chars")
+            logger.info(f"[ANALYST-STREAM] Extracted text: {len(final_text)} chars")
 
             # Check for BRD ID
             if final_text:
@@ -2140,9 +2141,8 @@ async def analyst_chat_stream(
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
         except Exception as e:
-            print(f"[ANALYST-STREAM] Error: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[ANALYST-STREAM] Error: {e}")
+            logger.exception("Exception details:")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
 
     return StreamingResponse(
@@ -2163,16 +2163,16 @@ async def get_analyst_history(
 ):
     """Get conversation history for an analyst session from AgentCore Memory"""
     try:
-        print(f"\n[ANALYST-HISTORY] Fetching history for session: {session_id}")
-        print(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
+        logger.info(f"\n[ANALYST-HISTORY] Fetching history for session: {session_id}")
+        logger.info(f"[ANALYST-HISTORY] User: {current_user.get('email', 'unknown')}")
 
         # Get AgentCore client
         agentcore_client = get_agent_core_client()
 
-        print(f"[ANALYST-HISTORY] Calling AgentCore Memory...")
-        print(f"[ANALYST-HISTORY] Memory ID: {AGENTCORE_MEMORY_ID}")
-        print(f"[ANALYST-HISTORY] Session ID: {session_id}")
-        print(f"[ANALYST-HISTORY] Actor ID: {AGENTCORE_ACTOR_ID}")
+        logger.info(f"[ANALYST-HISTORY] Calling AgentCore Memory...")
+        logger.info(f"[ANALYST-HISTORY] Memory ID: {AGENTCORE_MEMORY_ID}")
+        logger.info(f"[ANALYST-HISTORY] Session ID: {session_id}")
+        logger.info(f"[ANALYST-HISTORY] Actor ID: {AGENTCORE_ACTOR_ID}")
 
         # Fetch events from AgentCore Memory
         response = agentcore_client.list_events(
@@ -2184,7 +2184,7 @@ async def get_analyst_history(
         )
 
         events = response.get("events", [])
-        print(f"[ANALYST-HISTORY] Retrieved {len(events)} events from AgentCore Memory")
+        logger.info(f"[ANALYST-HISTORY] Retrieved {len(events)} events from AgentCore Memory")
 
         # Parse events into messages
         messages = []
@@ -2209,7 +2209,7 @@ async def get_analyst_history(
         # Reverse messages to show in chronological order (oldest first)
         messages.reverse()
 
-        print(f"[ANALYST-HISTORY] ✅ Parsed {len(messages)} messages")
+        logger.info(f"[ANALYST-HISTORY] âœ… Parsed {len(messages)} messages")
 
         return JSONResponse(content={
             'messages': messages,
@@ -2219,9 +2219,8 @@ async def get_analyst_history(
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[ANALYST-HISTORY] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[ANALYST-HISTORY] ERROR: {error_msg}")
+        logger.exception("Exception details:")
 
         return JSONResponse(status_code=500, content={
             'error': error_msg,
@@ -2236,7 +2235,7 @@ async def analyst_generate_brd(
     """Generate BRD from analyst conversation history stored in AgentCore Memory"""
     t0 = time.time()
     try:
-        print(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
+        logger.info(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
@@ -2244,10 +2243,10 @@ async def analyst_generate_brd(
         actor_id = AGENTCORE_ACTOR_ID
         
         # Get conversation history from AgentCore Memory
-        print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
-        print(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
-        print(f"[ANALYST-GENERATE-BRD] Memory ID: {memory_id}")
-        print(f"[ANALYST-GENERATE-BRD] Actor ID: {actor_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
+        logger.info(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Memory ID: {memory_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Actor ID: {actor_id}")
         
         try:
             # First, try to list sessions to see what exists
@@ -2258,15 +2257,15 @@ async def analyst_generate_brd(
                     maxResults=10
                 )
                 sessions = list_sessions_response.get('sessions', [])
-                print(f"[ANALYST-GENERATE-BRD] Found {len(sessions)} sessions:")
+                logger.info(f"[ANALYST-GENERATE-BRD] Found {len(sessions)} sessions:")
                 for sess in sessions:
-                    print(f"[ANALYST-GENERATE-BRD]   - Session ID: {sess.get('sessionId')}, Created: {sess.get('creationTime')}")
+                    logger.info(f"[ANALYST-GENERATE-BRD]   - Session ID: {sess.get('sessionId')}, Created: {sess.get('creationTime')}")
             except Exception as list_err:
                 error_str = str(list_err)
-                print(f"[ANALYST-GENERATE-BRD] Could not list sessions: {list_err}")
+                logger.info(f"[ANALYST-GENERATE-BRD] Could not list sessions: {list_err}")
                 # If actor doesn't exist, try to create a session to create the actor
                 if "not found" in error_str.lower() or "ResourceNotFoundException" in error_str:
-                    print(f"[ANALYST-GENERATE-BRD] Actor {actor_id} not found, attempting to create session to initialize actor...")
+                    logger.info(f"[ANALYST-GENERATE-BRD] Actor {actor_id} not found, attempting to create session to initialize actor...")
                     try:
                         # Create a temporary session to initialize the actor
                         temp_session_id = f"temp-{session_id}"
@@ -2275,7 +2274,7 @@ async def analyst_generate_brd(
                             sessionId=temp_session_id,
                             actorId=actor_id
                         )
-                        print(f"[ANALYST-GENERATE-BRD] ✅ Created temporary session to initialize actor")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âœ… Created temporary session to initialize actor")
                         # Now try to use the actual session
                         try:
                             agentcore_client.create_session(
@@ -2283,12 +2282,12 @@ async def analyst_generate_brd(
                                 sessionId=session_id,
                                 actorId=actor_id
                             )
-                            print(f"[ANALYST-GENERATE-BRD] ✅ Created session {session_id} with actor {actor_id}")
+                            logger.info(f"[ANALYST-GENERATE-BRD] âœ… Created session {session_id} with actor {actor_id}")
                         except Exception as create_err:
                             if "already exists" not in str(create_err).lower() and "ConflictException" not in str(type(create_err).__name__):
-                                print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not create session: {create_err}")
+                                logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Could not create session: {create_err}")
                     except Exception as init_err:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not initialize actor: {init_err}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Could not initialize actor: {init_err}")
             
             # List events from AgentCore Memory for this session
             events_response = agentcore_client.list_events(
@@ -2299,7 +2298,7 @@ async def analyst_generate_brd(
                 maxResults=100
             )
             events = events_response.get("events", [])
-            print(f"[ANALYST-GENERATE-BRD] Retrieved {len(events)} events from AgentCore Memory")
+            logger.info(f"[ANALYST-GENERATE-BRD] Retrieved {len(events)} events from AgentCore Memory")
             
             if not events:
                 return JSONResponse(status_code=400, content={
@@ -2329,7 +2328,7 @@ async def analyst_generate_brd(
                     "message": "The session exists but contains no conversation messages."
                 })
             
-            print(f"[ANALYST-GENERATE-BRD] Formatted {len(conversation_messages)} conversation messages")
+            logger.info(f"[ANALYST-GENERATE-BRD] Formatted {len(conversation_messages)} conversation messages")
             
             # Format conversation as text transcript
             conversation_text = ""
@@ -2337,13 +2336,13 @@ async def analyst_generate_brd(
                 role_label = "User" if msg["role"] == "USER" else "Analyst"
                 conversation_text += f"{role_label}: {msg['content']}\n\n"
             
-            print(f"[ANALYST-GENERATE-BRD] Conversation transcript length: {len(conversation_text)} chars")
+            logger.info(f"[ANALYST-GENERATE-BRD] Conversation transcript length: {len(conversation_text)} chars")
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
             lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
-            print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
+            logger.info(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
             # Generate BRD ID
             brd_id = str(uuid.uuid4())
@@ -2363,7 +2362,7 @@ async def analyst_generate_brd(
             # Parse Lambda response
             response_payload = json.loads(lambda_response['Payload'].read())
             
-            print(f"[ANALYST-GENERATE-BRD] Lambda response keys: {list(response_payload.keys()) if isinstance(response_payload, dict) else 'Not a dict'}")
+            logger.info(f"[ANALYST-GENERATE-BRD] Lambda response keys: {list(response_payload.keys()) if isinstance(response_payload, dict) else 'Not a dict'}")
             
             # Lambda returns: {'statusCode': 200, 'body': '{"brd_id": "...", ...}'}
             # Need to parse the 'body' field if it exists
@@ -2383,7 +2382,7 @@ async def analyst_generate_brd(
                             error_message = response_payload.get('errorMessage', str(response_payload.get('body', 'Unknown error')))
                     else:
                         error_message = response_payload.get('errorMessage', response_payload.get('error', 'Unknown error'))
-                print(f"[ANALYST-GENERATE-BRD] ❌ Lambda error: {error_message}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âŒ Lambda error: {error_message}")
                 return JSONResponse(status_code=500, content={
                     "error": "BRD generation failed",
                     "message": f"Failed to generate BRD: {error_message}"
@@ -2401,14 +2400,14 @@ async def analyst_generate_brd(
                     try:
                         body_data = json.loads(response_payload['body'])
                         brd_id_from_response = body_data.get('brd_id')
-                        print(f"[ANALYST-GENERATE-BRD] ✅ Extracted brd_id from body: {brd_id_from_response}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âœ… Extracted brd_id from body: {brd_id_from_response}")
                     except json.JSONDecodeError as e:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ Failed to parse body as JSON: {e}")
-                        print(f"[ANALYST-GENERATE-BRD] Body content: {response_payload['body'][:200]}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Failed to parse body as JSON: {e}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] Body content: {response_payload['body'][:200]}")
             
             if brd_id_from_response:
                 brd_id = brd_id_from_response
-                print(f"[ANALYST-GENERATE-BRD] ✅ BRD generated successfully: {brd_id}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âœ… BRD generated successfully: {brd_id}")
                 try:
                     from db_helper import track_event
                     track_event(
@@ -2422,7 +2421,7 @@ async def analyst_generate_brd(
                         },
                     )
                 except Exception as _track_err:
-                    print(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
+                    logger.info(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
                 return JSONResponse(content={
                     "result": f"BRD generated successfully",
                     "brd_id": brd_id,
@@ -2430,17 +2429,16 @@ async def analyst_generate_brd(
                     "message": "BRD has been generated and saved to S3"
                 })
             else:
-                print(f"[ANALYST-GENERATE-BRD] ⚠️ Lambda response missing brd_id")
-                print(f"[ANALYST-GENERATE-BRD] Full response: {response_payload}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Lambda response missing brd_id")
+                logger.info(f"[ANALYST-GENERATE-BRD] Full response: {response_payload}")
                 return JSONResponse(status_code=500, content={
                     "error": "BRD generation incomplete",
                     "message": "BRD generation completed but response format was unexpected"
                 })
                 
         except Exception as memory_error:
-            print(f"[ANALYST-GENERATE-BRD] ❌ Error accessing AgentCore Memory: {memory_error}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[ANALYST-GENERATE-BRD] âŒ Error accessing AgentCore Memory: {memory_error}")
+            logger.exception("Exception details:")
             return JSONResponse(status_code=500, content={
                 "error": "Failed to retrieve conversation history",
                 "message": f"Error accessing AgentCore Memory: {str(memory_error)}"
@@ -2448,9 +2446,8 @@ async def analyst_generate_brd(
             
     except Exception as e:
         error_msg = str(e)
-        print(f"[ANALYST-GENERATE-BRD] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[ANALYST-GENERATE-BRD] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         return JSONResponse(status_code=500, content={
             "error": error_msg,
@@ -2466,7 +2463,7 @@ async def analyst_generate_brd(
     """Generate BRD from analyst conversation history stored in AgentCore Memory"""
     t0 = time.time()
     try:
-        print(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
+        logger.info(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
@@ -2475,10 +2472,10 @@ async def analyst_generate_brd(
         
         # If session_id is "none" or empty, try to find the most recent session
         if not session_id or session_id == "none":
-            print(f"[ANALYST-GENERATE-BRD] Session ID is 'none', trying to find most recent session...")
+            logger.info(f"[ANALYST-GENERATE-BRD] Session ID is 'none', trying to find most recent session...")
             try:
                 # Try to list sessions using list_sessions API
-                print(f"[ANALYST-GENERATE-BRD] Attempting to find recent sessions using list_sessions...")
+                logger.info(f"[ANALYST-GENERATE-BRD] Attempting to find recent sessions using list_sessions...")
                 try:
                     list_response = agentcore_client.list_sessions(
                         memoryId=memory_id,
@@ -2492,17 +2489,17 @@ async def analyst_generate_brd(
                         sessions.sort(key=lambda x: x.get('creationTime', datetime.min.isoformat()), reverse=True)
                         most_recent_session = sessions[0]
                         session_id = most_recent_session.get('sessionId')
-                        print(f"[ANALYST-GENERATE-BRD] ✅ Found most recent session: {session_id}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âœ… Found most recent session: {session_id}")
                     else:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ No sessions found via list_sessions")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ No sessions found via list_sessions")
                         return JSONResponse(status_code=400, content={
                             "error": "No session found",
                             "message": "Please send at least one message in the analyst agent chat to establish a session, then try generating the BRD again."
                         })
                 except Exception as list_error:
-                    print(f"[ANALYST-GENERATE-BRD] ⚠️ list_sessions API not available or failed: {list_error}")
+                    logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ list_sessions API not available or failed: {list_error}")
                     # Fallback: Try to find sessions by listing events and extracting unique session IDs
-                    print(f"[ANALYST-GENERATE-BRD] Attempting fallback: listing events to find sessions...")
+                    logger.info(f"[ANALYST-GENERATE-BRD] Attempting fallback: listing events to find sessions...")
                     try:
                         # List recent events to find session IDs
                         events_response = agentcore_client.list_events(
@@ -2522,33 +2519,32 @@ async def analyst_generate_brd(
                         if session_ids:
                             session_id_list = list(session_ids)
                             session_id = session_id_list[0]
-                            print(f"[ANALYST-GENERATE-BRD] ✅ Found session via events: {session_id}")
+                            logger.info(f"[ANALYST-GENERATE-BRD] âœ… Found session via events: {session_id}")
                         else:
-                            print(f"[ANALYST-GENERATE-BRD] ⚠️ No analyst sessions found in events")
+                            logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ No analyst sessions found in events")
                             return JSONResponse(status_code=400, content={
                                 "error": "No session found",
                                 "message": "Please send at least one message in the analyst agent chat to establish a session, then try generating the BRD again."
                             })
                     except Exception as events_error:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ Fallback method also failed: {events_error}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Fallback method also failed: {events_error}")
                         return JSONResponse(status_code=400, content={
                             "error": "Session ID is required",
                             "message": "Please send at least one message in the analyst agent chat to establish a session, then try generating the BRD again."
                         })
             except Exception as e:
-                print(f"[ANALYST-GENERATE-BRD] ❌ Error finding session: {e}")
-                import traceback
-                traceback.print_exc()
+                logger.info(f"[ANALYST-GENERATE-BRD] âŒ Error finding session: {e}")
+                logger.exception("Exception details:")
                 return JSONResponse(status_code=400, content={
                     "error": "Session ID is required",
                     "message": "Please start a conversation with the analyst agent first before generating a BRD"
                 })
         
         # Get conversation history from AgentCore Memory
-        print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
-        print(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
-        print(f"[ANALYST-GENERATE-BRD] Memory ID: {memory_id}")
-        print(f"[ANALYST-GENERATE-BRD] Actor ID: {actor_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
+        logger.info(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Memory ID: {memory_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Actor ID: {actor_id}")
         
         # List events from AgentCore Memory for this session
         try:
@@ -2560,7 +2556,7 @@ async def analyst_generate_brd(
                 maxResults=100
             )
             events = events_response.get("events", [])
-            print(f"[ANALYST-GENERATE-BRD] Retrieved {len(events)} events from AgentCore Memory")
+            logger.info(f"[ANALYST-GENERATE-BRD] Retrieved {len(events)} events from AgentCore Memory")
             
             if not events:
                 return JSONResponse(status_code=400, content={
@@ -2590,7 +2586,7 @@ async def analyst_generate_brd(
                     "message": "The session exists but contains no conversation messages."
                 })
             
-            print(f"[ANALYST-GENERATE-BRD] Formatted {len(conversation_messages)} conversation messages")
+            logger.info(f"[ANALYST-GENERATE-BRD] Formatted {len(conversation_messages)} conversation messages")
             
             # Format conversation as text transcript
             conversation_text = ""
@@ -2598,13 +2594,13 @@ async def analyst_generate_brd(
                 role_label = "User" if msg["role"] == "USER" else "Analyst"
                 conversation_text += f"{role_label}: {msg['content']}\n\n"
             
-            print(f"[ANALYST-GENERATE-BRD] Conversation transcript length: {len(conversation_text)} chars")
+            logger.info(f"[ANALYST-GENERATE-BRD] Conversation transcript length: {len(conversation_text)} chars")
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
             lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
-            print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
+            logger.info(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
             # Generate BRD ID
             brd_id = str(uuid.uuid4())
@@ -2624,7 +2620,7 @@ async def analyst_generate_brd(
             # Parse Lambda response
             response_payload = json.loads(lambda_response['Payload'].read())
             
-            print(f"[ANALYST-GENERATE-BRD] Lambda response keys: {list(response_payload.keys()) if isinstance(response_payload, dict) else 'Not a dict'}")
+            logger.info(f"[ANALYST-GENERATE-BRD] Lambda response keys: {list(response_payload.keys()) if isinstance(response_payload, dict) else 'Not a dict'}")
             
             # Lambda returns: {'statusCode': 200, 'body': '{"brd_id": "...", ...}'}
             # Need to parse the 'body' field if it exists
@@ -2644,7 +2640,7 @@ async def analyst_generate_brd(
                             error_message = response_payload.get('errorMessage', str(response_payload.get('body', 'Unknown error')))
                     else:
                         error_message = response_payload.get('errorMessage', response_payload.get('error', 'Unknown error'))
-                print(f"[ANALYST-GENERATE-BRD] ❌ Lambda error: {error_message}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âŒ Lambda error: {error_message}")
                 return JSONResponse(status_code=500, content={
                     "error": "BRD generation failed",
                     "message": f"Failed to generate BRD: {error_message}"
@@ -2662,14 +2658,14 @@ async def analyst_generate_brd(
                     try:
                         body_data = json.loads(response_payload['body'])
                         brd_id_from_response = body_data.get('brd_id')
-                        print(f"[ANALYST-GENERATE-BRD] ✅ Extracted brd_id from body: {brd_id_from_response}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âœ… Extracted brd_id from body: {brd_id_from_response}")
                     except json.JSONDecodeError as e:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ Failed to parse body as JSON: {e}")
-                        print(f"[ANALYST-GENERATE-BRD] Body content: {response_payload['body'][:200]}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Failed to parse body as JSON: {e}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] Body content: {response_payload['body'][:200]}")
             
             if brd_id_from_response:
                 brd_id = brd_id_from_response
-                print(f"[ANALYST-GENERATE-BRD] ✅ BRD generated successfully: {brd_id}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âœ… BRD generated successfully: {brd_id}")
                 try:
                     from db_helper import track_event
                     track_event(
@@ -2683,7 +2679,7 @@ async def analyst_generate_brd(
                         },
                     )
                 except Exception as _track_err:
-                    print(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
+                    logger.info(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
                 return JSONResponse(content={
                     "result": f"BRD generated successfully",
                     "brd_id": brd_id,
@@ -2691,17 +2687,16 @@ async def analyst_generate_brd(
                     "message": "BRD has been generated and saved to S3"
                 })
             else:
-                print(f"[ANALYST-GENERATE-BRD] ⚠️ Lambda response missing brd_id")
-                print(f"[ANALYST-GENERATE-BRD] Full response: {response_payload}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Lambda response missing brd_id")
+                logger.info(f"[ANALYST-GENERATE-BRD] Full response: {response_payload}")
                 return JSONResponse(status_code=500, content={
                     "error": "BRD generation incomplete",
                     "message": "BRD generation completed but response format was unexpected"
                 })
                 
         except Exception as memory_error:
-            print(f"[ANALYST-GENERATE-BRD] ❌ Error accessing AgentCore Memory: {memory_error}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[ANALYST-GENERATE-BRD] âŒ Error accessing AgentCore Memory: {memory_error}")
+            logger.exception("Exception details:")
             return JSONResponse(status_code=500, content={
                 "error": "Failed to retrieve conversation history",
                 "message": f"Error accessing AgentCore Memory: {str(memory_error)}"
@@ -2709,9 +2704,8 @@ async def analyst_generate_brd(
             
     except Exception as e:
         error_msg = str(e)
-        print(f"[ANALYST-GENERATE-BRD] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[ANALYST-GENERATE-BRD] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         return JSONResponse(status_code=500, content={
             "error": error_msg,
@@ -2727,7 +2721,7 @@ async def analyst_generate_brd(
     """Generate BRD from analyst conversation history stored in AgentCore Memory"""
     t0 = time.time()
     try:
-        print(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
+        logger.info(f"\n[ANALYST-GENERATE-BRD] Session ID received: {session_id}")
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
@@ -2735,10 +2729,10 @@ async def analyst_generate_brd(
         actor_id = AGENTCORE_ACTOR_ID
         
         # Get conversation history from AgentCore Memory
-        print(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
-        print(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
-        print(f"[ANALYST-GENERATE-BRD] Memory ID: {memory_id}")
-        print(f"[ANALYST-GENERATE-BRD] Actor ID: {actor_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Retrieving conversation history from AgentCore Memory...")
+        logger.info(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Memory ID: {memory_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Actor ID: {actor_id}")
         
         try:
             # First, try to list sessions to see what exists
@@ -2749,15 +2743,15 @@ async def analyst_generate_brd(
                     maxResults=10
                 )
                 sessions = list_sessions_response.get('sessions', [])
-                print(f"[ANALYST-GENERATE-BRD] Found {len(sessions)} sessions:")
+                logger.info(f"[ANALYST-GENERATE-BRD] Found {len(sessions)} sessions:")
                 for sess in sessions:
-                    print(f"[ANALYST-GENERATE-BRD]   - Session ID: {sess.get('sessionId')}, Created: {sess.get('creationTime')}")
+                    logger.info(f"[ANALYST-GENERATE-BRD]   - Session ID: {sess.get('sessionId')}, Created: {sess.get('creationTime')}")
             except Exception as list_err:
                 error_str = str(list_err)
-                print(f"[ANALYST-GENERATE-BRD] Could not list sessions: {list_err}")
+                logger.info(f"[ANALYST-GENERATE-BRD] Could not list sessions: {list_err}")
                 # If actor doesn't exist, try to create a session to create the actor
                 if "not found" in error_str.lower() or "ResourceNotFoundException" in error_str:
-                    print(f"[ANALYST-GENERATE-BRD] Actor {actor_id} not found, attempting to create session to initialize actor...")
+                    logger.info(f"[ANALYST-GENERATE-BRD] Actor {actor_id} not found, attempting to create session to initialize actor...")
                     try:
                         # Create a temporary session to initialize the actor
                         temp_session_id = f"temp-{session_id}"
@@ -2766,7 +2760,7 @@ async def analyst_generate_brd(
                             sessionId=temp_session_id,
                             actorId=actor_id
                         )
-                        print(f"[ANALYST-GENERATE-BRD] ✅ Created temporary session to initialize actor")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âœ… Created temporary session to initialize actor")
                         # Now try to use the actual session
                         try:
                             agentcore_client.create_session(
@@ -2774,12 +2768,12 @@ async def analyst_generate_brd(
                                 sessionId=session_id,
                                 actorId=actor_id
                             )
-                            print(f"[ANALYST-GENERATE-BRD] ✅ Created session {session_id} with actor {actor_id}")
+                            logger.info(f"[ANALYST-GENERATE-BRD] âœ… Created session {session_id} with actor {actor_id}")
                         except Exception as create_err:
                             if "already exists" not in str(create_err).lower() and "ConflictException" not in str(type(create_err).__name__):
-                                print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not create session: {create_err}")
+                                logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Could not create session: {create_err}")
                     except Exception as init_err:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ Could not initialize actor: {init_err}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Could not initialize actor: {init_err}")
             
             # List events from AgentCore Memory for this session
             events_response = agentcore_client.list_events(
@@ -2790,7 +2784,7 @@ async def analyst_generate_brd(
                 maxResults=100
             )
             events = events_response.get("events", [])
-            print(f"[ANALYST-GENERATE-BRD] Retrieved {len(events)} events from AgentCore Memory")
+            logger.info(f"[ANALYST-GENERATE-BRD] Retrieved {len(events)} events from AgentCore Memory")
             
             if not events:
                 return JSONResponse(status_code=400, content={
@@ -2820,7 +2814,7 @@ async def analyst_generate_brd(
                     "message": "The session exists but contains no conversation messages."
                 })
             
-            print(f"[ANALYST-GENERATE-BRD] Formatted {len(conversation_messages)} conversation messages")
+            logger.info(f"[ANALYST-GENERATE-BRD] Formatted {len(conversation_messages)} conversation messages")
             
             # Format conversation as text transcript
             conversation_text = ""
@@ -2828,13 +2822,13 @@ async def analyst_generate_brd(
                 role_label = "User" if msg["role"] == "USER" else "Analyst"
                 conversation_text += f"{role_label}: {msg['content']}\n\n"
             
-            print(f"[ANALYST-GENERATE-BRD] Conversation transcript length: {len(conversation_text)} chars")
+            logger.info(f"[ANALYST-GENERATE-BRD] Conversation transcript length: {len(conversation_text)} chars")
             
             # Invoke brd_from_history_lambda
             lambda_client = get_lambda_client()
             lambda_function_name = LAMBDA_BRD_FROM_HISTORY
             
-            print(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
+            logger.info(f"[ANALYST-GENERATE-BRD] Invoking Lambda: {lambda_function_name}")
             
             # Generate BRD ID
             brd_id = str(uuid.uuid4())
@@ -2846,9 +2840,8 @@ async def analyst_generate_brd(
             }
             
         except Exception as e:
-            print(f"[ANALYST-GENERATE-BRD] Error retrieving history: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[ANALYST-GENERATE-BRD] Error retrieving history: {e}")
+            logger.exception("Exception details:")
             return JSONResponse(status_code=500, content={
                 "error": f"Failed to retrieve conversation history: {str(e)}",
                 "message": "Could not retrieve conversation history from AgentCore Memory"
@@ -2862,7 +2855,7 @@ async def analyst_generate_brd(
             transcript_lines.append(f"{role}: {content}")
         
         transcript = "\n\n".join(transcript_lines)
-        print(f"[ANALYST-GENERATE-BRD] Formatted transcript: {len(transcript)} characters")
+        logger.info(f"[ANALYST-GENERATE-BRD] Formatted transcript: {len(transcript)} characters")
         
         # Generate BRD ID
         brd_id = str(uuid.uuid4())
@@ -2872,7 +2865,6 @@ async def analyst_generate_brd(
         template_s3_key = "templates/Deluxe_BRD_Template.docx"
         
         # Get Lambda client with increased timeout for long-running BRD generation
-        from botocore.config import Config
         lambda_config = Config(
             read_timeout=900,  # 15 minutes - max Lambda execution time
             connect_timeout=10,
@@ -2891,10 +2883,10 @@ async def analyst_generate_brd(
             "user_id": current_user.get("user_id"),  # for token usage tracking
         }
         
-        print(f"[ANALYST-GENERATE-BRD] Calling Lambda: {lambda_function_name}")
-        print(f"[ANALYST-GENERATE-BRD] BRD ID: {brd_id}")
-        print(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
-        print(f"[ANALYST-GENERATE-BRD] Conversation messages: {len(messages)}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Calling Lambda: {lambda_function_name}")
+        logger.info(f"[ANALYST-GENERATE-BRD] BRD ID: {brd_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Session ID: {session_id}")
+        logger.info(f"[ANALYST-GENERATE-BRD] Conversation messages: {len(messages)}")
         
         # Invoke Lambda
         try:
@@ -2907,7 +2899,7 @@ async def analyst_generate_brd(
             # Parse Lambda response
             response_payload = json.loads(lambda_response['Payload'].read())
             
-            print(f"[ANALYST-GENERATE-BRD] Lambda response keys: {list(response_payload.keys()) if isinstance(response_payload, dict) else 'Not a dict'}")
+            logger.info(f"[ANALYST-GENERATE-BRD] Lambda response keys: {list(response_payload.keys()) if isinstance(response_payload, dict) else 'Not a dict'}")
             
             # Lambda returns: {'statusCode': 200, 'body': '{"brd_id": "...", ...}'}
             # Need to parse the 'body' field if it exists
@@ -2927,7 +2919,7 @@ async def analyst_generate_brd(
                             error_message = response_payload.get('errorMessage', str(response_payload.get('body', 'Unknown error')))
                     else:
                         error_message = response_payload.get('errorMessage', response_payload.get('error', 'Unknown error'))
-                print(f"[ANALYST-GENERATE-BRD] ❌ Lambda error: {error_message}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âŒ Lambda error: {error_message}")
                 return JSONResponse(status_code=500, content={
                     "error": "BRD generation failed",
                     "message": f"Failed to generate BRD: {error_message}"
@@ -2945,14 +2937,14 @@ async def analyst_generate_brd(
                     try:
                         body_data = json.loads(response_payload['body'])
                         brd_id_from_response = body_data.get('brd_id')
-                        print(f"[ANALYST-GENERATE-BRD] ✅ Extracted brd_id from body: {brd_id_from_response}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âœ… Extracted brd_id from body: {brd_id_from_response}")
                     except json.JSONDecodeError as e:
-                        print(f"[ANALYST-GENERATE-BRD] ⚠️ Failed to parse body as JSON: {e}")
-                        print(f"[ANALYST-GENERATE-BRD] Body content: {response_payload['body'][:200]}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Failed to parse body as JSON: {e}")
+                        logger.info(f"[ANALYST-GENERATE-BRD] Body content: {response_payload['body'][:200]}")
             
             if brd_id_from_response:
                 brd_id = brd_id_from_response
-                print(f"[ANALYST-GENERATE-BRD] ✅ BRD generated successfully: {brd_id}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âœ… BRD generated successfully: {brd_id}")
                 try:
                     from db_helper import track_event
                     track_event(
@@ -2966,7 +2958,7 @@ async def analyst_generate_brd(
                         },
                     )
                 except Exception as _track_err:
-                    print(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
+                    logger.info(f"[ANALYST-GENERATE-BRD] track_event failed (non-fatal): {_track_err}")
                 return JSONResponse(content={
                     "result": f"BRD generated successfully",
                     "brd_id": brd_id,
@@ -2974,17 +2966,16 @@ async def analyst_generate_brd(
                     "message": "BRD has been generated and saved to S3"
                 })
             else:
-                print(f"[ANALYST-GENERATE-BRD] ⚠️ Lambda response missing brd_id")
-                print(f"[ANALYST-GENERATE-BRD] Full response: {response_payload}")
+                logger.info(f"[ANALYST-GENERATE-BRD] âš ï¸ Lambda response missing brd_id")
+                logger.info(f"[ANALYST-GENERATE-BRD] Full response: {response_payload}")
                 return JSONResponse(status_code=500, content={
                     "error": "BRD generation incomplete",
                     "message": "BRD generation completed but response format was unexpected"
                 })
                 
         except Exception as memory_error:
-            print(f"[ANALYST-GENERATE-BRD] ❌ Error accessing AgentCore Memory: {memory_error}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[ANALYST-GENERATE-BRD] âŒ Error accessing AgentCore Memory: {memory_error}")
+            logger.exception("Exception details:")
             return JSONResponse(status_code=500, content={
                 "error": "Failed to retrieve conversation history",
                 "message": f"Error accessing AgentCore Memory: {str(memory_error)}"
@@ -2992,9 +2983,8 @@ async def analyst_generate_brd(
 
     except Exception as e:
         error_msg = str(e)
-        print(f"[ANALYST-GENERATE-BRD] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[ANALYST-GENERATE-BRD] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         return JSONResponse(status_code=500, content={
             "error": error_msg,
@@ -3009,9 +2999,9 @@ async def download_brd(
 ):
     """Download a generated BRD document as DOCX - fetches from S3 and converts to DOCX"""
     try:
-        print(f"\n[DOWNLOAD-BRD] ========== START ==========")
-        print(f"[DOWNLOAD-BRD] BRD ID: {brd_id}")
-        print(f"[DOWNLOAD-BRD] User: {current_user.get('user_id', 'unknown')}")
+        logger.info(f"\n[DOWNLOAD-BRD] ========== START ==========")
+        logger.info(f"[DOWNLOAD-BRD] BRD ID: {brd_id}")
+        logger.info(f"[DOWNLOAD-BRD] User: {current_user.get('user_id', 'unknown')}")
         
         # Get S3 client
         s3_client = get_s3_client()
@@ -3020,15 +3010,15 @@ async def download_brd(
         # BRD is stored as: brds/{brd_id}/BRD_{brd_id}.txt
         s3_key_txt = f"brds/{brd_id}/BRD_{brd_id}.txt"
         
-        print(f"[DOWNLOAD-BRD] Fetching TXT from s3://{bucket_name}/{s3_key_txt}")
+        logger.info(f"[DOWNLOAD-BRD] Fetching TXT from s3://{bucket_name}/{s3_key_txt}")
         
         # Get the BRD TXT file from S3
         try:
             head_response = s3_client.head_object(Bucket=bucket_name, Key=s3_key_txt)
-            print(f"[DOWNLOAD] ✅ File exists in S3! Size: {head_response.get('ContentLength', 0)} bytes")
+            logger.info(f"[DOWNLOAD] âœ… File exists in S3! Size: {head_response.get('ContentLength', 0)} bytes")
         except ClientError as head_err:
             head_error_code = head_err.response.get('Error', {}).get('Code', 'Unknown')
-            print(f"[DOWNLOAD] ⚠️  head_object failed: {head_error_code} - {head_err}")
+            logger.info(f"[DOWNLOAD] âš ï¸  head_object failed: {head_error_code} - {head_err}")
         
         try:
             # Try to get BRD JSON structure first (preferred for DOCX conversion)
@@ -3046,21 +3036,20 @@ async def download_brd(
                 
                 # Read with explicit UTF-8 encoding and error handling
                 json_body = json_response['Body'].read()
-                print(f"[DOWNLOAD] Read {len(json_body)} bytes from JSON file")
+                logger.info(f"[DOWNLOAD] Read {len(json_body)} bytes from JSON file")
                 
                 # Parse JSON
                 try:
                     brd_data = json.loads(json_body)
                 except json.JSONDecodeError as je:
-                    print(f"[DOWNLOAD] ⚠️ Error parsing BRD JSON: {je}")
+                    logger.info(f"[DOWNLOAD] âš ï¸ Error parsing BRD JSON: {je}")
                     raise je
 
                 # Convert JSON to DOCX
                 docx_bytes = render_brd_json_to_docx(brd_data)
                 
-                print(f"[DOWNLOAD-BRD] ✅ Converted JSON to DOCX: {len(docx_bytes)} bytes")
+                logger.info(f"[DOWNLOAD-BRD] âœ… Converted JSON to DOCX: {len(docx_bytes)} bytes")
                 
-                from fastapi.responses import Response
                 return Response(
                     content=docx_bytes,
                     media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -3071,37 +3060,37 @@ async def download_brd(
             except ClientError as json_err:
                 json_error_code = json_err.response.get('Error', {}).get('Code', '')
                 if json_error_code == 'NoSuchKey':
-                    print(f"[DOWNLOAD] ⚠️  BRD JSON not found, trying text file...")
+                    logger.info(f"[DOWNLOAD] âš ï¸  BRD JSON not found, trying text file...")
                     # Fallback to text file and convert to DOCX
                     response = s3_client.get_object(Bucket=bucket_name, Key=s3_key_txt)
                     # Read with explicit UTF-8 encoding and error handling
                     text_body = response['Body'].read()
-                    print(f"[DOWNLOAD] Read {len(text_body)} bytes from text file")
+                    logger.info(f"[DOWNLOAD] Read {len(text_body)} bytes from text file")
                     
                     try:
                         brd_text = text_body.decode('utf-8')
                     except UnicodeDecodeError as decode_err:
                         # Try with error handling
-                        print(f"[DOWNLOAD] ⚠️ UTF-8 decode error: {decode_err}, trying with error replacement")
+                        logger.info(f"[DOWNLOAD] âš ï¸ UTF-8 decode error: {decode_err}, trying with error replacement")
                         brd_text = text_body.decode('utf-8', errors='replace')
                     
-                    print(f"[DOWNLOAD] ✅ Fetched BRD text from S3 ({len(brd_text)} chars)")
-                    print(f"[DOWNLOAD] First 300 chars: {brd_text[:300]}")
-                    print(f"[DOWNLOAD] Last 100 chars: {brd_text[-100:]}")
+                    logger.info(f"[DOWNLOAD] âœ… Fetched BRD text from S3 ({len(brd_text)} chars)")
+                    logger.info(f"[DOWNLOAD] First 300 chars: {brd_text[:300]}")
+                    logger.info(f"[DOWNLOAD] Last 100 chars: {brd_text[-100:]}")
                     
                     # Check if text looks like it's in English (basic check)
                     english_chars = sum(1 for c in brd_text[:500] if c.isascii() and (c.isalpha() or c.isspace() or c in '.,;:!?()-'))
                     total_chars = min(500, len(brd_text))
                     if total_chars > 0:
                         english_ratio = english_chars / total_chars
-                        print(f"[DOWNLOAD] English character ratio (first 500 chars): {english_ratio:.2%}")
+                        logger.info(f"[DOWNLOAD] English character ratio (first 500 chars): {english_ratio:.2%}")
                         if english_ratio < 0.5:
-                            print(f"[DOWNLOAD] ⚠️ WARNING: Text may not be in English! Ratio: {english_ratio:.2%}")
+                            logger.info(f"[DOWNLOAD] âš ï¸ WARNING: Text may not be in English! Ratio: {english_ratio:.2%}")
                     
                     # Convert text to DOCX with proper markdown parsing
                     docx_content = render_brd_json_to_docx(brd_text)  # This handles string input
                     
-                    print(f"[DOWNLOAD] ✅ Converted text to DOCX ({len(docx_content)} bytes)")
+                    logger.info(f"[DOWNLOAD] âœ… Converted text to DOCX ({len(docx_content)} bytes)")
                     
                     from fastapi.responses import Response
                     return Response(
@@ -3117,22 +3106,22 @@ async def download_brd(
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
             error_message = e.response.get('Error', {}).get('Message', str(e))
             
-            print(f"[DOWNLOAD] ❌ S3 ClientError: Code={error_code}, Message={error_message}")
-            print(f"[DOWNLOAD] Full error response: {e.response}")
+            logger.info(f"[DOWNLOAD] âŒ S3 ClientError: Code={error_code}, Message={error_message}")
+            logger.info(f"[DOWNLOAD] Full error response: {e.response}")
             
             # Check credentials
             try:
                 creds_valid, creds_info = check_aws_credentials()
                 if not creds_valid:
-                    print(f"[DOWNLOAD] ⚠️  AWS credentials check failed: {creds_info}")
+                    logger.info(f"[DOWNLOAD] âš ï¸  AWS credentials check failed: {creds_info}")
                     return JSONResponse(
                         status_code=403,
                         content={"error": f"AWS credentials invalid or expired. Please refresh credentials. Details: {creds_info}"}
                     )
                 else:
-                    print(f"[DOWNLOAD] ✅ AWS credentials valid: {creds_info.get('Account', 'Unknown')}")
+                    logger.info(f"[DOWNLOAD] âœ… AWS credentials valid: {creds_info.get('Account', 'Unknown')}")
             except Exception as cred_err:
-                print(f"[DOWNLOAD] ⚠️  Could not check credentials: {cred_err}")
+                logger.info(f"[DOWNLOAD] âš ï¸  Could not check credentials: {cred_err}")
             
             # Check if it's an access denied error
             if error_code == 'AccessDeniedException' or '403' in str(error_code) or 'Access Denied' in error_message:
@@ -3142,10 +3131,10 @@ async def download_brd(
                 )
             
             if error_code == 'NoSuchKey':
-                print(f"[DOWNLOAD] ❌ BRD text file not found in S3: {s3_key_txt}")
+                logger.info(f"[DOWNLOAD] âŒ BRD text file not found in S3: {s3_key_txt}")
                 # Try to get BRD JSON structure and render it to text
                 try:
-                    print(f"[DOWNLOAD] Attempting to fetch BRD JSON structure from S3...")
+                    logger.info(f"[DOWNLOAD] Attempting to fetch BRD JSON structure from S3...")
                     json_key = f"brds/{brd_id}/brd_structure.json"
                     try:
                         try:
@@ -3164,10 +3153,10 @@ async def download_brd(
                         except UnicodeDecodeError:
                             # Try with error handling
                             json_text = json_body.decode('utf-8', errors='replace')
-                            print(f"[DOWNLOAD] ⚠️ Had to use error replacement for JSON decoding (fallback)")
+                            logger.info(f"[DOWNLOAD] âš ï¸ Had to use error replacement for JSON decoding (fallback)")
                         
                         brd_json = json.loads(json_text)
-                        print(f"[DOWNLOAD] ✅ Found BRD JSON structure, rendering to text...")
+                        logger.info(f"[DOWNLOAD] âœ… Found BRD JSON structure, rendering to text...")
                         
                         # Render BRD JSON to text (simplified version of lambda_brd_chat.py render_brd_to_text)
                         brd_text = render_brd_json_to_text(brd_json)
@@ -3180,15 +3169,15 @@ async def download_brd(
                                 content_type="text/plain",
                                 bucket=bucket_name,
                             )
-                            print(f"[DOWNLOAD] ✅ Saved rendered text file to S3 for future downloads")
+                            logger.info(f"[DOWNLOAD] âœ… Saved rendered text file to S3 for future downloads")
                         except Exception as save_err:
-                            print(f"[DOWNLOAD] ⚠️  Could not save text file: {save_err}")
+                            logger.info(f"[DOWNLOAD] âš ï¸  Could not save text file: {save_err}")
                         
-                        print(f"[DOWNLOAD] ✅ Rendered BRD from JSON ({len(brd_text)} chars)")
+                        logger.info(f"[DOWNLOAD] âœ… Rendered BRD from JSON ({len(brd_text)} chars)")
                         
                         # Convert to DOCX
                         docx_bytes = render_brd_json_to_docx(brd_json)
-                        print(f"[DOWNLOAD] ✅ Generated DOCX ({len(docx_bytes)} bytes)")
+                        logger.info(f"[DOWNLOAD] âœ… Generated DOCX ({len(docx_bytes)} bytes)")
                         
                         from fastapi.responses import Response
                         return Response(
@@ -3201,13 +3190,13 @@ async def download_brd(
                     except ClientError as json_err:
                         json_error_code = json_err.response.get('Error', {}).get('Code', '')
                         if json_error_code == 'NoSuchKey':
-                            print(f"[DOWNLOAD] ❌ BRD JSON structure also not found")
+                            logger.info(f"[DOWNLOAD] âŒ BRD JSON structure also not found")
                         else:
-                            print(f"[DOWNLOAD] ❌ Error fetching JSON: {json_err}")
+                            logger.info(f"[DOWNLOAD] âŒ Error fetching JSON: {json_err}")
                 except Exception as render_err:
-                    print(f"[DOWNLOAD] ❌ Failed to render BRD from JSON: {render_err}")
+                    logger.info(f"[DOWNLOAD] âŒ Failed to render BRD from JSON: {render_err}")
                     import traceback
-                    traceback.print_exc()
+                    logger.exception("Exception details:")
                 
                 return JSONResponse(
                     status_code=404,
@@ -3224,9 +3213,8 @@ async def download_brd(
                     content={"error": f"S3 error ({error_code}): {error_message}"}
                 )
         except Exception as e:
-            print(f"[DOWNLOAD] ❌ Error fetching from S3: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[DOWNLOAD] âŒ Error fetching from S3: {e}")
+            logger.exception("Exception details:")
             return JSONResponse(status_code=500, content={
                 "error": "Failed to retrieve BRD",
                 "message": f"Error accessing S3: {str(e)}"
@@ -3234,9 +3222,8 @@ async def download_brd(
             
     except Exception as e:
         error_msg = str(e)
-        print(f"[DOWNLOAD-BRD] ERROR: {error_msg}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[DOWNLOAD-BRD] ERROR: {error_msg}")
+        logger.exception("Exception details:")
         
         return JSONResponse(status_code=500, content={
             "error": error_msg,
@@ -3251,7 +3238,7 @@ async def download_brd(
 async def get_analyst_history(session_id: str, current_user: dict = Depends(get_current_user)):
     """Get conversation history for analyst agent session"""
     try:
-        print(f"\n[ANALYST-HISTORY] Retrieving history for session: {session_id}")
+        logger.info(f"\n[ANALYST-HISTORY] Retrieving history for session: {session_id}")
         
         # Get AgentCore Memory client
         agentcore_client = get_agent_core_client()
@@ -3271,7 +3258,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
             )
             
             events = response.get("events", [])
-            print(f"[ANALYST-HISTORY] Retrieved {len(events)} events")
+            logger.info(f"[ANALYST-HISTORY] Retrieved {len(events)} events")
 
             for event in events:
                 payload_list = event.get("payload", [])
@@ -3293,7 +3280,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
 
             messages.reverse()
 
-            print(f"[ANALYST-HISTORY] Returning {len(messages)} messages")
+            logger.info(f"[ANALYST-HISTORY] Returning {len(messages)} messages")
 
             return JSONResponse(content={
                 "messages": messages,
@@ -3301,7 +3288,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
             })
             
         except Exception as e:
-            print(f"[ANALYST-HISTORY] Error retrieving history: {e}")
+            logger.info(f"[ANALYST-HISTORY] Error retrieving history: {e}")
             # Return empty history instead of error
             return JSONResponse(content={
                 "messages": [],
@@ -3309,7 +3296,7 @@ async def get_analyst_history(session_id: str, current_user: dict = Depends(get_
             })
     
     except Exception as e:
-        print(f"[ANALYST-HISTORY] ERROR: {e}")
+        logger.info(f"[ANALYST-HISTORY] ERROR: {e}")
         return JSONResponse(status_code=500, content={
             "error": str(e),
             "messages": []
@@ -3327,7 +3314,6 @@ def _extract_clean_user_message(text: str) -> str:
       BRD CONTEXT:\\n{content}\\n\\nUSER REQUEST: {actual message}
     This extracts just the {actual message} part for clean chat display.
     """
-    import re
 
     # 1. Extract text after "USER REQUEST: " marker (strips the section context prefix)
     marker = "USER REQUEST: "
@@ -3337,7 +3323,7 @@ def _extract_clean_user_message(text: str) -> str:
     else:
         clean = text
 
-    # 2. Strip trailing IMPORTANT instruction block — use regex to handle any whitespace (\n, \r\n, etc.)
+    # 2. Strip trailing IMPORTANT instruction block â€” use regex to handle any whitespace (\n, \r\n, etc.)
     clean = re.split(r'\s+IMPORTANT:\s+The user is currently viewing', clean, maxsplit=1)[0]
 
     return clean.strip()
@@ -3355,13 +3341,13 @@ async def get_brd_chat_history(
     mirroring the working /api/analyst-history pattern.
     """
     try:
-        print(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
+        logger.info(f"\n[BRD-HISTORY] Retrieving history from AgentCore Memory for session: {session_id}")
 
         agentcore_client = get_agent_core_client()
         memory_id = AGENTCORE_MEMORY_ID
         actor_id = AGENTCORE_ACTOR_ID
 
-        print(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
+        logger.info(f"[BRD-HISTORY] Query params: memoryId={memory_id}, sessionId={session_id}, actorId={actor_id}")
 
         messages = []
 
@@ -3375,7 +3361,7 @@ async def get_brd_chat_history(
             )
 
             events = response.get("events", [])
-            print(f"[BRD-HISTORY] AgentCore returned {len(events)} events")
+            logger.info(f"[BRD-HISTORY] AgentCore returned {len(events)} events")
 
             # Sort events by (eventTimestamp, eventId) oldest first.
             # list_events may return in undefined order. Using eventId as
@@ -3416,14 +3402,13 @@ async def get_brd_chat_history(
                             "isBot": True
                         })
 
-            # Already sorted oldest-first above — no need to reverse
+            # Already sorted oldest-first above â€” no need to reverse
 
         except Exception as e:
-            print(f"[BRD-HISTORY] AgentCore Memory query failed: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.info(f"[BRD-HISTORY] AgentCore Memory query failed: {e}")
+            logger.exception("Exception details:")
 
-        print(f"[BRD-HISTORY] Returning {len(messages)} messages")
+        logger.info(f"[BRD-HISTORY] Returning {len(messages)} messages")
 
         return JSONResponse(content={
             "messages": messages,
@@ -3432,9 +3417,8 @@ async def get_brd_chat_history(
         })
 
     except Exception as e:
-        print(f"[BRD-HISTORY] ERROR: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.info(f"[BRD-HISTORY] ERROR: {e}")
+        logger.exception("Exception details:")
         return JSONResponse(status_code=500, content={
             "error": str(e),
             "messages": []
@@ -3460,7 +3444,7 @@ async def check_brd_access(current_user: dict = Depends(get_current_user)):
 async def get_user_info(current_user: dict = Depends(get_current_user)):
     """Get current user information including group-based module access.
 
-    Source of truth for RBAC — frontend calls this after login instead of
+    Source of truth for RBAC â€” frontend calls this after login instead of
     computing modules from idTokenClaims.groups, so that:
       1. Groups-claim overage (>200 groups) is handled via Microsoft Graph
          inside extract_user_groups().
@@ -3474,7 +3458,7 @@ async def get_user_info(current_user: dict = Depends(get_current_user)):
     try:
         create_or_update_user(user_id, email, name)
     except Exception as e:
-        print(f"[USER_INFO] Failed to upsert user row for {email}: {e}")
+        logger.info(f"[USER_INFO] Failed to upsert user row for {email}: {e}")
 
     identity_arn = get_user_identity_arn(user_id)
     return JSONResponse(content={
@@ -3491,7 +3475,6 @@ async def get_user_info(current_user: dict = Depends(get_current_user)):
 async def get_my_usage(current_user: dict = Depends(get_current_user)):
     """Return the current user's own usage row (last_login + cumulative tokens)
     plus per-module rollup and recent events."""
-    from db_helper import get_user_usage, get_user_module_rollup, get_user_recent_events
     user_id = current_user["user_id"]
     row = get_user_usage(user_id)
     modules = get_user_module_rollup(user_id)
@@ -3529,11 +3512,6 @@ async def get_organization_usage(current_user: dict = Depends(get_current_user))
     Per-user `recent_events` is capped at 10 to keep payload size bounded;
     `/api/user/me/usage` returns 20 for the caller's own drill-down.
     """
-    from db_helper import (
-        list_all_users_usage,
-        get_user_module_rollup,
-        get_user_recent_events,
-    )
     rows = list_all_users_usage()
     users_payload = []
     for r in rows:
@@ -3560,8 +3538,6 @@ async def get_organization_usage(current_user: dict = Depends(get_current_user))
 @app.get("/api/support/user-guide")
 async def get_support_user_guide(current_user: dict = Depends(get_current_user)):
     """Return the user guide HTML extracted from the MHTML .doc in S3."""
-    import email as email_lib
-    import base64 as b64
 
     s3_client = get_s3_client()
     try:
@@ -3573,7 +3549,7 @@ async def get_support_user_guide(current_user: dict = Depends(get_current_user))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load user guide from S3: {e}")
 
-    msg = email_lib.message_from_string(raw)
+    msg = email.message_from_string(raw)
     image_map: dict[str, str] = {}
     html_content = ""
 
@@ -3597,7 +3573,7 @@ async def get_support_user_guide(current_user: dict = Depends(get_current_user))
                 mime = "image/gif"
             else:
                 mime = "image/png"
-        data_uri = f"data:{mime};base64,{b64.b64encode(payload).decode()}"
+        data_uri = f"data:{mime};base64,{base64.b64encode(payload).decode()}"
         loc = part.get("Content-Location", "")
         if loc:
             image_map[loc] = data_uri
@@ -3615,11 +3591,10 @@ async def get_support_user_guide(current_user: dict = Depends(get_current_user))
         html_content = html_content.replace(ref, image_map[ref])
 
     # Add IDs to headings so the frontend can scroll to specific sections
-    import re as _re
 
     def _slugify(text: str) -> str:
-        clean = _re.sub(r"<[^>]+>", "", text).strip()
-        return _re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")
+        clean = re.sub(r"<[^>]+>", "", text).strip()
+        return re.sub(r"[^a-z0-9]+", "-", clean.lower()).strip("-")
 
     def _add_heading_ids(html: str) -> str:
         def _replacer(m):
@@ -3630,7 +3605,7 @@ async def get_support_user_guide(current_user: dict = Depends(get_current_user))
             if slug:
                 return f"<{tag}{attrs} id=\"{slug}\">{content}</{tag}>"
             return m.group(0)
-        return _re.sub(r"<(h[1-4])([^>]*)>(.*?)</\1>", _replacer, html, flags=_re.DOTALL | _re.IGNORECASE)
+        return re.sub(r"<(h[1-4])([^>]*)>(.*?)</\1>", _replacer, html, flags=re.DOTALL | re.IGNORECASE)
 
     html_content = _add_heading_ids(html_content)
 
@@ -3868,20 +3843,18 @@ async def record_tokens(
 ):
     """Increment users.token_usage from Lambda/agent call sites that can't talk
     to RDS directly. Validates X-API-Key against INTERNAL_API_KEYS env."""
-    from routers.internal_utils import validate_api_key
-    from db_helper import increment_user_token_usage as _bump
 
     validate_api_key(x_api_key)
 
     if body.tokens <= 0 or not body.user_id:
-        return  # 204 — silently no-op for invalid inputs
+        return  # 204 â€” silently no-op for invalid inputs
 
     try:
-        _bump(body.user_id, body.tokens)
-        print(f"[record-tokens] user={body.user_id} tokens={body.tokens} source={body.source or '?'}")
+        increment_user_token_usage(body.user_id, body.tokens)
+        logger.info(f"[record-tokens] user={body.user_id} tokens={body.tokens} source={body.source or '?'}")
     except Exception as e:
-        # Log but don't surface — token accounting must never break callers
-        print(f"[record-tokens] FAILED user={body.user_id} tokens={body.tokens}: {e}")
+        # Log but don't surface â€” token accounting must never break callers
+        logger.info(f"[record-tokens] FAILED user={body.user_id} tokens={body.tokens}: {e}")
 
 
 if __name__ == "__main__":

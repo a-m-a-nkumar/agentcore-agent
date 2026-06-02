@@ -4,10 +4,15 @@ This agent uses Lambda functions as tools for BRD generation, retrieval, and edi
 """
 
 import json
+import logging
 import os
 import re
+import ssl
 import threading
+import traceback
+import uuid
 from typing import Optional
+from urllib import request as _urlreq
 
 from bedrock_agentcore import BedrockAgentCoreApp
 from strands import Agent, tool
@@ -24,6 +29,13 @@ from environment import (
     DEFAULT_AGENTCORE_MEMORY_ID,
     DEFAULT_AGENTCORE_ACTOR_ID,
 )
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    stream=None,  # defaults to stderr, captured by CloudWatch/AgentCore runtime
+)
+logger = logging.getLogger(__name__)
 
 # Per-invocation user_id (set by entrypoint, read by tools when building Lambda payloads
 # so each Lambda can attribute its own LLM token usage to the right user).
@@ -42,14 +54,11 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
         backend_url = os.getenv("BACKEND_URL", "").rstrip("/")
         api_key = os.getenv("INTERNAL_API_KEY", "")
         if not backend_url or not api_key:
-            print(f"[BRD-AGENT] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY not set "
-                  f"(would have recorded {total_tokens} tokens for {user_id})", flush=True)
+            logger.info(f"[BRD-AGENT] cannot record tokens: BACKEND_URL/INTERNAL_API_KEY not set "
+                  f"(would have recorded {total_tokens} tokens for {user_id})")
             return
         try:
-            import json as _json
-            import ssl as _ssl
-            from urllib import request as _urlreq
-            body = _json.dumps({
+            body = json.dumps({
                 "user_id": user_id, "tokens": total_tokens, "source": source,
             }).encode("utf-8")
             req = _urlreq.Request(
@@ -60,14 +69,14 @@ def _record_tokens_via_callback(user_id: Optional[str], total_tokens: int, sourc
             )
             ctx = None
             if os.getenv("INTERNAL_TLS_VERIFY", "1") == "0":
-                ctx = _ssl.create_default_context()
+                ctx = ssl.create_default_context()
                 ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
+                ctx.verify_mode = ssl.CERT_NONE
             with _urlreq.urlopen(req, timeout=5, context=ctx) as resp:
                 if resp.status >= 400:
-                    print(f"[BRD-AGENT] record-tokens callback {resp.status}: {resp.read()[:200]!r}", flush=True)
+                    logger.error(f"[BRD-AGENT] record-tokens callback {resp.status}: {resp.read()[:200]!r}")
         except Exception as e:
-            print(f"[BRD-AGENT] record-tokens callback failed for {user_id}: {e}", flush=True)
+            logger.error(f"[BRD-AGENT] record-tokens callback failed for {user_id}: {e}")
 
     threading.Thread(target=_post, daemon=True).start()
 
@@ -90,10 +99,10 @@ def _capture_strands_metrics(agent_obj, user_id: Optional[str], source: str) -> 
         else:
             total = getattr(usage, "totalTokens", 0) or getattr(usage, "total_tokens", 0)
         if total:
-            print(f"[BRD-AGENT] Strands tokens={total} user={user_id} source={source}", flush=True)
+            logger.info(f"[BRD-AGENT] Strands tokens={total} user={user_id} source={source}")
             _record_tokens_via_callback(user_id, int(total), source)
     except Exception as e:
-        print(f"[BRD-AGENT] _capture_strands_metrics failed: {e}", flush=True)
+        logger.error(f"[BRD-AGENT] _capture_strands_metrics failed: {e}")
 
 # Initialize the AgentCore Runtime app
 app = BedrockAgentCoreApp()
@@ -156,7 +165,7 @@ def invoke_lambda_tool(function_name: str, payload: dict) -> dict:
     """
     try:
         lambda_client = _get_lambda_client()
-        print(f"[BRD-AGENT] Invoking Lambda: {function_name}", flush=True)
+        logger.info(f"[BRD-AGENT] Invoking Lambda: {function_name}")
         
         response = lambda_client.invoke(
             FunctionName=function_name,
@@ -170,16 +179,15 @@ def invoke_lambda_tool(function_name: str, payload: dict) -> dict:
         # Check for Lambda errors
         if 'FunctionError' in response:
             error_msg = response_payload.get('errorMessage', 'Unknown Lambda error')
-            print(f"[BRD-AGENT] Lambda error: {error_msg}", flush=True)
+            logger.error(f"[BRD-AGENT] Lambda error: {error_msg}")
             raise Exception(f"Lambda function error: {error_msg}")
-        
-        print(f"[BRD-AGENT] Lambda response received", flush=True)
+
+        logger.info(f"[BRD-AGENT] Lambda response received")
         return response_payload
-        
+
     except Exception as e:
-        print(f"[BRD-AGENT] Error invoking Lambda {function_name}: {str(e)}", flush=True)
-        import traceback
-        print(traceback.format_exc(), flush=True)
+        logger.error(f"[BRD-AGENT] Error invoking Lambda {function_name}: {str(e)}")
+        logger.exception("Exception details:")
         raise
 
 # --- Tool Definitions (using @tool decorator) ---
@@ -208,22 +216,22 @@ def generate_brd(template: str, transcript: str, brd_id: Optional[str] = None) -
 
     lambda_response = invoke_lambda_tool(LAMBDA_GENERATOR, payload)
     
-    print(f"[BRD-AGENT] Lambda response type: {type(lambda_response)}", flush=True)
-    print(f"[BRD-AGENT] Lambda response keys: {lambda_response.keys() if isinstance(lambda_response, dict) else 'not a dict'}", flush=True)
+    logger.info(f"[BRD-AGENT] Lambda response type: {type(lambda_response)}")
+    logger.info(f"[BRD-AGENT] Lambda response keys: {lambda_response.keys() if isinstance(lambda_response, dict) else 'not a dict'}")
     
     # Parse response - handle different response formats
     if isinstance(lambda_response, dict):
         # Handle Lambda HTTP response format
         if 'statusCode' in lambda_response and 'body' in lambda_response:
-            print(f"[BRD-AGENT] Detected Lambda HTTP response format", flush=True)
+            logger.info(f"[BRD-AGENT] Detected Lambda HTTP response format")
             try:
                 body = json.loads(lambda_response['body'])
-                print(f"[BRD-AGENT] Parsed body keys: {body.keys()}", flush=True)
-                
+                logger.info(f"[BRD-AGENT] Parsed body keys: {body.keys()}")
+
                 if body.get('brd'):
                     brd_text = body['brd']
                     brd_id_from_lambda = body.get('brd_id')
-                    print(f"[BRD-AGENT] Found BRD! Length: {len(brd_text)} chars, ID: {brd_id_from_lambda}", flush=True)
+                    logger.info(f"[BRD-AGENT] Found BRD! Length: {len(brd_text)} chars, ID: {brd_id_from_lambda}")
                     
                     # Return as JSON so app.py can parse it easily
                     return json.dumps({
@@ -232,7 +240,7 @@ def generate_brd(template: str, transcript: str, brd_id: Optional[str] = None) -
                         'brd_id': brd_id_from_lambda
                     })
             except Exception as e:
-                print(f"[BRD-AGENT] Error parsing Lambda body: {e}", flush=True)
+                logger.error(f"[BRD-AGENT] Error parsing Lambda body: {e}")
         
         # Other formats
         elif 'response' in lambda_response:
@@ -346,11 +354,11 @@ def chat_with_brd(
         Chat response message with the result of the operation
     """
     # LOG exactly what message is being sent to Lambda
-    print(f"[BRD-AGENT] 📨 chat_with_brd called with:", flush=True)
-    print(f"[BRD-AGENT]   action={action}", flush=True)
-    print(f"[BRD-AGENT]   brd_id={brd_id}", flush=True)
-    print(f"[BRD-AGENT]   session_id={session_id}", flush=True)
-    print(f"[BRD-AGENT]   message (first 300 chars)={message[:300] if message else 'None'}", flush=True)
+    logger.info(f"[BRD-AGENT] chat_with_brd called with:")
+    logger.info(f"[BRD-AGENT]   action={action}")
+    logger.info(f"[BRD-AGENT]   brd_id={brd_id}")
+    logger.info(f"[BRD-AGENT]   session_id={session_id}")
+    logger.info(f"[BRD-AGENT]   message (first 300 chars)={message[:300] if message else 'None'}")
     
     payload = {
         'action': action,
@@ -361,7 +369,7 @@ def chat_with_brd(
     # Use provided session_id, or generate one based on BRD ID for consistency
     if not session_id and brd_id:
         session_id = f"brd-session-{brd_id}"
-        print(f"[BRD-AGENT] Auto-generated session_id: {session_id}", flush=True)
+        logger.info(f"[BRD-AGENT] Auto-generated session_id: {session_id}")
     
     if session_id:
         payload['session_id'] = session_id
@@ -417,11 +425,11 @@ def get_brd_conversation_history(brd_id: str, session_id: Optional[str] = None) 
     
     if not session_id:
         session_id = f"brd-session-{brd_id}"
-        print(f"[BRD-AGENT] Auto-generated session_id for history: {session_id}", flush=True)
+        logger.info(f"[BRD-AGENT] Auto-generated session_id for history: {session_id}")
     
     client = _get_agentcore_memory_client()
     try:
-        print(f"[BRD-AGENT] Retrieving conversation history for session: {session_id}", flush=True)
+        logger.info(f"[BRD-AGENT] Retrieving conversation history for session: {session_id}")
         response = client.list_events(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
@@ -450,14 +458,14 @@ def get_brd_conversation_history(brd_id: str, session_id: Optional[str] = None) 
         
         if messages:
             history_text = "\n".join(messages)
-            print(f"[BRD-AGENT] Retrieved {len(messages)} messages from history", flush=True)
+            logger.info(f"[BRD-AGENT] Retrieved {len(messages)} messages from history")
             return history_text
         else:
-            print(f"[BRD-AGENT] No conversation history found for session: {session_id}", flush=True)
+            logger.info(f"[BRD-AGENT] No conversation history found for session: {session_id}")
             return "No conversation history found for this BRD session."
     except Exception as e:
         error_msg = f"Error retrieving conversation history: {str(e)}"
-        print(f"[BRD-AGENT] {error_msg}", flush=True)
+        logger.error(f"[BRD-AGENT] {error_msg}")
         return error_msg
 
 def _get_agent(fresh=False):
@@ -492,19 +500,18 @@ def _get_agent(fresh=False):
             
             if not fresh:
                 _agent_instance = agent
-                print("[BRD-AGENT] Strands agent initialized with Lambda tools", flush=True)
+                logger.info("[BRD-AGENT] Strands agent initialized with Lambda tools")
             else:
-                print("[BRD-AGENT] Created fresh Strands agent instance (no conversation history)", flush=True)
+                logger.info("[BRD-AGENT] Created fresh Strands agent instance (no conversation history)")
             
             return agent
             
         except ImportError as e:
-            print(f"[BRD-AGENT] Error: Strands not available ({e})", flush=True)
+            logger.error(f"[BRD-AGENT] Error: Strands not available ({e})")
             raise
         except Exception as e:
-            print(f"[BRD-AGENT] Error initializing agent: {str(e)}", flush=True)
-            import traceback
-            print(traceback.format_exc(), flush=True)
+            logger.error(f"[BRD-AGENT] Error initializing agent: {str(e)}")
+            logger.exception("Exception details:")
             raise
     
     return _agent_instance
@@ -528,62 +535,60 @@ def invoke(payload):
     """
     global _current_user_id
     try:
-        print("=" * 80, flush=True)
-        print("[BRD-AGENT] Handler invoked (Strands + Lambda Tools)", flush=True)
-        print("=" * 80, flush=True)
+        logger.info("=" * 80)
+        logger.info("[BRD-AGENT] Handler invoked (Strands + Lambda Tools)")
+        logger.info("=" * 80)
 
         # Stash user_id so tools can attribute Lambda LLM calls.
         _current_user_id = payload.get("user_id") or None
-        print(f"[BRD-AGENT] user_id={_current_user_id or 'unknown'}", flush=True)
+        logger.info(f"[BRD-AGENT] user_id={_current_user_id or 'unknown'}")
 
         # Extract user message from payload
         user_message = payload.get("prompt") or payload.get("text") or payload.get("message", "Hello! How can I help you with BRD operations?")
 
-        print(f"[BRD-AGENT] User message: {user_message[:200]}...", flush=True)
-        print(f"[BRD-AGENT] Payload keys: {list(payload.keys())}", flush=True)
+        logger.info(f"[BRD-AGENT] User message: {user_message[:200]}...")
+        logger.info(f"[BRD-AGENT] Payload keys: {list(payload.keys())}")
         
         # Get the agent instance (lazy loaded)
         agent = _get_agent()
         
         # If template and transcript are provided, directly call generate_brd tool
         if payload.get('template') and payload.get('transcript'):
-            print(f"[BRD-AGENT] Template and transcript detected, calling generate_brd tool directly", flush=True)
+            logger.info(f"[BRD-AGENT] Template and transcript detected, calling generate_brd tool directly")
             try:
                 # Directly call the generate_brd function
                 template = payload.get('template')
                 transcript = payload.get('transcript')
                 
                 # Generate proper UUID for BRD if not provided
-                import uuid
                 brd_id = payload.get('brd_id')
                 if not brd_id or brd_id == 'none' or brd_id.startswith('generated-'):
                     brd_id = str(uuid.uuid4())
-                    print(f"[BRD-AGENT] Generated new BRD ID: {brd_id}", flush=True)
+                    logger.info(f"[BRD-AGENT] Generated new BRD ID: {brd_id}")
                 else:
-                    print(f"[BRD-AGENT] Using provided BRD ID: {brd_id}", flush=True)
-                
-                print(f"[BRD-AGENT] Template length: {len(template)} chars", flush=True)
-                print(f"[BRD-AGENT] Transcript length: {len(transcript)} chars", flush=True)
-                
+                    logger.info(f"[BRD-AGENT] Using provided BRD ID: {brd_id}")
+
+                logger.info(f"[BRD-AGENT] Template length: {len(template)} chars")
+                logger.info(f"[BRD-AGENT] Transcript length: {len(transcript)} chars")
+
                 # Call the tool directly
                 result_text = generate_brd(template=template, transcript=transcript, brd_id=brd_id)
-                print(f"[BRD-AGENT] Direct tool call completed", flush=True)
-                
+                logger.info(f"[BRD-AGENT] Direct tool call completed")
+
             except Exception as e:
-                print(f"[BRD-AGENT] Error in direct tool call: {str(e)}", flush=True)
-                import traceback
-                print(traceback.format_exc(), flush=True)
+                logger.error(f"[BRD-AGENT] Error in direct tool call: {str(e)}")
+                logger.exception("Exception details:")
                 result_text = f"Error generating BRD: {str(e)}"
         # Handle chat/edit requests for existing BRDs
         elif payload.get('brd_id') and payload.get('brd_id') != 'none':
             brd_id = payload.get('brd_id')
-            print(f"[BRD-AGENT] BRD ID provided: {brd_id}", flush=True)
+            logger.info(f"[BRD-AGENT] BRD ID provided: {brd_id}")
             
             # Get session_id from payload if provided
             session_id_from_payload = payload.get('session_id')
             if not session_id_from_payload or session_id_from_payload == 'none':
                 session_id_from_payload = f"brd-session-{brd_id}"
-                print(f"[BRD-AGENT] No session_id provided, using: {session_id_from_payload}", flush=True)
+                logger.info(f"[BRD-AGENT] No session_id provided, using: {session_id_from_payload}")
             
             # DIRECT PATH: For straightforward commands (update, show, list), bypass the Strands Agent LLM
             # and call chat_with_brd directly. This prevents the Agent LLM from reformulating the message.
@@ -596,9 +601,9 @@ def invoke(payload):
             
             if is_direct_command:
                 # DIRECT PATH: Send user's exact message to Lambda without Agent LLM interference
-                print(f"[BRD-AGENT] ========================================", flush=True)
-                print(f"[BRD-AGENT] DIRECT PATH: Bypassing Strands Agent LLM for command: {user_message[:200]}", flush=True)
-                print(f"[BRD-AGENT] ========================================", flush=True)
+                logger.info(f"[BRD-AGENT] ========================================")
+                logger.info(f"[BRD-AGENT] DIRECT PATH: Bypassing Strands Agent LLM for command: {user_message[:200]}")
+                logger.info(f"[BRD-AGENT] ========================================")
                 
                 try:
                     result_text = chat_with_brd(
@@ -607,16 +612,15 @@ def invoke(payload):
                         session_id=session_id_from_payload,
                         message=user_message
                     )
-                    print(f"[BRD-AGENT] DIRECT PATH result: {str(result_text)[:300]}", flush=True)
+                    logger.info(f"[BRD-AGENT] DIRECT PATH result: {str(result_text)[:300]}")
                 except Exception as e:
-                    print(f"[BRD-AGENT] DIRECT PATH error: {e}", flush=True)
-                    import traceback
-                    print(traceback.format_exc(), flush=True)
+                    logger.error(f"[BRD-AGENT] DIRECT PATH error: {e}")
+                    logger.exception("Exception details:")
                     result_text = f"Error processing request: {str(e)}. Please try rephrasing your request."
             else:
                 # AGENT PATH: For complex queries, questions about history, etc.
                 # Use the Strands Agent LLM for intelligent decision making
-                print(f"[BRD-AGENT] AGENT PATH: Using Strands Agent for: {user_message[:200]}", flush=True)
+                logger.info(f"[BRD-AGENT] AGENT PATH: Using Strands Agent for: {user_message[:200]}")
                 
                 # Retrieve conversation history from AgentCore Memory
                 conversation_context = ""
@@ -624,11 +628,11 @@ def invoke(payload):
                     history_result = get_brd_conversation_history(brd_id, session_id_from_payload)
                     if history_result and "Error" not in history_result and "No conversation history" not in history_result:
                         conversation_context = f"\n\n=== CONVERSATION HISTORY ===\n{history_result}\n=== END HISTORY ===\n"
-                        print(f"[BRD-AGENT] ✅ Retrieved conversation history ({len(history_result)} chars)", flush=True)
+                        logger.info(f"[BRD-AGENT] Retrieved conversation history ({len(history_result)} chars)")
                     else:
-                        print(f"[BRD-AGENT] ⚠️ No conversation history available", flush=True)
+                        logger.info(f"[BRD-AGENT] No conversation history available")
                 except Exception as e:
-                    print(f"[BRD-AGENT] ❌ Could not retrieve history: {e}", flush=True)
+                    logger.error(f"[BRD-AGENT] Could not retrieve history: {e}")
                 
                 enhanced_message = f"""You are a BRD (Business Requirements Document) assistant.
 
@@ -665,9 +669,9 @@ Now analyze and take action."""
                     else:
                         result_text = str(result)
 
-                    print(f"[BRD-AGENT] AGENT PATH result: {result_text[:300]}", flush=True)
+                    logger.info(f"[BRD-AGENT] AGENT PATH result: {result_text[:300]}")
                 except Exception as e:
-                    print(f"[BRD-AGENT] AGENT PATH error, falling back to direct: {e}", flush=True)
+                    logger.error(f"[BRD-AGENT] AGENT PATH error, falling back to direct: {e}")
                     try:
                         result_text = chat_with_brd(
                             action="send_message",
@@ -676,11 +680,11 @@ Now analyze and take action."""
                             message=user_message
                         )
                     except Exception as fallback_error:
-                        print(f"[BRD-AGENT] Fallback also failed: {fallback_error}", flush=True)
+                        logger.error(f"[BRD-AGENT] Fallback also failed: {fallback_error}")
                         result_text = f"Error processing request: {str(e)}. Please try rephrasing your request."
         else:
             # Run the agent with user message for general queries
-            print(f"[BRD-AGENT] Running Strands agent for general query...", flush=True)
+            logger.info(f"[BRD-AGENT] Running Strands agent for general query...")
 
             # Use the synchronous call method (agent is callable)
             result = agent(user_message)
@@ -698,7 +702,7 @@ Now analyze and take action."""
             else:
                 result_text = str(result)
         
-        print(f"[BRD-AGENT] Response length: {len(result_text)} characters", flush=True)
+        logger.info(f"[BRD-AGENT] Response length: {len(result_text)} characters")
         
         # Try to extract BRD ID from result if present
         brd_id = payload.get('brd_id')
@@ -711,19 +715,17 @@ Now analyze and take action."""
         if brd_id:
             response["brd_id"] = brd_id
         
-        print(f"[BRD-AGENT] Returning response", flush=True)
-        print("=" * 80, flush=True)
+        logger.info(f"[BRD-AGENT] Returning response")
+        logger.info("=" * 80)
         
         return response
         
     except Exception as e:
-        print("=" * 80, flush=True)
-        print("[BRD-AGENT] ERROR", flush=True)
-        print("=" * 80, flush=True)
-        print(f"[BRD-AGENT] Error: {str(e)}", flush=True)
-        import traceback
-        error_trace = traceback.format_exc()
-        print(error_trace, flush=True)
+        logger.error("=" * 80)
+        logger.error("[BRD-AGENT] ERROR")
+        logger.error("=" * 80)
+        logger.error(f"[BRD-AGENT] Error: {str(e)}")
+        logger.exception("Exception details:")
 
         return {
             "result": f"Error processing request: {str(e)}. Please check CloudWatch logs for details.",
@@ -734,9 +736,9 @@ Now analyze and take action."""
 
 if __name__ == "__main__":
     # Run the app locally for testing
-    print("[BRD-AGENT] Starting AgentCore Runtime app locally...", flush=True)
-    print(f"[BRD-AGENT] Lambda Generator: {LAMBDA_GENERATOR}", flush=True)
-    print(f"[BRD-AGENT] Lambda Retriever: {LAMBDA_RETRIEVER}", flush=True)
-    print(f"[BRD-AGENT] Lambda Chat: {LAMBDA_CHAT}", flush=True)
-    print(f"[BRD-AGENT] Gateway Model: {GATEWAY_MODEL} via {DLXAI_GATEWAY_URL}", flush=True)
+    logger.info("[BRD-AGENT] Starting AgentCore Runtime app locally...")
+    logger.info(f"[BRD-AGENT] Lambda Generator: {LAMBDA_GENERATOR}")
+    logger.info(f"[BRD-AGENT] Lambda Retriever: {LAMBDA_RETRIEVER}")
+    logger.info(f"[BRD-AGENT] Lambda Chat: {LAMBDA_CHAT}")
+    logger.info(f"[BRD-AGENT] Gateway Model: {GATEWAY_MODEL} via {DLXAI_GATEWAY_URL}")
     app.run()

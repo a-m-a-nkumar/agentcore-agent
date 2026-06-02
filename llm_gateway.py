@@ -1,8 +1,12 @@
+import json
 import logging
 import os
+import ssl
 import threading
 import time
 from typing import Dict, List, Optional, Union
+from urllib import request as _urlreq
+from urllib.error import HTTPError, URLError
 
 from openai import OpenAI
 
@@ -59,12 +63,7 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
             )
             return
         try:
-            import json as _json
-            import ssl as _ssl
-            from urllib import request as _urlreq
-            from urllib.error import HTTPError as _HTTPError, URLError as _URLError
-
-            body = _json.dumps({
+            body = json.dumps({
                 "user_id": user_id, "tokens": total_tokens, "source": source,
             }).encode("utf-8")
             req = _urlreq.Request(
@@ -80,15 +79,15 @@ def _record_tokens_async(user_id: Optional[str], total_tokens: int, source: Opti
             # setting INTERNAL_TLS_VERIFY=0. Payload is just tokens + UUID.
             ctx = None
             if os.getenv("INTERNAL_TLS_VERIFY", "1") == "0":
-                ctx = _ssl.create_default_context()
+                ctx = ssl.create_default_context()
                 ctx.check_hostname = False
-                ctx.verify_mode = _ssl.CERT_NONE
+                ctx.verify_mode = ssl.CERT_NONE
             with _urlreq.urlopen(req, timeout=5, context=ctx) as resp:
                 if resp.status >= 400:
                     logger.warning(f"[LLM Gateway] record-tokens callback {resp.status}: {resp.read()[:200]!r}")
-        except _HTTPError as e:
+        except HTTPError as e:
             logger.warning(f"[LLM Gateway] record-tokens callback HTTP {e.code}: {e.read()[:200]!r}")
-        except (_URLError, Exception) as e:
+        except (URLError, Exception) as e:
             logger.warning(f"[LLM Gateway] record-tokens callback failed for {user_id}: {e}")
 
     threading.Thread(target=_write, daemon=True).start()
@@ -202,7 +201,6 @@ def chat_completion_stream(
         f"[LLM Gateway] STREAM Calling model='{resolved}' max_tokens={max_tokens} "
         f"user={user_id or 'unknown'} source={token_source or '?'}"
     )
-    import json as _json  # local — keeps top-level imports minimal
     start = time.time()
     total_chars = 0
     final_usage = None
@@ -224,10 +222,10 @@ def chat_completion_stream(
             text = getattr(delta, "content", None) if delta else None
             if text:
                 total_chars += len(text)
-                yield f"data: {_json.dumps({'type': 'chunk', 'text': text})}\n\n"
+                yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
     except Exception as e:
         logger.error(f"[LLM Gateway] STREAM error: {e}")
-        yield f"data: {_json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
         return
 
     elapsed = time.time() - start
@@ -248,7 +246,7 @@ def chat_completion_stream(
             f"user={user_id or 'unknown'} chars={total_chars} (no usage in final chunk)"
         )
 
-    yield f"data: {_json.dumps({'type': 'done'})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
 
 def chat_completion_with_tools(
