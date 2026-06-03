@@ -8,6 +8,8 @@ import io
 import logging
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple
 
@@ -120,12 +122,21 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
     try:
         from checkov.terraform.runner import Runner
     except ImportError:
-        logger.warning("checkov not installed")
-        return {
-            "error": "Checkov is not installed. Run: pip install checkov",
-            "passed_checks": [], "failed_checks": [],
-            "summary": {"passed": 0, "failed": 0, "skipped": 0},
-        }, False
+        logger.warning("checkov not installed — attempting runtime install")
+        try:
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "checkov==3.2.526"],
+                check=True, capture_output=True, timeout=120,
+            )
+            from checkov.terraform.runner import Runner
+            logger.info("checkov installed successfully at runtime")
+        except Exception as install_err:
+            logger.error(f"checkov runtime install failed: {install_err}")
+            return {
+                "error": "Checkov is not installed. Run: pip install checkov",
+                "passed_checks": [], "failed_checks": [],
+                "summary": {"passed": 0, "failed": 0, "skipped": 0},
+            }, False
 
     # Exclude .checkov.yaml — checkov auto-discovers it and applies quiet:true
     scan_files = {
