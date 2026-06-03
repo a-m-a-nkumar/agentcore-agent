@@ -121,12 +121,26 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
     """
     try:
         from checkov.terraform.runner import Runner
-    except ImportError:
-        logger.warning("checkov not installed — attempting runtime install")
+    except (ImportError, Exception) as first_err:
+        logger.warning(f"checkov import failed ({first_err}) — attempting runtime install")
         try:
+            # Install checkov itself with --no-deps to avoid boto3 version conflict,
+            # then install all transitive deps checkov needs for the Terraform runner.
+            _CHECKOV_TRANSITIVE = [
+                "bc-python-hcl2", "bc-jsonpath-ng", "bc-detect-secrets",
+                "networkx", "deep-merge", "dpath", "prettytable", "policyuniverse",
+                "update-checker", "configargparse", "termcolor", "text-unidecode",
+                "junit-xml", "license-expression", "packageurl-python",
+                "dockerfile-parse", "GitPython", "arrow", "semantic-version",
+                "tabulate", "jsonschema", "beautifulsoup4", "charset-normalizer",
+            ]
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "checkov==3.2.526"],
                 check=True, capture_output=True, timeout=120,
+            )
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--quiet"] + _CHECKOV_TRANSITIVE,
+                check=True, capture_output=True, timeout=180,
             )
             from checkov.terraform.runner import Runner
             logger.info("checkov installed successfully at runtime")
