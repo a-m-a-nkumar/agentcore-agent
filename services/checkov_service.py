@@ -144,10 +144,19 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
             )
             from checkov.terraform.runner import Runner
             logger.info("checkov installed successfully at runtime")
+        except subprocess.CalledProcessError as pip_err:
+            stderr = pip_err.stderr.decode(errors="replace") if pip_err.stderr else ""
+            stdout = pip_err.stdout.decode(errors="replace") if pip_err.stdout else ""
+            logger.error(f"checkov pip install failed (rc={pip_err.returncode}): {stderr or stdout}")
+            return {
+                "error": f"Checkov install failed: {(stderr or stdout or str(pip_err))[:300]}",
+                "passed_checks": [], "failed_checks": [],
+                "summary": {"passed": 0, "failed": 0, "skipped": 0},
+            }, False
         except Exception as install_err:
             logger.error(f"checkov runtime install failed: {install_err}")
             return {
-                "error": "Checkov is not installed. Run: pip install checkov",
+                "error": f"Checkov install failed: {str(install_err)[:300]}",
                 "passed_checks": [], "failed_checks": [],
                 "summary": {"passed": 0, "failed": 0, "skipped": 0},
             }, False
