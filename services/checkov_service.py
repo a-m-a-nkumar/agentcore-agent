@@ -124,31 +124,39 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
     except (ImportError, Exception) as first_err:
         logger.warning(f"checkov import failed ({first_err}) — attempting runtime install")
         try:
-            # Install checkov itself with --no-deps to avoid boto3 version conflict,
-            # then install all transitive deps checkov needs for the Terraform runner.
-            _CHECKOV_TRANSITIVE = [
-                # Core checkov deps (same set as Dockerfile)
-                "bc-python-hcl2", "bc-jsonpath-ng", "bc-detect-secrets",
-                "networkx", "deep-merge", "dpath", "prettytable", "policyuniverse",
-                "update-checker", "configargparse", "termcolor", "text-unidecode",
-                "junit-xml", "license-expression", "spdx-tools",
-                "cyclonedx-python-lib", "packageurl-python",
-                "dockerfile-parse", "docker", "GitPython", "arrow",
-                "semantic-version", "tabulate", "jsonschema",
-                "beautifulsoup4", "charset-normalizer",
-                # Additional runtime deps discovered missing in prod
-                "cloudsplaining", "colorama", "tqdm", "igraph",
-                "pycep-parser", "typing-extensions", "attrs", "cattrs",
-                "regex", "boolean.py",
-            ]
+            import importlib.metadata as _imeta
+
+            # Step 1: install checkov itself without deps to avoid boto3 pin conflict.
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "checkov==3.2.526"],
                 check=True, capture_output=True, timeout=120,
             )
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--quiet"] + _CHECKOV_TRANSITIVE,
-                check=True, capture_output=True, timeout=180,
-            )
+
+            # Step 2: read checkov's declared requirements from its own package metadata
+            # and install all of them EXCEPT boto3 (which is already at a newer version
+            # that checkov tolerates at runtime despite its overly-conservative pin).
+            try:
+                raw_reqs = _imeta.requires("checkov") or []
+            except Exception:
+                raw_reqs = []
+
+            deps = []
+            for req in raw_reqs:
+                # Skip boto3 — conflicts with bedrock-agentcore's boto3>=1.40.52
+                if req.lower().startswith("boto3"):
+                    continue
+                # Strip environment markers ("; python_version < '3.x'") for the install cmd
+                pkg = req.split(";")[0].strip()
+                if pkg:
+                    deps.append(pkg)
+
+            if deps:
+                logger.info(f"Installing {len(deps)} checkov transitive deps")
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--quiet"] + deps,
+                    check=True, capture_output=True, timeout=300,
+                )
+
             from checkov.terraform.runner import Runner
             logger.info("checkov installed successfully at runtime")
         except subprocess.CalledProcessError as pip_err:
