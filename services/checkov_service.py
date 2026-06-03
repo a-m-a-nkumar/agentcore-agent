@@ -127,13 +127,19 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
             # Install checkov itself with --no-deps to avoid boto3 version conflict,
             # then install all transitive deps checkov needs for the Terraform runner.
             _CHECKOV_TRANSITIVE = [
+                # Core checkov deps (same set as Dockerfile)
                 "bc-python-hcl2", "bc-jsonpath-ng", "bc-detect-secrets",
                 "networkx", "deep-merge", "dpath", "prettytable", "policyuniverse",
                 "update-checker", "configargparse", "termcolor", "text-unidecode",
-                "junit-xml", "license-expression", "packageurl-python",
-                "dockerfile-parse", "GitPython", "arrow", "semantic-version",
-                "tabulate", "jsonschema", "beautifulsoup4", "charset-normalizer",
-                "cloudsplaining",
+                "junit-xml", "license-expression", "spdx-tools",
+                "cyclonedx-python-lib", "packageurl-python",
+                "dockerfile-parse", "docker", "GitPython", "arrow",
+                "semantic-version", "tabulate", "jsonschema",
+                "beautifulsoup4", "charset-normalizer",
+                # Additional runtime deps discovered missing in prod
+                "cloudsplaining", "colorama", "tqdm", "igraph",
+                "pycep-parser", "typing-extensions", "attrs", "cattrs",
+                "regex", "boolean.py",
             ]
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "checkov==3.2.526"],
