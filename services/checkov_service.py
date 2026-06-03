@@ -1,4 +1,4 @@
-﻿"""
+"""
 Checkov Service
 Runs Checkov via its Python API and returns structured pass/fail results.
 Pre-validates files with python-hcl2 to surface exact parse errors before scan.

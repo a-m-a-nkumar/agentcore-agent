@@ -1221,8 +1221,12 @@ class ConfluenceService:
             params = {
                 "expand": "body.storage,version"
             }
-            
-            response = requests.get(
+
+            # Route through _get_with_retry — Atlassian's edge intermittently
+            # drops the TLS handshake from the corporate-proxy egress path
+            # (SSLEOFError UNEXPECTED_EOF_WHILE_READING). One retry after a
+            # brief pause clears it in practice.
+            response = self._get_with_retry(
                 url,
                 params=params,
                 headers=self.headers,

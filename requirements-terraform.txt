@@ -19,4 +19,7 @@
 # In environments that DON'T install this file, the terraform scanning
 # endpoints return {"checkov_available": false} and the rest of the app
 # keeps working (the import in services/checkov_service.py is guarded).
+#
+# Last bumped: 2026-06-02 — force CI rebuild so the deployed image picks
+# up the checkov install layer (was running from a pre-65b8b85 cache).
 checkov==3.2.526

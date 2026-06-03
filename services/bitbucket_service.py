@@ -1,4 +1,4 @@
-﻿import re
+import re
 import requests
 from requests.auth import HTTPBasicAuth
 from typing import List, Dict, Optional, Tuple

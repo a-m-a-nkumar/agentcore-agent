@@ -1,4 +1,4 @@
-﻿import asyncio
+import asyncio
 import base64
 import email
 import hashlib
@@ -118,27 +118,27 @@ def _build_bmad_prompt(base_prompt: str, workflow_key: str = "create-prd") -> st
 # Add CORS middleware. The localhost origins cover the typical Vite + CRA dev
 # servers. The two deployed frontend hosts are included so a developer can
 # point the deployed UI at their LOCAL backend (running this file directly)
-# during integration testing â€” without that, the browser blocks the cross-
+# during integration testing —" without that, the browser blocks the cross-
 # origin POST with "Response to preflight request doesn't pass access control
 # check: No 'Access-Control-Allow-Origin' header is present".
 _DEFAULT_ORIGINS = [
-    “http://localhost:8080”, “http://localhost:8081”, “http://localhost:8082”,
-    “http://localhost:8083”, “http://localhost:5173”,
-    “http://127.0.0.1:8080”, “http://127.0.0.1:8081”, “http://127.0.0.1:8082”,
-    “http://127.0.0.1:8083”, “http://127.0.0.1:5173”,
-    “https://sdlc-dev.deluxe.com”,
-    “https://ai-labs.deluxe.com”,
+    "http://localhost:8080", "http://localhost:8081", "http://localhost:8082",
+    "http://localhost:8083", "http://localhost:5173",
+    "http://127.0.0.1:8080", "http://127.0.0.1:8081", "http://127.0.0.1:8082",
+    "http://127.0.0.1:8083", "http://127.0.0.1:5173",
+    "https://sdlc-dev.deluxe.com",
+    "https://ai-labs.deluxe.com",
 ]
-_raw_origins = os.getenv(“ALLOWED_ORIGINS”, “”)
-_allowed_origins = [o.strip() for o in _raw_origins.split(“,”) if o.strip()] or _DEFAULT_ORIGINS
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "")
+_allowed_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()] or _DEFAULT_ORIGINS
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=[“*”],
-    allow_headers=[“*”, “Authorization”, “Content-Type”],
-    expose_headers=[“*”],
+    allow_methods=["*"],
+    allow_headers=["*", "Authorization", "Content-Type"],
+    expose_headers=["*"],
 )
 
 # Register API routers
@@ -181,7 +181,7 @@ async def log_requests(request: Request, call_next):
     return response
 
 # Configuration (from .env / environment switch)
-# ARN defaults come from environment.py â€” local account (448049797912) or VDI account (590184044598)
+# ARN defaults come from environment.py —" local account (448049797912) or VDI account (590184044598)
 from environment import (  # noqa: E402
     DEFAULT_AGENT_ARN, DEFAULT_ANALYST_AGENT_ARN,
     DEFAULT_LAMBDA_BRD_CHAT, DEFAULT_LAMBDA_BRD_FROM_HISTORY,
@@ -349,13 +349,13 @@ async def get_current_user(request: Request) -> dict:
         groups = extract_user_groups(user_info)
     except GraphResolutionError as e:
         # Overage user (>200 groups) whose Graph fallback failed. Do NOT
-        # silently return empty modules â€” that would render AccessDenied
+        # silently return empty modules —" that would render AccessDenied
         # (a lie). 503 lets the frontend retry; transient Graph hiccups
         # then self-heal without anyone seeing the permanent denied page.
         logger.warning("[AUTH] Graph resolution failed for %s: %s", email, e)
         raise HTTPException(
             status_code=503,
-            detail="Permission check temporarily unavailable â€” please retry in a moment.",
+            detail="Permission check temporarily unavailable — please retry in a moment.",
         )
     allowed_modules = compute_allowed_modules(groups)
     access_role = compute_access_role(groups)
@@ -368,7 +368,7 @@ async def get_current_user(request: Request) -> dict:
     # branch can satisfy users.email NOT NULL on a brand-new (or admin-
     # deleted) row. Without these, PostgreSQL's NOT NULL check on the
     # prospective INSERT row would fire BEFORE ON CONFLICT detection,
-    # blocking the write even when the row already exists â€” that was the
+    # blocking the write even when the row already exists —" that was the
     # "stuck NONE / NO GROUPS" pill scenario.
     if user_id and _LAST_ACCESS_ROLE_CACHE.get(user_id) != access_role:
         try:
@@ -794,7 +794,7 @@ def read_docx(file_content):
     return "\n".join([p.text for p in doc.paragraphs])
 
 def read_pdf(file_content):
-    # Use `pypdf` (the modern fork) â€” it's what requirements.txt installs.
+    # Use `pypdf` (the modern fork) —" it's what requirements.txt installs.
     # Importing `PyPDF2` instead would ImportError at runtime since that
     # package is not in the deployed image.
     reader = PdfReader(io.BytesIO(file_content))
@@ -1522,17 +1522,17 @@ def extract_text_from_analyst_response(response_str: str) -> tuple[str, str]:
     
     return None, None
 
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 # Lambda Warm-Up endpoint
 # Called silently when the BRD Analyst page opens to pre-warm Lambda containers
 # before the user sends their first message.
-# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 @app.post("/api/analyst-warm")
 async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
     """
     Pre-warm Lambda functions used by the BRD Analyst Agent.
     Sends a lightweight 'ping' payload to both Lambdas in parallel.
-    Responds immediately with status â€” Lambda errors are non-fatal.
+    Responds immediately with status —" Lambda errors are non-fatal.
     """
 
     LAMBDA_REQ = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
@@ -1550,7 +1550,7 @@ async def warm_analyst_lambdas(current_user: dict = Depends(get_current_user)):
                 Payload=ping_payload
             )
             status = resp.get("StatusCode", 0)
-            logger.info(f"[WARM-UP] âœ… {function_name.split(':')[-1]} â†’ HTTP {status}")
+            logger.info(f"[WARM-UP] âœ… {function_name.split(':')[-1]} â†' HTTP {status}")
             return {"function": function_name.split(":")[-1], "status": status, "warmed": True}
         except Exception as e:
             logger.info(f"[WARM-UP] âš ï¸  {function_name.split(':')[-1]} ping failed (non-fatal): {e}")
@@ -2015,7 +2015,7 @@ async def analyst_chat_stream(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Streaming SSE analyst chat â€” calls requirements_gathering Lambda directly,
+    Streaming SSE analyst chat —" calls requirements_gathering Lambda directly,
     bypassing AgentCore Runtime for faster responses.
     """
     # Normalize project_id
@@ -2037,7 +2037,7 @@ async def analyst_chat_stream(
     LAMBDA_REQ_ARN = DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN
 
     async def generate_sse():
-        """Generate SSE stream â€” direct Lambda invocation (no AgentCore middleman)"""
+        """Generate SSE stream —" direct Lambda invocation (no AgentCore middleman)"""
 
         try:
             logger.info(f"[ANALYST-STREAM] Direct Lambda call: session={runtime_session_id}, message={formatted_message[:100]}...")
@@ -3323,7 +3323,7 @@ def _extract_clean_user_message(text: str) -> str:
     else:
         clean = text
 
-    # 2. Strip trailing IMPORTANT instruction block â€” use regex to handle any whitespace (\n, \r\n, etc.)
+    # 2. Strip trailing IMPORTANT instruction block —" use regex to handle any whitespace (\n, \r\n, etc.)
     clean = re.split(r'\s+IMPORTANT:\s+The user is currently viewing', clean, maxsplit=1)[0]
 
     return clean.strip()
@@ -3402,7 +3402,7 @@ async def get_brd_chat_history(
                             "isBot": True
                         })
 
-            # Already sorted oldest-first above â€” no need to reverse
+            # Already sorted oldest-first above —" no need to reverse
 
         except Exception as e:
             logger.info(f"[BRD-HISTORY] AgentCore Memory query failed: {e}")
@@ -3444,7 +3444,7 @@ async def check_brd_access(current_user: dict = Depends(get_current_user)):
 async def get_user_info(current_user: dict = Depends(get_current_user)):
     """Get current user information including group-based module access.
 
-    Source of truth for RBAC â€” frontend calls this after login instead of
+    Source of truth for RBAC —" frontend calls this after login instead of
     computing modules from idTokenClaims.groups, so that:
       1. Groups-claim overage (>200 groups) is handled via Microsoft Graph
          inside extract_user_groups().
@@ -3847,13 +3847,13 @@ async def record_tokens(
     validate_api_key(x_api_key)
 
     if body.tokens <= 0 or not body.user_id:
-        return  # 204 â€” silently no-op for invalid inputs
+        return  # 204 —" silently no-op for invalid inputs
 
     try:
         increment_user_token_usage(body.user_id, body.tokens)
         logger.info(f"[record-tokens] user={body.user_id} tokens={body.tokens} source={body.source or '?'}")
     except Exception as e:
-        # Log but don't surface â€” token accounting must never break callers
+        # Log but don't surface —" token accounting must never break callers
         logger.info(f"[record-tokens] FAILED user={body.user_id} tokens={body.tokens}: {e}")
 
 

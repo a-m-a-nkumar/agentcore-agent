@@ -1,4 +1,4 @@
-﻿"""
+"""
 FastAPI router for the SAD phase of the multi-session Design Assistant.
 
 All endpoints below are scoped by `session_id` (from `design_sessions`).
@@ -686,6 +686,7 @@ def download_sad(
     sad = _read_sad(session_id)
 
     try:
+        from docx import Document
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"python-docx not installed: {e}")
 
