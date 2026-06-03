@@ -133,6 +133,7 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
                 "junit-xml", "license-expression", "packageurl-python",
                 "dockerfile-parse", "GitPython", "arrow", "semantic-version",
                 "tabulate", "jsonschema", "beautifulsoup4", "charset-normalizer",
+                "cloudsplaining",
             ]
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "checkov==3.2.526"],
