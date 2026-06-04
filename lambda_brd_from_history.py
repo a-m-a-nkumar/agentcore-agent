@@ -46,11 +46,14 @@ AGENTCORE_MEMORY_ID = DEFAULT_AGENTCORE_MEMORY_ID
 AGENTCORE_ACTOR_ID = DEFAULT_AGENTCORE_ACTOR_ID
 S3_BUCKET = S3_BUCKET_NAME
 TEMPLATE_S3_KEY = 'templates/Deluxe_BRD_Template.docx'
-BEDROCK_MODEL_ID = os.environ['BEDROCK_MODEL_ID']
+# Env-var reads use os.getenv() with sane defaults so the module imports
+# cleanly in test/CI environments that don't set these. Lambda runtime
+# always provides them via function env config.
+BEDROCK_MODEL_ID = os.getenv('BEDROCK_MODEL_ID', 'global.anthropic.claude-sonnet-4-5-20250929-v1:0')
 BEDROCK_GUARDRAIL_ARN = os.getenv('BEDROCK_GUARDRAIL_ARN', '')
 BEDROCK_GUARDRAIL_VERSION = os.getenv('BEDROCK_GUARDRAIL_VERSION', '1')
-MAX_TOKENS = int(os.environ['BEDROCK_MAX_TOKENS'])
-TEMPERATURE = float(os.environ['BEDROCK_TEMPERATURE'])
+MAX_TOKENS = int(os.getenv('BEDROCK_MAX_TOKENS', '32000'))
+TEMPERATURE = float(os.getenv('BEDROCK_TEMPERATURE', '0'))
 
 # Lazy loading
 _agentcore_memory_client = None

@@ -35,12 +35,17 @@ from prompts.brd_generator_prompts import get_full_brd_generation_prompt, Prompt
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-BEDROCK_MODEL_ID = os.environ["BEDROCK_MODEL_ID"]
-BEDROCK_REGION = os.environ.get("BEDROCK_REGION") or os.environ["AWS_REGION"]
+# Env-var reads use os.getenv() with sane defaults so the module imports
+# cleanly in test/CI environments that don't set these. The Lambda runtime
+# always provides them via the function's env config; defaults below only
+# kick in for unit tests that import handler-side helpers (e.g.
+# _section_to_memory_facts) without invoking the Bedrock path.
+BEDROCK_MODEL_ID = os.getenv("BEDROCK_MODEL_ID", "global.anthropic.claude-sonnet-4-5-20250929-v1:0")
+BEDROCK_REGION = os.getenv("BEDROCK_REGION") or os.getenv("AWS_REGION", "us-east-1")
 BEDROCK_GUARDRAIL_ARN = os.getenv("BEDROCK_GUARDRAIL_ARN", "")
 BEDROCK_GUARDRAIL_VERSION = os.getenv("BEDROCK_GUARDRAIL_VERSION", "1")
-MAX_TOKENS = int(os.environ["BEDROCK_MAX_TOKENS"])
-TEMPERATURE = float(os.environ["BEDROCK_TEMPERATURE"])
+MAX_TOKENS = int(os.getenv("BEDROCK_MAX_TOKENS", "32000"))
+TEMPERATURE = float(os.getenv("BEDROCK_TEMPERATURE", "0"))
 
 # Parallel section generation tunables (mirror SAD's pattern). Env-tunable
 # so prod and dev can bound gateway concurrency independently. Per-section
