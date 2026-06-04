@@ -130,6 +130,53 @@ DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
     "arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda",
 )
 
+# ---------------------------------------------------------------------------
+# Unified BRD Agent (features/aman) — Phase 2 plumbing
+# Mirrors the section in env_vdi.py. Keep the two files in sync.
+# ---------------------------------------------------------------------------
+BRD_USE_UNIFIED_AGENT = os.getenv("BRD_USE_UNIFIED_AGENT", "false").lower() == "true"
+
+# In local/dev we hit Bedrock directly, so the router/handler models are
+# Bedrock model IDs rather than gateway model names. The llm_gateway shim
+# remaps anyway, but having distinct defaults documents intent.
+BRD_ROUTER_MODEL  = os.getenv("BRD_ROUTER_MODEL",  "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+BRD_HANDLER_MODEL = os.getenv("BRD_HANDLER_MODEL", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+
+BRD_ROUTER_MAX_TOKENS    = int(os.getenv("BRD_ROUTER_MAX_TOKENS",    "400"))
+BRD_ROUTER_TEMPERATURE   = float(os.getenv("BRD_ROUTER_TEMPERATURE", "0.0"))
+BRD_EDIT_MAX_TOKENS      = int(os.getenv("BRD_EDIT_MAX_TOKENS",      "3000"))
+BRD_SECTION_MAX_TOKENS   = int(os.getenv("BRD_SECTION_MAX_TOKENS",   "4000"))
+BRD_AUDIT_MAX_TOKENS     = int(os.getenv("BRD_AUDIT_MAX_TOKENS",     "1500"))
+BRD_QA_MAX_TOKENS        = int(os.getenv("BRD_QA_MAX_TOKENS",        "900"))
+BRD_SUGGEST_MAX_TOKENS   = int(os.getenv("BRD_SUGGEST_MAX_TOKENS",   "900"))
+BRD_GATHER_MAX_TOKENS    = int(os.getenv("BRD_GATHER_MAX_TOKENS",    "600"))
+
+BRD_PREVIOUS_VERSIONS_CAP = int(os.getenv("BRD_PREVIOUS_VERSIONS_CAP", "5"))
+BRD_SECTION_PARALLELISM   = int(os.getenv("BRD_SECTION_PARALLELISM",   "5"))
+
+BRD_RATE_LIMIT_TURNS_PER_HOUR        = int(os.getenv("BRD_RATE_LIMIT_TURNS_PER_HOUR",        "60"))
+BRD_RATE_LIMIT_GENERATIONS_PER_DAY   = int(os.getenv("BRD_RATE_LIMIT_GENERATIONS_PER_DAY",   "5"))
+
+BRD_SSE_MAX_CONCURRENT_STREAMS = int(os.getenv("BRD_SSE_MAX_CONCURRENT_STREAMS", "3"))
+BRD_SSE_HARD_TIMEOUT_SECONDS   = int(os.getenv("BRD_SSE_HARD_TIMEOUT_SECONDS",   "120"))
+BRD_SSE_IDLE_TIMEOUT_SECONDS   = int(os.getenv("BRD_SSE_IDLE_TIMEOUT_SECONDS",   "30"))
+
+BRD_AGENTCORE_ACTOR_PREFIX = os.getenv("BRD_AGENTCORE_ACTOR_PREFIX", "user-")
+BRD_AGENTCORE_LEGACY_ACTOR = os.getenv("BRD_AGENTCORE_LEGACY_ACTOR", "analyst-session")
+
+BRD_FACTS_NAMESPACE_TEMPLATE = os.getenv(
+    "BRD_FACTS_NAMESPACE_TEMPLATE",
+    "user-{user_id}:project-{project_id}",
+)
+BRD_FACTS_TOP_K = int(os.getenv("BRD_FACTS_TOP_K", "10"))
+
+BRD_ORCHESTRATOR_LAMBDA = os.getenv("BRD_ORCHESTRATOR_LAMBDA", "brd_orchestrator_lambda")
+BRD_GENERATOR_LAMBDA    = os.getenv("BRD_GENERATOR_LAMBDA",    "brd_generator_lambda")
+BRD_FROM_HISTORY_LAMBDA = os.getenv("BRD_FROM_HISTORY_LAMBDA", "brd_from_history_lambda")
+
+OTEL_EXPORTER     = os.getenv("OTEL_EXPORTER",     "console")  # local: spans to stdout
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "brd-orchestrator")
+
 
 def _get_bedrock_config():
     from botocore.config import Config
@@ -181,16 +228,35 @@ def chat_completion(
     result = json.loads(response["body"].read())
     content = (result.get("content", [{}])[0].get("text", "") or "").strip()
 
-    # Record per-user token usage (fire-and-forget, same pattern as gateway)
+    # Record per-user token usage (fire-and-forget, same pattern as gateway).
+    # Bedrock-native usage reports cache tokens SEPARATELY from input_tokens
+    # (unlike the OpenAI-compat gateway where prompt_tokens already includes
+    # them), so build a gateway-shaped usage_dict for _effective_tokens.
     if user_id:
         usage = result.get("usage") or {}
-        total = (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0)
+        in_tok = usage.get("input_tokens", 0) or 0
+        out_tok = usage.get("output_tokens", 0) or 0
+        cache_read = usage.get("cache_read_input_tokens", 0) or 0
+        cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+        total = in_tok + cache_read + cache_write + out_tok
         if total > 0:
             try:
                 import threading
                 from db_helper import increment_user_token_usage
+                from llm_gateway import _effective_tokens
+                usage_dict = {
+                    "prompt_tokens": in_tok + cache_read + cache_write,
+                    "completion_tokens": out_tok,
+                    "total_tokens": total,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_write,
+                }
+                try:
+                    eff_in, eff_out = _effective_tokens(usage_dict, model_id)
+                except ValueError:
+                    eff_in, eff_out = 0, 0
                 threading.Thread(
-                    target=lambda: increment_user_token_usage(user_id, total),
+                    target=lambda: increment_user_token_usage(user_id, total, eff_in, eff_out),
                     daemon=True,
                 ).start()
             except Exception as e:
@@ -209,11 +275,17 @@ def chat_completion_with_tools(
     model: Optional[str] = None,
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
+    user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
 ) -> Dict:
     """
     Bedrock call with Anthropic-native tool use (local dev).
     Accepts OpenAI tool format, converts to Anthropic format for Bedrock.
     Returns dict with "message" and "finish_reason" matching the gateway interface.
+
+    Records per-user token usage (raw + Sonnet-equivalent) same as the gateway
+    path. Signature mirrors llm_gateway.chat_completion_with_tools so callers
+    can swap between gateway / LOCAL via environment.py without arg juggling.
     """
     client = boto3.client(
         "bedrock-runtime",
@@ -259,6 +331,39 @@ def chat_completion_with_tools(
     )
     result = json.loads(response["body"].read())
 
+    # Record per-user token usage (fire-and-forget). Bedrock-native usage
+    # reports cache fields separately from input_tokens — re-shape to the
+    # gateway convention for _effective_tokens.
+    if user_id:
+        usage = result.get("usage") or {}
+        in_tok = usage.get("input_tokens", 0) or 0
+        out_tok = usage.get("output_tokens", 0) or 0
+        cache_read = usage.get("cache_read_input_tokens", 0) or 0
+        cache_write = usage.get("cache_creation_input_tokens", 0) or 0
+        total = in_tok + cache_read + cache_write + out_tok
+        if total > 0:
+            try:
+                import threading
+                from db_helper import increment_user_token_usage
+                from llm_gateway import _effective_tokens
+                usage_dict = {
+                    "prompt_tokens": in_tok + cache_read + cache_write,
+                    "completion_tokens": out_tok,
+                    "total_tokens": total,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_write,
+                }
+                try:
+                    eff_in, eff_out = _effective_tokens(usage_dict, model_id)
+                except ValueError:
+                    eff_in, eff_out = 0, 0
+                threading.Thread(
+                    target=lambda: increment_user_token_usage(user_id, total, eff_in, eff_out),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                logger.warning(f"[LOCAL LLM Tool] token_usage write failed: {e}")
+
     # Convert Anthropic response to OpenAI-compatible structure
     stop_reason = result.get("stop_reason", "end_turn")
     content_blocks = result.get("content", [])
@@ -295,10 +400,17 @@ def chat_completion_stream(
     temperature: float = 0.5,
     max_tokens: Optional[int] = None,
     system_prompt: Optional[str] = None,
+    user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
 ):
     """
     Stream a chat request directly to AWS Bedrock (local dev — no gateway).
     Yields SSE-formatted data strings: { type: 'chunk', text: '...' } and a final { type: 'done' }.
+
+    Captures token usage from Bedrock's streaming event protocol:
+      - `message_start.message.usage` → input + cache fields
+      - `message_delta.usage`         → output_tokens (final)
+    Records raw + Sonnet-equivalent same as the non-stream path.
     """
     client = boto3.client(
         "bedrock-runtime",
@@ -323,10 +435,54 @@ def chat_completion_stream(
         contentType="application/json",
         accept="application/json",
     )
+
+    # Accumulate usage across the stream's two emit points.
+    input_tokens = 0
+    cache_read = 0
+    cache_write = 0
+    output_tokens = 0
+
     for event in response["body"]:
         chunk = json.loads(event["chunk"]["bytes"])
-        if chunk.get("type") == "content_block_delta":
+        etype = chunk.get("type")
+        if etype == "message_start":
+            u = (chunk.get("message") or {}).get("usage") or {}
+            input_tokens = u.get("input_tokens", 0) or 0
+            cache_read = u.get("cache_read_input_tokens", 0) or 0
+            cache_write = u.get("cache_creation_input_tokens", 0) or 0
+        elif etype == "content_block_delta":
             text = chunk.get("delta", {}).get("text", "")
             if text:
                 yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
+        elif etype == "message_delta":
+            u = chunk.get("usage") or {}
+            if u:
+                output_tokens = u.get("output_tokens", output_tokens) or output_tokens
+
+    # Record after the stream ends.
+    if user_id:
+        total = input_tokens + cache_read + cache_write + output_tokens
+        if total > 0:
+            try:
+                import threading
+                from db_helper import increment_user_token_usage
+                from llm_gateway import _effective_tokens
+                usage_dict = {
+                    "prompt_tokens": input_tokens + cache_read + cache_write,
+                    "completion_tokens": output_tokens,
+                    "total_tokens": total,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_write,
+                }
+                try:
+                    eff_in, eff_out = _effective_tokens(usage_dict, model_id)
+                except ValueError:
+                    eff_in, eff_out = 0, 0
+                threading.Thread(
+                    target=lambda: increment_user_token_usage(user_id, total, eff_in, eff_out),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                logger.warning(f"[LOCAL LLM STREAM] token_usage write failed: {e}")
+
     yield f"data: {json.dumps({'type': 'done'})}\n\n"

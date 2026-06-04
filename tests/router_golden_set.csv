@@ -1,0 +1,73 @@
+case_id,user_message,stage,brd_exists,file_attached,template_attached,transcript_attached,last_card_type,last_proposed_section,expected_intent,notes
+# ==================== ASK_GENERAL ====================
+g001,Hello,NEW,false,false,false,false,,,ASK_GENERAL,plain greeting
+g002,Hi Mary!,GATHERING,false,false,false,false,,,ASK_GENERAL,greeting mid-gather
+g003,What can you do?,NEW,false,false,false,false,,,ASK_GENERAL,capabilities question
+g004,Tell me about yourself,DRAFTED,true,false,false,false,,,ASK_GENERAL,off-topic
+g005,Thanks for the help,REFINING,true,false,false,false,,,ASK_GENERAL,acknowledgement
+# ==================== GATHER_REQUIREMENTS ====================
+gr001,We're building a customer portal for our enterprise clients,NEW,false,false,false,false,,,GATHER_REQUIREMENTS,project description in NEW
+gr002,The system needs to integrate with Salesforce and our existing identity provider,GATHERING,false,false,false,false,,,GATHER_REQUIREMENTS,declarative project description
+gr003,I'm not sure about the security model yet,REFINING,true,false,false,false,,,GATHER_REQUIREMENTS,hesitation in REFINING — invites probing (NEGATIVE EXAMPLE)
+gr004,Tell me more about scale,REFINING,true,false,false,false,,,GATHER_REQUIREMENTS,open-ended discovery in REFINING
+gr005,I want to think through the auth flow,DRAFTED,true,false,false,false,,,GATHER_REQUIREMENTS,exploration request
+# ==================== ADD_INFO ====================
+ai001,Also we use Redis for caching,REFINING,true,false,false,false,,,ADD_INFO,fact volunteered mid-conversation — no edit verb (NEGATIVE EXAMPLE)
+ai002,BTW the API is REST not GraphQL,REFINING,true,false,false,false,,,ADD_INFO,fact with no imperative
+ai003,The deadline is Q3 2026,GATHERING,false,false,false,false,,,ADD_INFO,fact in GATHERING
+ai004,Our team uses Azure DevOps for CI,DRAFTED,true,false,false,false,,,ADD_INFO,fact in DRAFTED
+ai005,We also need to support SAML SSO,REFINING,true,false,false,false,,,ADD_INFO,additional requirement
+# ==================== EDIT_SECTION ====================
+es001,Change the deadline in section 3 to Q4,REFINING,true,false,false,false,,,EDIT_SECTION,explicit edit with number
+es002,Update the security section to mention TLS,REFINING,true,false,false,false,,,EDIT_SECTION,imperative + section topic (NEGATIVE EXAMPLE)
+es003,Replace Sarah with Aman in stakeholders,REFINING,true,false,false,false,,,EDIT_SECTION,imperative + section topic
+es004,Remove the last row of section 4,DRAFTED,true,false,false,false,,,EDIT_SECTION,positional edit
+es005,Modify scope to include international users,REFINING,true,false,false,false,,,EDIT_SECTION,imperative on scope topic
+es006,Fix the typo in section 1,REFINING,true,false,false,false,,,EDIT_SECTION,fix verb
+# ==================== REGENERATE_SECTION ====================
+rs001,Regenerate section 5 with the new info,REFINING,true,false,false,false,,,REGENERATE_SECTION,explicit regenerate
+rs002,Redo the risks section,REFINING,true,false,false,false,,,REGENERATE_SECTION,redo + topic
+rs003,yes go ahead,REFINING,true,false,false,false,fact_saved,7,REGENERATE_SECTION,confirmation to prior fact_saved with regen_proposed
+rs004,Yes update it now,REFINING,true,false,false,false,fact_saved,4,REGENERATE_SECTION,confirmation variant
+# ==================== SHOW_SECTION ====================
+ss001,Show me section 4,REFINING,true,false,false,false,,,SHOW_SECTION,explicit show
+ss002,View the stakeholders,DRAFTED,true,false,false,false,,,SHOW_SECTION,view + topic
+ss003,List sections,DRAFTED,true,false,false,false,,,SHOW_SECTION,bare list = TOC
+ss004,Show me what you have for section 4,REFINING,true,false,false,false,,,SHOW_SECTION,view request not a question (NEGATIVE EXAMPLE)
+ss005,Display the NFRs,DRAFTED,true,false,false,false,,,SHOW_SECTION,display verb
+# ==================== ASK_QUESTION ====================
+aq001,What does section 4 say about user roles?,REFINING,true,false,false,false,,,ASK_QUESTION,question about existing BRD
+aq002,How does section 4 handle PII?,DRAFTED,true,false,false,false,,,ASK_QUESTION,how-question (NEGATIVE EXAMPLE — not SHOW_SECTION)
+aq003,Why did we choose Postgres?,REFINING,true,false,false,false,,,ASK_QUESTION,why-question about prior decision
+aq004,When is the deadline?,DRAFTED,true,false,false,false,,,ASK_QUESTION,factual lookup question
+# ==================== SUGGEST ====================
+su001,What's missing from section 7?,REFINING,true,false,false,false,,,SUGGEST,gap-finding ask
+su002,Suggest improvements for stakeholders,REFINING,true,false,false,false,,,SUGGEST,explicit suggest
+su003,Any risks I should add?,DRAFTED,true,false,false,false,,,SUGGEST,ideas request
+su004,What should we put in section 3?,DRAFTED,true,false,false,false,,,SUGGEST,suggest fill (NEGATIVE EXAMPLE — not ASK_QUESTION)
+su005,Give me ideas for the security view,REFINING,true,false,false,false,,,SUGGEST,ideas + section
+# ==================== AUDIT ====================
+au001,Audit the BRD,REFINING,true,false,false,false,,,AUDIT,explicit audit verb
+au002,Score the quality,REFINING,true,false,false,false,,,AUDIT,score request
+au003,What's missing in this BRD?,DRAFTED,true,false,false,false,,,AUDIT,gap audit (whole BRD scope)
+au004,Find issues,REFINING,true,false,false,false,,,AUDIT,issue-finding ask
+# ==================== GENERATE_BRD (from docs) ====================
+gd001,Use this transcript to generate the BRD,GATHERING,false,true,true,true,,,GENERATE_BRD,template+transcript present
+gd002,Generate the BRD from this doc,GATHERING,false,true,true,true,,,GENERATE_BRD,explicit doc-generation
+gd003,Build the BRD from these files,NEW,false,true,true,true,,,GENERATE_BRD,multi-step phrasing
+# ==================== GENERATE_BRD (from history) ====================
+gh001,Generate the BRD now,GATHERING,false,false,false,false,,,GENERATE_BRD,explicit generate
+gh002,Let's draft it,GATHERING,false,false,false,false,,,GENERATE_BRD,draft synonym
+gh003,I'm done — create the BRD,GATHERING,false,false,false,false,,,GENERATE_BRD,completion signal
+# ==================== INGEST_DOC ====================
+id001,Here's our existing API spec,GATHERING,false,true,false,false,,,INGEST_DOC,file attached, no generate verb
+id002,Read this spec doc for context,REFINING,true,true,false,false,,,INGEST_DOC,file + context cue
+id003,Take a look at this PDF,DRAFTED,true,true,false,false,,,INGEST_DOC,file in DRAFTED stage
+# ==================== AMBIGUOUS / SAFETY FALLBACK ====================
+sf001,maybe section 4 needs work,REFINING,true,false,false,false,,,ADD_INFO,low confidence → safety fallback prefers ADD_INFO
+sf002,not sure what to do,GATHERING,false,false,false,false,,,GATHER_REQUIREMENTS,no BRD + ambiguous → GATHER fallback
+sf003,xyzxyz,NEW,false,false,false,false,,,ASK_GENERAL,nonsense input in NEW
+# ==================== ANTI-PATTERNS (regression catchers) ====================
+ap001,I think we should consider X,REFINING,true,false,false,false,,,GATHER_REQUIREMENTS,opinion not fact — invites probing
+ap002,Do we need to support multi-tenancy?,DRAFTED,true,false,false,false,,,ASK_QUESTION,question form — not SUGGEST
+ap003,Anything else for section 6?,DRAFTED,true,false,false,false,,,SUGGEST,open-ended for-section — SUGGEST

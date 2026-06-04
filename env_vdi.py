@@ -119,3 +119,67 @@ DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
     "LAMBDA_BRD_FROM_HISTORY_ARN",
     "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history",
 )
+
+# ---------------------------------------------------------------------------
+# 9. Unified BRD Agent (features/aman) — Phase 2 plumbing
+# ---------------------------------------------------------------------------
+# Feature flag: when false, the existing PM-agent / analyst-agent paths
+# stay live and the new orchestrator is dark-launched. Flip per-environment
+# once the new path is verified against the golden-set.
+BRD_USE_UNIFIED_AGENT = os.getenv("BRD_USE_UNIFIED_AGENT", "false").lower() == "true"
+
+# Model selection. Default to Sonnet for safety; if the gateway proves it
+# supports Haiku via the golden-set (>= 95% intent accuracy) we flip the
+# router env var to "Claude-Haiku-4.5" without touching code.
+BRD_ROUTER_MODEL  = os.getenv("BRD_ROUTER_MODEL",  "Claude-4.5-Sonnet")
+BRD_HANDLER_MODEL = os.getenv("BRD_HANDLER_MODEL", "Claude-4.5-Sonnet")
+
+# Router & handler tuning knobs (mirror SAD_*_MAX_TOKENS pattern).
+BRD_ROUTER_MAX_TOKENS    = int(os.getenv("BRD_ROUTER_MAX_TOKENS",    "400"))
+BRD_ROUTER_TEMPERATURE   = float(os.getenv("BRD_ROUTER_TEMPERATURE", "0.0"))
+BRD_EDIT_MAX_TOKENS      = int(os.getenv("BRD_EDIT_MAX_TOKENS",      "3000"))
+BRD_SECTION_MAX_TOKENS   = int(os.getenv("BRD_SECTION_MAX_TOKENS",   "4000"))
+BRD_AUDIT_MAX_TOKENS     = int(os.getenv("BRD_AUDIT_MAX_TOKENS",     "1500"))
+BRD_QA_MAX_TOKENS        = int(os.getenv("BRD_QA_MAX_TOKENS",        "900"))
+BRD_SUGGEST_MAX_TOKENS   = int(os.getenv("BRD_SUGGEST_MAX_TOKENS",   "900"))
+BRD_GATHER_MAX_TOKENS    = int(os.getenv("BRD_GATHER_MAX_TOKENS",    "600"))
+
+# Per-section revert stack depth (mirrors SAD's previous_versions cap=5).
+BRD_PREVIOUS_VERSIONS_CAP = int(os.getenv("BRD_PREVIOUS_VERSIONS_CAP", "5"))
+
+# Parallel section generation -- port of SAD's ThreadPoolExecutor pattern
+# (lambda_sad_orchestrator.py:1526) into lambda_brd_generator. 5 workers
+# is the same default SAD uses.
+BRD_SECTION_PARALLELISM = int(os.getenv("BRD_SECTION_PARALLELISM", "5"))
+
+# Per-user rate limits (FastAPI middleware enforces).
+BRD_RATE_LIMIT_TURNS_PER_HOUR        = int(os.getenv("BRD_RATE_LIMIT_TURNS_PER_HOUR",        "60"))
+BRD_RATE_LIMIT_GENERATIONS_PER_DAY   = int(os.getenv("BRD_RATE_LIMIT_GENERATIONS_PER_DAY",   "5"))
+
+# SSE limits for the /turn-stream and /generate-stream endpoints.
+BRD_SSE_MAX_CONCURRENT_STREAMS = int(os.getenv("BRD_SSE_MAX_CONCURRENT_STREAMS", "3"))
+BRD_SSE_HARD_TIMEOUT_SECONDS   = int(os.getenv("BRD_SSE_HARD_TIMEOUT_SECONDS",   "120"))
+BRD_SSE_IDLE_TIMEOUT_SECONDS   = int(os.getenv("BRD_SSE_IDLE_TIMEOUT_SECONDS",   "30"))
+
+# AgentCore Memory -- dual-actor pattern. Writes use the per-user actor;
+# reads merge results from BOTH the per-user actor AND the legacy shared
+# one so historical chats remain accessible without a migration.
+BRD_AGENTCORE_ACTOR_PREFIX = os.getenv("BRD_AGENTCORE_ACTOR_PREFIX", "user-")
+BRD_AGENTCORE_LEGACY_ACTOR = os.getenv("BRD_AGENTCORE_LEGACY_ACTOR", "analyst-session")
+
+# Long-term memory namespace template. Per-(user, project) so a user's
+# facts about project A don't leak into their work on project B.
+BRD_FACTS_NAMESPACE_TEMPLATE = os.getenv(
+    "BRD_FACTS_NAMESPACE_TEMPLATE",
+    "user-{user_id}:project-{project_id}",
+)
+BRD_FACTS_TOP_K = int(os.getenv("BRD_FACTS_TOP_K", "10"))
+
+# Lambda function names for the new orchestrator + (kept) workers.
+BRD_ORCHESTRATOR_LAMBDA = os.getenv("BRD_ORCHESTRATOR_LAMBDA", "sdlc-dev-brd-orchestrator")
+BRD_GENERATOR_LAMBDA    = os.getenv("BRD_GENERATOR_LAMBDA",    "sdlc-dev-brd-generator")
+BRD_FROM_HISTORY_LAMBDA = os.getenv("BRD_FROM_HISTORY_LAMBDA", "sdlc-dev-brd-from-history")
+
+# Observability -- ADOT layer exporter. CloudWatch is the default.
+OTEL_EXPORTER     = os.getenv("OTEL_EXPORTER",     "cloudwatch")
+OTEL_SERVICE_NAME = os.getenv("OTEL_SERVICE_NAME", "brd-orchestrator")

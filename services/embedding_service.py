@@ -318,6 +318,7 @@ class EmbeddingService:
         self,
         texts: List[str],
         batch_size: int = 25,
+        progress_callback=None,
     ) -> List[List[float]]:
         """
         Generate embeddings for many chunks with significantly fewer API round trips.
@@ -339,17 +340,39 @@ class EmbeddingService:
             texts:      List of strings to embed.
             batch_size: How many chunks per request on the gateway path.
                         25 is conservative and safe for Titan-v2 via the gateway.
+            progress_callback: Optional callable invoked AFTER each successful
+                        batch with `(processed_so_far, total)`. Used by callers
+                        that need to surface long-running progress to upstream
+                        consumers (e.g. the BRD generator's SSE heartbeat). The
+                        callback runs synchronously inside the embed loop, so
+                        the caller is responsible for throttling expensive work
+                        (S3 writes, network calls). Exceptions in the callback
+                        are caught + logged so a misbehaving observer cannot
+                        crash the actual embedding job.
 
         Returns:
             List of embedding vectors, same length and order as `texts`.
         """
         if not texts:
             return []
+        total = len(texts)
+
+        def _notify(processed):
+            if progress_callback is None:
+                return
+            try:
+                progress_callback(processed, total)
+            except Exception as e:
+                logger.warning(f"[EmbeddingService] progress_callback raised (ignored): {e}")
 
         # Bedrock path: Titan-v2 is single-input only — loop and reuse retry logic.
         if self.provider == 'bedrock':
-            logger.info(f"[EmbeddingService] generate_embeddings_batch: Bedrock single-input path, {len(texts)} chunks")
-            return [self.generate_embedding(t) for t in texts]
+            logger.info(f"[EmbeddingService] generate_embeddings_batch: Bedrock single-input path, {total} chunks")
+            out = []
+            for i, t in enumerate(texts):
+                out.append(self.generate_embedding(t))
+                _notify(i + 1)
+            return out
 
         # Gateway path: batch via OpenAI-compatible `input` list parameter.
         logger.info(
@@ -385,6 +408,7 @@ class EmbeddingService:
                         )
                     # response.data preserves input order per OpenAI API contract.
                     all_embeddings.extend(d.embedding for d in response.data)
+                    _notify(len(all_embeddings))
                     break  # success — move to next batch
 
                 except Exception as e:
