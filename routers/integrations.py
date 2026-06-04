@@ -1388,56 +1388,17 @@ def bitbucket_connect_direct(
         return {"linked": False, "error": str(e)}
 
 
-@router.get("/bitbucket/repositories-direct/{workspace}")
-def list_bitbucket_repositories_direct(
-    workspace: str,
-    email: str,
-    api_token: str,
-    _: dict = Depends(verify_azure_token),
-):
-    """List repositories using credentials passed as query params."""
-    try:
-        svc = BitbucketService(email, api_token)
-        repos = svc.get_repositories(workspace)
-        return {"repositories": repos}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/bitbucket/branches-direct/{workspace}/{repo_slug}")
-def list_bitbucket_branches_direct(
-    workspace: str,
-    repo_slug: str,
-    email: str,
-    api_token: str,
-    _: dict = Depends(verify_azure_token),
-):
-    """List branches using credentials passed as query params."""
-    try:
-        svc = BitbucketService(email, api_token)
-        branches = svc.get_branches(workspace, repo_slug)
-        return {"branches": branches}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/bitbucket/fetch-files-direct/{workspace}/{repo_slug}")
-def fetch_bitbucket_files_direct(
-    workspace: str,
-    repo_slug: str,
-    email: str,
-    api_token: str,
-    ref: str = "main",
-    path: str = "",
-    _: dict = Depends(verify_azure_token),
-):
-    """Fetch Terraform files using credentials passed as query params."""
-    try:
-        svc = BitbucketService(email, api_token)
-        files = svc.get_files_bulk(workspace, repo_slug, ref=ref, path=path, extensions=[".tf", ".tfvars", ".hcl"])
-        return {"files": files, "count": len(files)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+# Three previous endpoints were here:
+#   GET /bitbucket/repositories-direct/{workspace}
+#   GET /bitbucket/branches-direct/{workspace}/{repo_slug}
+#   GET /bitbucket/fetch-files-direct/{workspace}/{repo_slug}
+# They accepted `email` and `api_token` as URL query parameters, which leak
+# credentials into browser history, server access logs, and Referer headers.
+# They had no remaining callers — the frontend migrated to the
+# *-stored endpoints below (which load the user's DB-stored Bitbucket
+# credentials by authenticated user_id), and `connect-direct` already
+# accepts test credentials in the POST body. Removed entirely; new
+# credential-bearing endpoints must use POST + body or DB-stored credentials.
 
 
 # ============================================================
