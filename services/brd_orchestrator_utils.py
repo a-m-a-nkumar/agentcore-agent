@@ -446,6 +446,94 @@ def render_brd_for_chat(structure: Dict[str, Any]) -> Tuple[str, List[str]]:
 # AgentCore Memory — dual-actor I/O for short-term chat history
 # ============================================================================
 
+def batch_create_facts(
+    *,
+    user_id: str,
+    project_id: str,
+    facts: List[str],
+    memory_strategy_id: Optional[str] = None,
+) -> int:
+    """Write pre-formed semantic records DIRECTLY into the per-(user, project)
+    namespace via batch_create_memory_records.
+
+    Why this exists: the memory store's builtin SEMANTIC strategy was
+    registered (2026-03-05) without proper extraction/embedding config —
+    extraction never indexes events for retrieval, so retrieve_memory_records
+    returns 0 across the board even though events land successfully (verified
+    via 6 separate probes against the live memory). The workaround is to
+    bypass extraction entirely: build the facts ourselves (the generator
+    already does this — see `_section_to_memory_facts` in lambda_brd_generator)
+    and push them as pre-formed records into the namespace the app queries.
+
+    list_memory_records works on these — so even with retrieve broken at the
+    AWS level, get_long_term_facts can find them via the list fallback below.
+
+    Returns the number of records successfully created. Failures are logged
+    and counted but never raised — memory writes are best-effort.
+    """
+    if not AGENTCORE_MEMORY_ID:
+        logger.warning("[brd_utils] batch_create_facts: AGENTCORE_MEMORY_ID unset; skipping")
+        return 0
+    if not (user_id and project_id):
+        logger.warning(
+            f"[brd_utils] batch_create_facts: user_id={bool(user_id)} "
+            f"project_id={bool(project_id)} — both required"
+        )
+        return 0
+    if not facts:
+        return 0
+
+    namespace = facts_namespace(user_id, project_id)
+    # AgentCore's batch_create caps records at ~25 per call; chunk for safety.
+    BATCH = 25
+    written = 0
+    failed = 0
+    for i in range(0, len(facts), BATCH):
+        chunk = facts[i:i + BATCH]
+        records = []
+        for j, text in enumerate(chunk):
+            if not (text or "").strip():
+                continue
+            record = {
+                "requestIdentifier": f"brd-fact-{int(time.time()*1000)}-{i}-{j}",
+                "namespaces": [namespace],
+                "content": {"text": text[:4000]},  # cap per record
+                "timestamp": int(time.time()),
+            }
+            if memory_strategy_id:
+                record["memoryStrategyId"] = memory_strategy_id
+            records.append(record)
+        if not records:
+            continue
+        try:
+            resp = _memory().batch_create_memory_records(
+                memoryId=AGENTCORE_MEMORY_ID,
+                records=records,
+            )
+            succ = len(resp.get("successfulRecords", []) or [])
+            fail = len(resp.get("failedRecords", []) or [])
+            written += succ
+            failed += fail
+            if fail:
+                logger.warning(
+                    f"[brd_utils] batch_create_facts chunk[{i}:{i+len(chunk)}]: "
+                    f"{succ} succeeded, {fail} failed — "
+                    f"first failure: {resp.get('failedRecords', [{}])[0]}"
+                )
+        except Exception as e:
+            failed += len(records)
+            logger.warning(
+                f"[brd_utils] batch_create_facts chunk[{i}:{i+len(chunk)}] "
+                f"namespace={namespace} failed: {type(e).__name__}: {e}"
+            )
+
+    logger.info(
+        f"[brd_utils] batch_create_facts namespace={namespace} "
+        f"wrote={written} failed={failed} total={len(facts)}"
+    )
+    return written
+
+
 def write_memory_event(
     session_id: str,
     user_id: str,
@@ -599,39 +687,75 @@ def get_long_term_facts(
     namespace = facts_namespace(user_id, project_id)
     k = top_k or BRD_FACTS_TOP_K
 
-    # boto3 bedrock-agentcore parameter shape: searchCriteria (structured
-    # object containing the actual searchQuery) + maxResults. Older drafts
-    # of this code used `searchQuery=query, topK=k` which the current SDK
-    # rejects with ParamValidationError — surfaced as a noisy warning AND
-    # silently returned [] every call, so long-term memory enrichment was
-    # quietly disabled in production.
+    logger.info(
+        f"[brd_utils] get_long_term_facts START "
+        f"namespace={namespace} query_len={len(safe_query)} top_k={k}"
+    )
+
+    # Step 1 — semantic retrieve. SHOULD return relevance-ranked records, but
+    # the live memory store's builtin SEMANTIC strategy has no embedding model
+    # configured (verified 2026-06-03 via .scratch/probe_retrieve_shape.py:
+    # list_memory_records returned 8 records on this namespace, retrieve_*
+    # returned 0 for every query including ones whose keywords literally
+    # appear in the stored content). When retrieve returns 0, we fall back
+    # to list_memory_records (Step 2) so the user still gets project context.
+    facts: List[str] = []
     try:
         resp = _memory().retrieve_memory_records(
             memoryId=AGENTCORE_MEMORY_ID,
             namespace=namespace,
-            searchCriteria={"searchQuery": safe_query},
+            searchCriteria={"searchQuery": safe_query, "topK": k},
             maxResults=k,
+        )
+        for rec in resp.get("memoryRecords", []) or []:
+            content = rec.get("content") or rec.get("text") or ""
+            if isinstance(content, dict):
+                facts.extend(_format_structured_fact(content))
+            elif isinstance(content, str):
+                if content.strip():
+                    facts.append(content.strip())
+        logger.info(
+            f"[brd_utils] get_long_term_facts retrieve_memory_records "
+            f"namespace={namespace} returned={len(facts)}"
         )
     except Exception as e:
         logger.warning(
-            f"[brd_utils] get_long_term_facts namespace={namespace}: {e}"
+            f"[brd_utils] get_long_term_facts retrieve_memory_records "
+            f"namespace={namespace} failed: {type(e).__name__}: {e}"
         )
-        return []
 
-    facts: List[str] = []
-    for rec in resp.get("memoryRecords", []) or []:
-        # Records arrive as either a raw text content or a structured
-        # JSON object with our 6-category schema. Format both shapes
-        # into a single sentence per fact.
-        content = rec.get("content") or rec.get("text") or ""
-        if isinstance(content, dict):
-            facts.extend(_format_structured_fact(content))
-        elif isinstance(content, str):
-            if content.strip():
-                facts.append(content.strip())
+    # Step 2 — fallback to list_memory_records when semantic retrieve gives
+    # nothing. Loses relevance ranking (just gets recent N), but unblocks
+    # the "Continue with project context" UX when retrieve is broken.
+    if not facts:
+        try:
+            list_resp = _memory().list_memory_records(
+                memoryId=AGENTCORE_MEMORY_ID,
+                namespace=namespace,
+                maxResults=k,
+            )
+            summaries = list_resp.get("memoryRecordSummaries", []) or []
+            for rec in summaries:
+                content = rec.get("content") or {}
+                if isinstance(content, dict):
+                    text = content.get("text") or ""
+                else:
+                    text = str(content)
+                if text.strip():
+                    facts.append(text.strip())
+            logger.info(
+                f"[brd_utils] get_long_term_facts list_memory_records FALLBACK "
+                f"namespace={namespace} returned={len(facts)}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[brd_utils] get_long_term_facts list_memory_records fallback "
+                f"namespace={namespace} failed: {type(e).__name__}: {e}"
+            )
+
     logger.info(
-        f"[brd_utils] get_long_term_facts namespace={namespace} "
-        f"query_len={len(safe_query)} returned={len(facts)}"
+        f"[brd_utils] get_long_term_facts DONE "
+        f"namespace={namespace} final_count={len(facts)} cap_k={k}"
     )
     return facts[:k]
 

@@ -1543,6 +1543,7 @@ def _push_brd_to_memory(
     try:
         from services.brd_orchestrator_utils import (
             write_memory_event,
+            batch_create_facts,
             BRD_SNAPSHOT_SESSION_PREFIX,
         )
     except Exception as e:
@@ -1560,6 +1561,7 @@ def _push_brd_to_memory(
 
     fact_count = 0
     failed_writes = 0
+    all_facts: List[str] = []  # collected for direct batch_create
     for sec in sections:
         if not isinstance(sec, dict):
             continue
@@ -1586,13 +1588,32 @@ def _push_brd_to_memory(
                 logger.warning(
                     f"[BRD-mem] write_memory_event failed §{n} fact#{i}: {e}"
                 )
+            all_facts.append(fact_text)
         logger.info(f"[BRD-mem] §{n} ({sec.get('title','')!r}) -> {len(section_facts)} facts")
+
+    # CRITICAL FIX (2026-06-03): the memory store's builtin SEMANTIC strategy
+    # was registered (2026-03-05) without proper extraction config, so events
+    # written via create_event above NEVER produce searchable records. Verified
+    # via probes in .scratch/probe_*.py — 4 brdsnap sessions with hundreds of
+    # events produced 0 extracted records, while batch_create_memory_records
+    # writes ARE retrievable via list_memory_records. So we ALSO push each
+    # fact directly as a pre-formed record so get_long_term_facts(...) can
+    # find them via the list fallback path on the read side.
+    direct_written = batch_create_facts(
+        user_id=user_id,
+        project_id=project_id,
+        facts=all_facts,
+    )
+    logger.info(
+        f"[BRD-mem] direct batch_create_facts written={direct_written}/{len(all_facts)} "
+        f"namespace=user-{user_id}:project-{project_id}"
+    )
 
     elapsed = time.time() - t0
     logger.info(
         f"[BRD-mem] push DONE sections={len(sections)} facts_written={fact_count} "
-        f"failed_writes={failed_writes} elapsed={elapsed:0.1f}s "
-        f"sessionId={snapshot_sid}"
+        f"direct_records_written={direct_written} failed_writes={failed_writes} "
+        f"elapsed={elapsed:0.1f}s sessionId={snapshot_sid}"
     )
 
 
