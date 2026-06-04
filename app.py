@@ -21,7 +21,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 from docx import Document
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header
+from fastapi import FastAPI, UploadFile, File, HTTPException, Form, Depends, Header, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
