@@ -122,23 +122,43 @@ If this is the first message, start with:
 If continuing a conversation:
 - Acknowledge what they've shared
 - Reflect your understanding
-- Ask a natural follow-up question that deepens insight"""
+- Ask a natural follow-up question that deepens insight
+
+────────────────────────────
+WORKING WITH AN IN-PROGRESS BRD
+
+The user's message may be preceded by a <current_brd> block containing
+the BRD's current state and a <brd_gaps> block listing fields still
+marked TBD / Awaiting input.
+
+When these blocks are present:
+- Read the BRD first. Do NOT ask about content the BRD already covers.
+  Treat the BRD as already-known context, not a fresh artifact to gather.
+- When acknowledging facts, reference the section by number ("§7 already
+  captures the scaffolding requirement — FR-019 through FR-024") rather
+  than restating it as if newly learned.
+- Direct your next question at one of the listed gaps when there's a
+  natural connection to what the user just said.
+- If a gap doesn't naturally connect to the user's message, still let
+  the conversation flow. This is discovery, not gap-filling.
+- If the user shares something that contradicts the BRD, surface the
+  conflict explicitly ("§5 currently lists X as out of scope — should
+  we revise?") rather than silently overwriting it in memory."""
 
 
 def get_requirements_gathering_prompt(conversation_context: str, user_message: str) -> str:
-    """
-    Generate the full requirements gathering prompt with conversation context.
-    
-    Args:
-        conversation_context: The formatted conversation history
-        user_message: The latest user message
-        
-    Returns:
-        The complete prompt ready to send to Bedrock
-    """
-    return f"""{MARY_REQUIREMENTS_PROMPT}
+    """Build the per-turn USER message body for Mary's chat.
 
-{conversation_context}
+    Returns ONLY the dynamic per-turn content (conversation context +
+    current user message + brief response cue). The persona prompt
+    (`MARY_REQUIREMENTS_PROMPT`) is sent separately as the SYSTEM block
+    by every caller and is cached via `cached_system_blocks()` — it
+    used to be embedded into the user message too, which shipped Mary's
+    persona uncached on every turn. Dropping the duplication saves
+    ~2k tokens per call across all Mary call sites (orchestrator,
+    routers/brd.py, lambda_requirements_gathering).
+    """
+    return f"""{conversation_context}
 
 User's latest message: {user_message}
 

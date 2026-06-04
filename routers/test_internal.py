@@ -20,7 +20,7 @@ from pydantic import BaseModel
 from typing import Optional
 
 from auth import verify_azure_token
-from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project
+from db_helper import get_user_atlassian_credentials, create_or_update_user, get_project, track_event
 from services.confluence_service import ConfluenceService
 from routers.internal_utils import validate_api_key, test_sessions, project_events
 from routers.test_generation import extract_scenarios_with_bedrock
@@ -115,6 +115,22 @@ async def list_pages_internal(
         else:
             pages = [{"id": p["id"], "title": p["title"]} for p in all_pages]
 
+        try:
+            track_event(
+                user_id=owner_id,
+                module="testing",
+                event_type="test_pages_listed_via_mcp",
+                project_id=project_id,
+                source="mcp",
+                metadata={
+                    "space_key": space_key,
+                    "filter": request.filter or "",
+                    "page_count": len(pages),
+                },
+            )
+        except Exception as _track_err:
+            logger.warning(f"track_event failed (non-fatal): {_track_err}")
+
         return {"pages": pages, "total": len(pages)}
     except Exception as e:
         logger.error(f"Error listing pages: {e}")
@@ -158,9 +174,13 @@ async def parse_scenarios_internal(
         raise HTTPException(status_code=500, detail=f"Failed to fetch Confluence page: {str(e)}")
 
     try:
+        # Pass owner_id so the LLM gateway can attribute tokens to the project
+        # owner. Without this, MCP-driven parses would be unattributed (token
+        # cost lost from users.token_usage / OrganizationUsage).
         result = extract_scenarios_with_bedrock(
             page_data["content"],
             page_data["title"],
+            user_id=owner_id,
         )
 
         session_id = str(uuid.uuid4())
@@ -171,6 +191,22 @@ async def parse_scenarios_internal(
             "prompt": result.get("prompt", ""),
             "gherkin": None,
         }
+
+        try:
+            track_event(
+                user_id=owner_id,
+                module="testing",
+                event_type="test_scenarios_parsed_via_mcp",
+                project_id=project_id,
+                source="mcp",
+                metadata={
+                    "confluence_page_id": request.confluence_page_id,
+                    "page_title": page_data["title"],
+                    "scenario_count": len(result.get("scenarios", [])),
+                },
+            )
+        except Exception as _track_err:
+            logger.warning(f"track_event failed (non-fatal): {_track_err}")
 
         return {
             "session_id": session_id,

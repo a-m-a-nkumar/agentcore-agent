@@ -1,0 +1,114 @@
+{
+  "brd_id": "test-sample-brd",
+  "session_id": "brd-test-session",
+  "sections": [
+    {
+      "number": 1,
+      "title": "Document Overview",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["Field", "Value"],
+          "rows": [
+            ["Document Name", "Sample Project BRD"],
+            ["Author", "Test Author"],
+            ["Version", "1.0"],
+            ["Last Updated", "[TBD]"],
+            ["Status", "Draft"]
+          ]
+        }
+      ],
+      "status": "llm_generated"
+    },
+    {
+      "number": 2,
+      "title": "Purpose",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "The purpose of this project is to build a sample system that exercises the BRD chat context renderer end to end."
+        }
+      ],
+      "status": "llm_generated"
+    },
+    {
+      "number": 3,
+      "title": "Background / Context",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "This is a moderately long paragraph that exists to stress-test the tier-2 truncation path. It should be over 400 characters so that the renderer trims it in tier 2 mode but keeps it whole in tier 1 mode. We want to ensure the determinism contract holds whether the paragraph is truncated or not, which is why this fixture exercises both modes. Adding more filler text to safely exceed the threshold while keeping the content semantically meaningful for a real-looking sample input."
+        }
+      ],
+      "status": "llm_generated"
+    },
+    {
+      "number": 4,
+      "title": "Stakeholders",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["Name", "Role", "Responsibility"],
+          "rows": [
+            ["Alice", "Product Owner", "Approve scope and priorities"],
+            ["Bob", "Tech Lead", "Architect the system"],
+            ["[TBD]", "[TBD]", "[TBD]"]
+          ]
+        }
+      ],
+      "status": "llm_generated"
+    },
+    {
+      "number": 5,
+      "title": "Scope",
+      "content": [
+        {
+          "type": "bullet_list",
+          "text": "In Scope",
+          "items": ["Build chat handler", "Deploy to Lambda"]
+        },
+        {
+          "type": "bullet_list",
+          "text": "Out of Scope",
+          "items": ["Custom dashboards"]
+        }
+      ],
+      "status": "llm_generated"
+    },
+    {
+      "number": 7,
+      "title": "Functional Requirements",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["Req ID", "Description", "Priority"],
+          "rows": [
+            ["FR-001", "System shall accept user input", "MUST"],
+            ["FR-002", "System shall validate input", "MUST"],
+            ["FR-003", "System shall persist results", "MUST"],
+            ["FR-004", "System shall provide UI", "SHOULD"],
+            ["FR-005", "System shall expose API", "MUST"]
+          ]
+        }
+      ],
+      "status": "llm_generated"
+    },
+    {
+      "number": 14,
+      "title": "Risks and Dependencies",
+      "content": [
+        {
+          "type": "table",
+          "headers": ["Risk/Dependency", "Impact", "Mitigation"],
+          "rows": [
+            ["External API outage", "High", "Implement retry + circuit breaker"],
+            ["", "", ""]
+          ]
+        }
+      ],
+      "status": "llm_generated"
+    }
+  ],
+  "missing": [],
+  "failed": []
+}

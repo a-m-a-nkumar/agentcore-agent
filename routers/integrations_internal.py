@@ -118,23 +118,29 @@ async def push_code_summary_internal(
     body_html = confluence.markdown_to_storage(request.content or "")
     page_html = info_panel + body_html
 
-    title = _build_title(request.scope, request.commit_sha)
+    base_title = _build_title(request.scope, request.commit_sha)
 
-    # ── Create the page (Confluence rejects duplicate titles in same space;
-    #     if a summary for this exact scope+sha already exists, surface it). ──
-    existing = confluence.find_page_by_title(space_key, title)
-    if existing:
-        existing_url = f"{confluence.base_url}{existing.get('_links', {}).get('webui', '')}"
-        logger.info(f"Code documentation already exists at {existing_url} — returning existing")
-        return {
-            "page_id": existing.get("id"),
-            "title": existing.get("title"),
-            "web_url": existing_url,
-            "version": existing.get("version", {}).get("number", 1),
-            "created": False,
-            "parent_id": parent_id,
-            "label": CODE_SUMMARY_LABEL,
-        }
+    # Auto-version on title collision. Re-running the workflow for the same
+    # scope+SHA is a legitimate use case (the user iterated on the doc
+    # content), so don't silently return the old page — create a new
+    # version. The first push gets the bare title; subsequent ones get
+    # "<title> (v2)", "(v3)", … up to a sanity cap of 99.
+    title = base_title
+    version_n = 1
+    while confluence.find_page_by_title(space_key, title):
+        version_n += 1
+        title = f"{base_title} (v{version_n})"
+        if version_n > 99:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Refusing to create a 100th version of '{base_title}'. "
+                    f"Clean up old pages in Confluence before publishing again."
+                ),
+            )
+
+    if version_n > 1:
+        logger.info(f"Title '{base_title}' already exists; publishing as '{title}'")
 
     try:
         created = confluence.create_page(
@@ -165,6 +171,7 @@ async def push_code_summary_internal(
                 "commit_sha": _short_sha(request.commit_sha),
                 "page_id": created.get("id"),
                 "content_chars": len(request.content or ""),
+                "doc_version": version_n,
             },
         )
     except Exception as e:
@@ -174,7 +181,8 @@ async def push_code_summary_internal(
         "page_id": created.get("id"),
         "title": created.get("title"),
         "web_url": created.get("web_url"),
-        "version": 1,
+        "version": 1,            # Confluence page-version (always 1 on create)
+        "doc_version": version_n,  # our auto-suffix counter (1, 2, 3, ...)
         "created": True,
         "parent_id": parent_id,
         "label": CODE_SUMMARY_LABEL,

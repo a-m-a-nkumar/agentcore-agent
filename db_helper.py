@@ -14,7 +14,7 @@ import base64
 import boto3
 from psycopg2 import pool
 from datetime import datetime
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Optional, Any, Tuple
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -162,6 +162,29 @@ def _run_migrations(db_params: dict, sslmode: str):
                         ALTER TABLE users ADD COLUMN token_usage BIGINT NOT NULL DEFAULT 0;
                     END IF;
                 END $$;
+            """)
+
+            # Sonnet-equivalent (cost-normalized) cumulative counters + per-day
+            # aggregate. Primary creation is migrations/add_effective_token_columns.py
+            # (run once before deploy); this is an idempotent backstop. See
+            # llm_gateway._effective_tokens for the re-valuation formula.
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS sonnet_equivalent_input_tokens BIGINT NOT NULL DEFAULT 0
+            """)
+            cursor.execute("""
+                ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS sonnet_equivalent_output_tokens BIGINT NOT NULL DEFAULT 0
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS user_token_usage_daily (
+                    user_id                          TEXT   NOT NULL,
+                    usage_date                       DATE   NOT NULL,
+                    raw_tokens                       BIGINT NOT NULL DEFAULT 0,
+                    sonnet_equivalent_input_tokens   BIGINT NOT NULL DEFAULT 0,
+                    sonnet_equivalent_output_tokens  BIGINT NOT NULL DEFAULT 0,
+                    PRIMARY KEY (user_id, usage_date)
+                )
             """)
 
             # Add access_role column to users table — derived from Azure AD group
@@ -646,37 +669,107 @@ def get_project_brd_session(project_id: str) -> Optional[Dict[str, Any]]:
 # ============================================
 # SESSION MANAGEMENT
 # ============================================
+#
+# BRD session stage enum (mirrors _DESIGN_SESSION_STAGES below for SAD).
+# Set on analyst_sessions.stage via migrations/add_analyst_sessions_stage.py.
+#
+#   NEW         — session created, no chat yet
+#   GATHERING   — Mary is asking follow-ups; chat accumulating
+#   GENERATING  — generation in flight (long-poll guard; /turn returns
+#                 generation_in_progress card and skips the router)
+#   DRAFTED     — BRD JSON exists, no edits yet
+#   REFINING    — BRD exists AND at least one edit/regenerate/audit landed
+#
+# Kept separate from _DESIGN_SESSION_STAGES so SAD and BRD evolve
+# independently; the table name (analyst_sessions vs design_sessions)
+# already partitions them at the DB layer.
+
+BRD_SESSION_STAGES = frozenset({
+    "NEW", "GATHERING", "GENERATING", "DRAFTED", "REFINING",
+})
+
+
+# Canonical state-machine transitions documented in
+# hazy-gliding-hammock.md "State machine" -> "Stage transitions".
+# Format: (from_stage, event) -> to_stage.
+# `to_stage = None` means "revert to prior stage" — the orchestrator
+# stores prior_stage in the session row when entering GENERATING and
+# uses it on failure / cancellation paths.
+#
+# Events:
+#   generate_accepted        — router classified GENERATE_FROM_*
+#   generation_success       — worker Lambda returned successfully
+#   generation_failure       — worker raised / timed out / S3 write failed
+#   generation_cancel        — user invoked /api/brd/cancel-generation
+#   generation_in_progress   — user sent /turn while stage = GENERATING
+#                              (stage unchanged; recorded for completeness)
+#   first_refinement_action  — first EDIT / REGENERATE / AUDIT / save_section
+#                              after a successful generation
+BRD_STAGE_TRANSITIONS: Dict[Tuple[str, str], Optional[str]] = {
+    ("NEW",        "generate_accepted"):       "GENERATING",
+    ("GATHERING",  "generate_accepted"):       "GENERATING",
+    ("GENERATING", "generation_success"):      "DRAFTED",
+    ("GENERATING", "generation_failure"):      None,
+    ("GENERATING", "generation_cancel"):       None,
+    ("GENERATING", "generation_in_progress"):  "GENERATING",
+    ("DRAFTED",    "first_refinement_action"): "REFINING",
+}
+
+
+def validate_brd_session_stage(stage: str) -> str:
+    """Raise ValueError if `stage` is not a recognised BRD session stage.
+    Returns the stage unchanged on success so callers can chain it."""
+    if stage not in BRD_SESSION_STAGES:
+        raise ValueError(
+            f"Invalid BRD session stage: {stage!r}. "
+            f"Must be one of: {sorted(BRD_SESSION_STAGES)}"
+        )
+    return stage
+
 
 def create_session(
     session_id: str,
     project_id: str,
     user_id: str,
-    title: str = "New Chat"
+    title: str = "New Chat",
+    stage: str = "NEW",
+    use_long_term_context: bool = True,
 ) -> Dict[str, Any]:
     """
-    Create a new analyst session
-    
+    Create a new analyst session.
+
     Args:
         session_id: Session ID (min 33 chars for AgentCore)
         project_id: Project ID
         user_id: User ID
         title: Session title
-        
+        stage: BRD session stage. Defaults to "NEW". Validated against
+            BRD_SESSION_STAGES. Old callers that don't pass this keep the
+            DB default behaviour ("NEW").
+        use_long_term_context: When True (default), the unified BRD
+            orchestrator retrieves long-term semantic facts from
+            AgentCore Memory and seeds prompts with project context.
+            When False, the session starts fresh — no retrieval; writes
+            still feed long-term memory for future sessions.
+
     Returns:
-        Session record as dictionary
+        Session record as dictionary.
     """
+    validate_brd_session_stage(stage)
+
     conn = get_db_connection()
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cursor:
             cursor.execute("""
-                INSERT INTO analyst_sessions (id, project_id, user_id, title)
-                VALUES (%s, %s, %s, %s)
+                INSERT INTO analyst_sessions
+                    (id, project_id, user_id, title, stage, use_long_term_context)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 RETURNING *
-            """, (session_id, project_id, user_id, title))
-            
+            """, (session_id, project_id, user_id, title, stage, use_long_term_context))
+
             session = dict(cursor.fetchone())
             conn.commit()
-            
+
             # Convert timestamps to milliseconds
             session['created_at'] = int(session['created_at'].timestamp() * 1000)
             session['last_updated'] = int(session['last_updated'].timestamp() * 1000)
@@ -687,6 +780,69 @@ def create_session(
         conn.rollback()
         logger.error(f"Error creating session: {e}")
         raise
+    finally:
+        release_db_connection(conn)
+
+
+def update_brd_session_stage(session_id: str, stage: str) -> None:
+    """Update the BRD session stage for `session_id`. Validates against
+    BRD_SESSION_STAGES. Also bumps last_updated. Idempotent — writing the
+    same stage twice is a no-op as far as the caller is concerned."""
+    validate_brd_session_stage(stage)
+
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE analyst_sessions
+                   SET stage = %s,
+                       last_updated = NOW()
+                 WHERE id = %s
+                """,
+                (stage, session_id),
+            )
+            conn.commit()
+            if cursor.rowcount == 0:
+                logger.warning(f"update_brd_session_stage: no row matched id={session_id}")
+            else:
+                logger.info(f"Session {session_id} stage -> {stage}")
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error updating BRD session stage: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def get_brd_session(session_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single BRD session row by id. Returns None if not found or
+    soft-deleted. Includes stage and use_long_term_context."""
+    conn = get_db_connection()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT id, project_id, user_id, title, brd_id,
+                       stage, use_long_term_context,
+                       message_count, created_at, last_updated, is_deleted
+                  FROM analyst_sessions
+                 WHERE id = %s
+                   AND is_deleted = FALSE
+                """,
+                (session_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            session = dict(row)
+            session['created_at']   = int(session['created_at'].timestamp() * 1000)
+            session['last_updated'] = int(session['last_updated'].timestamp() * 1000)
+            # Normalize UUID-typed columns to strings for JSON safety.
+            for k in ("id", "project_id"):
+                if session.get(k) is not None:
+                    session[k] = str(session[k])
+            return session
     finally:
         release_db_connection(conn)
 
@@ -820,6 +976,54 @@ def update_session(
     except Exception as e:
         conn.rollback()
         logger.error(f"Error updating session: {e}")
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def update_brd_session_on_completion(
+    session_id: str,
+    brd_id: str,
+    sections_complete: int,
+) -> None:
+    """Phase 6 — called by the SSE endpoint (or final-assembly step)
+    after a parallel BRD generation completes successfully.
+
+    Sets `brd_id` on the row (if not already), promotes stage to
+    DRAFTED if it was GENERATING, and updates `last_updated`. Used to
+    close the loop: generation Lambda finishes -> SSE endpoint observes
+    `_generation_status.json::status=complete` -> calls this -> session
+    advances to DRAFTED so the frontend can render the document.
+
+    `sections_complete` is informational only — we don't persist it on
+    the row (the count is derivable from brd_structure.json) but the
+    parameter exists so callers can pass it for logging.
+    """
+    conn = get_db_connection()
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE analyst_sessions
+                   SET brd_id       = %s,
+                       stage        = CASE WHEN stage = 'GENERATING'
+                                           THEN 'DRAFTED'
+                                           ELSE stage
+                                      END,
+                       last_updated = CURRENT_TIMESTAMP
+                 WHERE id = %s
+                """,
+                (brd_id, session_id),
+            )
+            conn.commit()
+            logger.info(
+                f"[DB] update_brd_session_on_completion: session={session_id} "
+                f"brd_id={brd_id} sections_complete={sections_complete} "
+                f"(stage -> DRAFTED if was GENERATING)"
+            )
+    except Exception as e:
+        conn.rollback()
+        logger.error(f"Error in update_brd_session_on_completion: {e}")
         raise
     finally:
         release_db_connection(conn)
@@ -1804,21 +2008,47 @@ def update_user_access_role(
         return False
 
 
-def increment_user_token_usage(user_id: str, tokens: int) -> None:
-    """Atomically add `tokens` to users.token_usage for the given user_id.
+def increment_user_token_usage(
+    user_id: str,
+    tokens: int,
+    eff_in: int = 0,
+    eff_out: int = 0,
+) -> None:
+    """Atomically add usage for `user_id`:
+      - `tokens`  -> users.token_usage (raw, unchanged semantics)
+      - `eff_in`  -> users.sonnet_equivalent_input_tokens
+      - `eff_out` -> users.sonnet_equivalent_output_tokens
+    and upsert the same into user_token_usage_daily for today (time-windowed
+    rollups). All in one transaction.
 
     Silently skips if user_id is missing or tokens <= 0. Never raises — token
     accounting must not break user-facing flows.
     """
     if not user_id or not tokens or tokens <= 0:
         return
+    eff_in = max(int(eff_in or 0), 0)
+    eff_out = max(int(eff_out or 0), 0)
     try:
         conn = get_db_connection()
         try:
             with conn.cursor() as cursor:
                 cursor.execute(
-                    "UPDATE users SET token_usage = token_usage + %s WHERE id = %s",
-                    (int(tokens), user_id),
+                    "UPDATE users SET token_usage = token_usage + %s, "
+                    "sonnet_equivalent_input_tokens = sonnet_equivalent_input_tokens + %s, "
+                    "sonnet_equivalent_output_tokens = sonnet_equivalent_output_tokens + %s "
+                    "WHERE id = %s",
+                    (int(tokens), eff_in, eff_out, user_id),
+                )
+                cursor.execute(
+                    "INSERT INTO user_token_usage_daily "
+                    "(user_id, usage_date, raw_tokens, sonnet_equivalent_input_tokens, "
+                    " sonnet_equivalent_output_tokens) "
+                    "VALUES (%s, CURRENT_DATE, %s, %s, %s) "
+                    "ON CONFLICT (user_id, usage_date) DO UPDATE SET "
+                    "raw_tokens = user_token_usage_daily.raw_tokens + EXCLUDED.raw_tokens, "
+                    "sonnet_equivalent_input_tokens = user_token_usage_daily.sonnet_equivalent_input_tokens + EXCLUDED.sonnet_equivalent_input_tokens, "
+                    "sonnet_equivalent_output_tokens = user_token_usage_daily.sonnet_equivalent_output_tokens + EXCLUDED.sonnet_equivalent_output_tokens",
+                    (user_id, int(tokens), eff_in, eff_out),
                 )
                 conn.commit()
         finally:
@@ -1837,6 +2067,8 @@ def get_user_usage(user_id: str) -> Optional[Dict[str, Any]]:
                 """
                 SELECT id, email, name, created_at, last_login,
                        COALESCE(token_usage, 0) AS token_usage,
+                       COALESCE(sonnet_equivalent_input_tokens, 0) AS sonnet_equivalent_input_tokens,
+                       COALESCE(sonnet_equivalent_output_tokens, 0) AS sonnet_equivalent_output_tokens,
                        COALESCE(access_role, 'NONE') AS access_role
                 FROM users
                 WHERE id = %s
@@ -2005,6 +2237,8 @@ def list_all_users_usage() -> List[Dict[str, Any]]:
                 """
                 SELECT id, email, name, created_at, last_login,
                        COALESCE(token_usage, 0) AS token_usage,
+                       COALESCE(sonnet_equivalent_input_tokens, 0) AS sonnet_equivalent_input_tokens,
+                       COALESCE(sonnet_equivalent_output_tokens, 0) AS sonnet_equivalent_output_tokens,
                        COALESCE(is_active, TRUE) AS is_active,
                        COALESCE(access_role, 'NONE') AS access_role
                 FROM users

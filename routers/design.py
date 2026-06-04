@@ -1148,7 +1148,14 @@ Then output the full architecture document in Markdown following your instructio
     return GenerateDocumentResponse(document=document)
 
 
-def _invoke_claude_stream(system_prompt: str, user_message: str, model_id: str, max_tokens: int):
+def _invoke_claude_stream(
+    system_prompt: str,
+    user_message: str,
+    model_id: str,
+    max_tokens: int,
+    user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
+):
     """Generator that yields SSE chunks from the environment LLM streaming call."""
     yield from chat_completion_stream(
         messages=[{"role": "user", "content": user_message}],
@@ -1156,6 +1163,8 @@ def _invoke_claude_stream(system_prompt: str, user_message: str, model_id: str, 
         temperature=0.5,
         max_tokens=max_tokens,
         system_prompt=system_prompt,
+        user_id=user_id,
+        token_source=token_source,
     )
 
 
@@ -1184,7 +1193,11 @@ Output ONLY the completed prompt block starting with the ==== header line. Do no
 
     def stream():
         try:
-            yield from _invoke_claude_stream(system_prompt, user_message, PROMPT_MODEL_ID, PROMPT_MAX_TOKENS)
+            yield from _invoke_claude_stream(
+                system_prompt, user_message, PROMPT_MODEL_ID, PROMPT_MAX_TOKENS,
+                user_id=current_user.get("id"),
+                token_source="routers/design:generate_architecture_prompt_stream",
+            )
         except Exception as e:
             logger.error(f"[DESIGN] Prompt stream error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -1217,7 +1230,11 @@ Then output the full architecture document in Markdown following your instructio
 
     def stream():
         try:
-            yield from _invoke_claude_stream(DOCUMENT_SYSTEM_PROMPT, user_message, DOCUMENT_MODEL_ID, DOCUMENT_MAX_TOKENS)
+            yield from _invoke_claude_stream(
+                DOCUMENT_SYSTEM_PROMPT, user_message, DOCUMENT_MODEL_ID, DOCUMENT_MAX_TOKENS,
+                user_id=current_user.get("id"),
+                token_source="routers/design:generate_architecture_document_stream",
+            )
         except Exception as e:
             logger.error(f"[DESIGN] Document stream error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -1960,7 +1977,9 @@ async def generate_lucid_prompt_stream(
         stream_ok = False
         try:
             yield from _invoke_claude_stream(
-                system_prompt, user_message, LUCID_PROMPT_MODEL_ID, LUCID_PROMPT_MAX_TOKENS
+                system_prompt, user_message, LUCID_PROMPT_MODEL_ID, LUCID_PROMPT_MAX_TOKENS,
+                user_id=_current_user.get("id"),
+                token_source="routers/design:generate_lucid_prompt_stream",
             )
             stream_ok = True
         except Exception as e:

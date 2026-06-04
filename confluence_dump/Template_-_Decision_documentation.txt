@@ -1,0 +1,6 @@
+Title: Template - Decision documentation
+Page ID: 8147894884
+Version: 1
+============================================================
+
+Status Not started / In progress Yellow / Complete Green Impact High Red / Medium Yellow / Low Green Driver @ mention driver Approver @ approver Contributors @ contributors Informed @ stakeholders Due date Type // to add a date Resources Type /link to add links to relevant research, pages, and related decisions &nbsp;Background Provide context on a decision the team needs to make and include information about constraints and challenges. &nbsp;Relevant data Add any data or feedback the team should consider when making this decision. &nbsp;Options considered Option 1 Option 2 Description Pros and cons Estimated cost Large Red Medium Yellow &nbsp;Action items Add action items to close the loop on open questions or concerns. \n \n 1 \n incomplete \n Type your task here. Use &quot;@&quot; to assign a user and &quot;//&quot; to select a due date. \n \n &nbsp;Outcome Summarize the outcome.
