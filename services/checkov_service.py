@@ -8,8 +8,6 @@ import io
 import logging
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
 from typing import Dict, List, Optional, Tuple
 
@@ -121,60 +119,13 @@ def run_checkov(files: Dict[str, str]) -> Tuple[dict, bool]:
     """
     try:
         from checkov.terraform.runner import Runner
-    except (ImportError, Exception) as first_err:
-        logger.warning(f"checkov import failed ({first_err}) — attempting runtime install")
-        try:
-            import importlib.metadata as _imeta
-
-            # Step 1: install checkov itself without deps to avoid boto3 pin conflict.
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--no-deps", "--quiet", "checkov==3.2.526"],
-                check=True, capture_output=True, timeout=120,
-            )
-
-            # Step 2: read checkov's declared requirements from its own package metadata
-            # and install all of them EXCEPT boto3 (which is already at a newer version
-            # that checkov tolerates at runtime despite its overly-conservative pin).
-            try:
-                raw_reqs = _imeta.requires("checkov") or []
-            except Exception:
-                raw_reqs = []
-
-            deps = []
-            for req in raw_reqs:
-                # Skip boto3 — conflicts with bedrock-agentcore's boto3>=1.40.52
-                if req.lower().startswith("boto3"):
-                    continue
-                # Strip environment markers ("; python_version < '3.x'") for the install cmd
-                pkg = req.split(";")[0].strip()
-                if pkg:
-                    deps.append(pkg)
-
-            if deps:
-                logger.info(f"Installing {len(deps)} checkov transitive deps")
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "--quiet"] + deps,
-                    check=True, capture_output=True, timeout=300,
-                )
-
-            from checkov.terraform.runner import Runner
-            logger.info("checkov installed successfully at runtime")
-        except subprocess.CalledProcessError as pip_err:
-            stderr = pip_err.stderr.decode(errors="replace") if pip_err.stderr else ""
-            stdout = pip_err.stdout.decode(errors="replace") if pip_err.stdout else ""
-            logger.error(f"checkov pip install failed (rc={pip_err.returncode}): {stderr or stdout}")
-            return {
-                "error": f"Checkov install failed: {(stderr or stdout or str(pip_err))[:300]}",
-                "passed_checks": [], "failed_checks": [],
-                "summary": {"passed": 0, "failed": 0, "skipped": 0},
-            }, False
-        except Exception as install_err:
-            logger.error(f"checkov runtime install failed: {install_err}")
-            return {
-                "error": f"Checkov install failed: {str(install_err)[:300]}",
-                "passed_checks": [], "failed_checks": [],
-                "summary": {"passed": 0, "failed": 0, "skipped": 0},
-            }, False
+    except ImportError:
+        logger.warning("checkov not installed — Docker image needs to be rebuilt with checkov")
+        return {
+            "error": "Checkov is not installed. Run: pip install checkov",
+            "passed_checks": [], "failed_checks": [],
+            "summary": {"passed": 0, "failed": 0, "skipped": 0},
+        }, False
 
     # Exclude .checkov.yaml — checkov auto-discovers it and applies quiet:true
     scan_files = {
