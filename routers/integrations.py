@@ -970,40 +970,76 @@ def get_jira_issues(
     project_key: str,
     current_user: dict = Depends(get_current_user)
 ):
+    """List-view fetch for the Jira UI module.
+
+    Returns slim issue summaries (id, summary, status, assignee, priority,
+    type, updated, parent links) — NO description, NO comments, NO labels.
+    Description is loaded lazily via GET /jira/issue/{issue_key} when the
+    user clicks a row in the sidebar.
+
+    The RAG sync flow still uses the heavier `get_project_issues` because
+    embeddings need the full body text. This endpoint only serves the UI.
     """
-    Fetch Jira issues for a specific project
-    
-    Args:
-        project_key: The Jira project key (e.g., 'PROJ', 'DEV')
-        
-    Returns:
-        List of Jira issues from the specified project
-    """
-    logger.info(f"Fetching Jira issues for project_key: '{project_key}' (user: {current_user['id']})")
-    
+    logger.info(f"Fetching Jira issue summaries for project_key: '{project_key}' (user: {current_user['id']})")
+
     credentials = get_user_atlassian_credentials(current_user['id'])
-    
+
     if not credentials or not credentials.get('atlassian_api_token'):
         raise HTTPException(
             status_code=400,
             detail="Atlassian account not linked. Please link your account first."
         )
-    
+
     try:
         jira_service = JiraService(
             credentials['atlassian_domain'],
             credentials['atlassian_email'],
             credentials['atlassian_api_token']
         )
-        
+
         logger.info(f"Using Jira domain: {credentials['atlassian_domain']}")
-        issues = jira_service.get_project_issues(project_key)
-        logger.info(f"Successfully fetched {len(issues)} issues for project {project_key}")
+        issues = jira_service.get_project_issues_lite(project_key)
+        logger.info(f"Successfully fetched {len(issues)} issue summaries for project {project_key}")
         return {"issues": issues, "total": len(issues)}
-    
+
     except Exception as e:
         logger.error(f"Error fetching Jira issues for project {project_key}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/jira/issue/{issue_key}")
+def get_jira_issue_detail(
+    issue_key: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Lazy-load a single issue's full detail (description, reporter,
+    labels, story points, created date).
+
+    Called by the Jira UI module when the user selects a row from the list.
+    The list view itself uses `/jira/issues/{project_key}` which deliberately
+    omits these heavy fields so 50k-issue projects load quickly.
+    """
+    credentials = get_user_atlassian_credentials(current_user['id'])
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first."
+        )
+
+    try:
+        jira_service = JiraService(
+            credentials['atlassian_domain'],
+            credentials['atlassian_email'],
+            credentials['atlassian_api_token'],
+        )
+        issue = jira_service.get_issue_detail(issue_key)
+        return {"issue": issue}
+    except Exception as e:
+        msg = str(e)
+        logger.error(f"Error fetching Jira issue {issue_key}: {msg}")
+        # Surface a 404 if the upstream said not-found; otherwise 500.
+        status = 404 if "not found" in msg.lower() else 500
+        raise HTTPException(status_code=status, detail=msg)
 
 
 @router.get("/jira/boards/{project_key}")

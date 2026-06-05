@@ -275,7 +275,167 @@ class JiraService:
         except requests.exceptions.RequestException as e:
             logger.error(f"Error fetching Jira issues: {e}")
             raise Exception(f"Failed to fetch Jira issues: {str(e)}")
-    
+
+    def get_project_issues_lite(self, project_key: str) -> List[Dict]:
+        """List-view variant of get_project_issues — fetches ONLY the fields
+        the Jira UI sidebar row needs (id + summary + type + status +
+        assignee + priority + updated + parent links). Description, comments,
+        labels, story points, reporter, and created timestamp are deliberately
+        skipped here and lazy-fetched per-issue by `get_issue_detail` when the
+        user clicks a row.
+
+        Why this matters: on the EPAY project (~50k issues), the full-fat
+        fetch produced ~500 sequential round-trips with multi-paragraph
+        descriptions in every payload — minutes of wall time before the
+        sidebar could render. This variant slashes the per-page payload AND
+        bumps page_size to 1000, dropping the round-trip count to ~50.
+
+        The RAG sync path (services/sync_service.py:get_project_issues call)
+        still uses the full fetch — embeddings need the description text.
+        """
+        fields = [
+            "summary",
+            "status",
+            "assignee",
+            "priority",
+            "issuetype",
+            "updated",
+            "parent",
+            # Epic Link on classic / company-managed projects. Team-managed
+            # projects unify under `parent`; we ask for both so the frontend
+            # can resolve hierarchy regardless of project style.
+            "customfield_10014",
+        ]
+
+        jql = f"project = {project_key} ORDER BY updated DESC"
+        url = f"{self.base_url}/rest/api/3/search/jql"
+        page_size = 1000  # Atlassian /search/jql allows up to 5000 per page
+                          # with a slim field set; 1000 is the safe middle
+                          # ground that consistently completes under their
+                          # per-request timeout.
+        next_page_token: Optional[str] = None
+        all_issues: List[Dict] = []
+        batch_num = 0
+
+        logger.info(f"[Jira-lite] Fetching issue summaries from {url} with JQL: {jql}")
+
+        try:
+            while True:
+                batch_num += 1
+                params: Dict[str, str] = {
+                    "jql": jql,
+                    "maxResults": str(page_size),
+                    "fields": ",".join(fields),
+                }
+                if next_page_token:
+                    params["nextPageToken"] = next_page_token
+
+                response = self._session.get(
+                    url,
+                    headers=self.headers,
+                    auth=self.auth,
+                    params=params,
+                    timeout=30,
+                )
+
+                if response.status_code == 400:
+                    try:
+                        error_data = response.json()
+                        error_msg = error_data.get('errorMessages', ['Invalid JQL query'])[0]
+                        raise Exception(f"Invalid request: {error_msg}")
+                    except Exception as parse_err:
+                        if "Invalid request" in str(parse_err):
+                            raise
+                        raise Exception(f"Invalid request for project '{project_key}'")
+                elif response.status_code == 404:
+                    raise Exception(f"Project '{project_key}' not found.")
+                elif response.status_code == 410:
+                    raise Exception(f"Project '{project_key}' may be archived or inaccessible.")
+
+                response.raise_for_status()
+                result = response.json()
+                issues = result.get('issues', []) or []
+                all_issues.extend(issues)
+
+                is_last = result.get('isLast')
+                next_page_token = result.get('nextPageToken')
+
+                logger.info(
+                    f"[Jira-lite] project={project_key} batch {batch_num}: {len(issues)} issues "
+                    f"(running total={len(all_issues)}, isLast={is_last})"
+                )
+
+                if is_last is True or not next_page_token or len(issues) == 0:
+                    break
+
+                # Same 500-batch defensive cap. At page_size=1000 this means we
+                # surface up to 500,000 issues before stopping — well above any
+                # realistic project.
+                if batch_num >= 500:
+                    logger.warning(
+                        f"[Jira-lite] project={project_key} reached batch cap (500). "
+                        f"Stopping at {len(all_issues)} issues."
+                    )
+                    break
+
+            logger.info(
+                f"[Jira-lite] DONE — {len(all_issues)} issue summaries from "
+                f"project {project_key} across {batch_num} batches"
+            )
+            return all_issues
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[Jira-lite] HTTP error: {e}")
+            raise Exception(f"Failed to fetch Jira issues: {str(e)}")
+
+    def get_issue_detail(self, issue_key: str) -> Dict:
+        """Fetch full detail for a single Jira issue.
+
+        Pair this with `get_project_issues_lite` for the Jira UI's
+        click-to-expand pattern: the sidebar loads slim summaries, and
+        clicking a row fires this endpoint to lazy-load the description,
+        reporter, labels, story points, and created date that the detail
+        pane renders.
+
+        Returns the raw issue dict from /rest/api/3/issue/{key}. The
+        frontend maps `fields.description` (ADF) through the same
+        `extractTextFromADF` helper it uses on the list path.
+        """
+        url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
+        # Explicit field list so we don't pull every custom field the
+        # project has configured (Atlassian's default `*all` can pull
+        # hundreds of fields on legacy projects, defeating the point).
+        fields = [
+            "summary",
+            "description",
+            "status",
+            "assignee",
+            "reporter",
+            "priority",
+            "issuetype",
+            "created",
+            "updated",
+            "labels",
+            "customfield_10016",
+            "customfield_10014",
+            "parent",
+        ]
+        try:
+            response = self._session.get(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                params={"fields": ",".join(fields)},
+                timeout=30,
+            )
+            if response.status_code == 404:
+                raise Exception(f"Issue '{issue_key}' not found.")
+            response.raise_for_status()
+            return response.json()
+        except requests.exceptions.RequestException as e:
+            logger.error(f"[Jira] HTTP error fetching issue {issue_key}: {e}")
+            raise Exception(f"Failed to fetch Jira issue {issue_key}: {str(e)}")
+
     def get_project_issue_types(self, project_key: str) -> List[Dict]:
         """
         Fetch available issue types for a specific project
