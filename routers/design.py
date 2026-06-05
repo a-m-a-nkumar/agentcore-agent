@@ -1978,7 +1978,7 @@ async def generate_lucid_prompt_stream(
         try:
             yield from _invoke_claude_stream(
                 system_prompt, user_message, LUCID_PROMPT_MODEL_ID, LUCID_PROMPT_MAX_TOKENS,
-                user_id=_current_user.get("id"),
+                user_id=user_id,
                 token_source="routers/design:generate_lucid_prompt_stream",
             )
             stream_ok = True
