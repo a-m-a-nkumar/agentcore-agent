@@ -1,0 +1,162 @@
+[
+  {
+    "id": "kyc-doc-extract",
+    "title": "AI-powered KYC document extraction",
+    "sponsor": "Aanya Verma, VP Onboarding Risk",
+    "quadrant": "Accelerator",
+    "axes": { "impact": 4.3, "speed": 3.2 },
+    "sub_scores": {
+      "financial": 4,
+      "productivity": 4,
+      "intent": 5,
+      "complexity": 3,
+      "data_platform": 3,
+      "measurement": 4
+    },
+    "status": "Pursue",
+    "one_liner": "Cut onboarding cycle from 9 days to 3 across ~80 analysts.",
+    "assessed_at": "2026-04-12",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nAutomate KYC document extraction (passports, utility bills, corporate ownership docs) using OCR + LLM extraction to reduce analyst time per case by 45-60%. Targets a 70% reduction in onboarding cycle time (from 9 days to 3) for an 80-analyst team. Strong data position, regulator acceptance is the binding constraint.\n\n## Qualification\n- AI/ML fit: Yes — document understanding is a pattern-recognition problem with abundant labelled training data\n- Sponsor: Aanya Verma, VP Onboarding Risk (function-level)\n- Scope: Single workflow (document review and extraction) within Onboarding Risk\n- Duplication check: Confirmed unique — Fraud team has unrelated transaction-screening models\n\n## Value\n### Quantitative\n- Financial impact (annual): $2.5M – $4.2M, planning case $3.2M\n- Basis: 80 analysts × $95k loaded × 40% time-on-extraction × 50% time saved\n- Productivity: 80 analysts, 40% of their work, ~64,000 hours/year\n- Cycle time: 9 days → 3 days expected\n\n### Qualitative\n- Strategic: aligns with FY26 onboarding-experience commitment\n- Regulatory posture: must hold FATF / FINRA reviewer-acceptance line\n\n## Viability\n\n| Dimension | Status | Notes |\n|-----------|--------|-------|\n| Data | Green | 24 months of labelled extractions, 380k docs |\n| Platform | Green | AWS Textract + custom LLM layer proven |\n| Resources & Skills | Yellow | One MLE in Onboarding; needs +1 ML reviewer |\n| Budget | Green | FY26 funded |\n| Timeline | Green | 14-week pilot to credible MVP |\n\n## Scoring\n\n### Business Impact\n| Sub-dimension | Score | Confidence | Rationale |\n|---------------|-------|------------|-----------|\n| Financial Impact | 4/5 | High | $3M+ in capacity creation against funded baseline |\n| Productivity Scale | 4/5 | High | Whole 80-analyst function, 40% of their work |\n| Business Intent | 5/5 | High | Board-mandated onboarding-experience commitment |\n\nAxis average: 4.3 — High\n\n### Speed to Value\n| Sub-dimension | Score | Confidence | Rationale |\n|---------------|-------|------------|-----------|\n| Implementation Complexity | 3/5 | Medium | OCR proven, LLM layer needs domain calibration |\n| Data & Platform Readiness | 3/5 | Medium | Data green; platform requires AWS Textract approval |\n| Ease of Measuring Success | 4/5 | High | Cycle time and extraction accuracy both tracked today |\n\nAxis average: 3.3 — Medium\n\n## Placement\n**Quadrant: Accelerator (High Impact, Medium Speed)**\n\nReal project, plan now. Not a quick win because regulator acceptance gate adds 4-6 weeks of compliance review, and the LLM extraction layer requires domain calibration before steady-state accuracy is hit.\n\n## Recommendation\n**Pursue.** Fund FY26 Q2-Q3. Conditions: secure FATF reviewer sign-off on AI-assisted extraction by end of Q2; add one ML reviewer FTE to Onboarding Risk.\n\n---\nSources: McKinsey *Generative AI in KYC and onboarding* (2024); FATF guidance on digital identity (2023)."
+  },
+  {
+    "id": "code-review-copilot",
+    "title": "Code review co-pilot rollout",
+    "sponsor": "Daniel Foster, Director Developer Productivity",
+    "quadrant": "Quick Win",
+    "axes": { "impact": 3.8, "speed": 4.4 },
+    "sub_scores": {
+      "financial": 3,
+      "productivity": 4,
+      "intent": 4,
+      "complexity": 5,
+      "data_platform": 4,
+      "measurement": 4
+    },
+    "status": "Pursue",
+    "one_liner": "GitHub Copilot Enterprise across 1,200 engineers; vendor product, low complexity.",
+    "assessed_at": "2026-04-22",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nRoll out GitHub Copilot Enterprise across 1,200 engineering staff. Vendor SaaS, minimal integration work, established benchmarks for productivity gains. Decision is essentially a budget + change-management call, not a technical one.\n\n## Qualification\n- AI/ML fit: Yes — code completion / suggestion is the canonical generative AI use case\n- Sponsor: Daniel Foster, Director Developer Productivity\n- Scope: Engineering function (1,200 engineers, all groups)\n- Duplication check: Confirmed unique — no parallel coding-assistant pilots\n\n## Value\n### Quantitative\n- Financial impact (annual): $1.5M – $3.5M, planning case $2.2M (productivity gain at 8-15% on coding tasks)\n- Basis: 1,200 engineers × $180k loaded × 30% coding time × ~12% productivity gain\n- Productivity: 1,200 engineers, ~12% on the time they actually code\n\n### Qualitative\n- Recruiting: AI tooling is a stated dev-experience expectation\n- Learning: organizational competency in AI-assisted workflows\n\n## Viability\n\n| Dimension | Status | Notes |\n|-----------|--------|-------|\n| Data | Green | Not required — vendor model |\n| Platform | Green | GitHub Enterprise already in use |\n| Resources & Skills | Green | Vendor-managed |\n| Budget | Green | $1.4M annual subscription, fundable |\n| Timeline | Green | 6 weeks to general availability |\n\n## Scoring\n\n### Business Impact\n| Sub-dimension | Score | Confidence | Rationale |\n|---------------|-------|------------|-----------|\n| Financial Impact | 3/5 | Medium | $2M range — defensible but variance is wide |\n| Productivity Scale | 4/5 | High | 1,200 engineers — material scale |\n| Business Intent | 4/5 | High | Stated VP priority, dev-experience commitment |\n\nAxis average: 3.7 — High\n\n### Speed to Value\n| Sub-dimension | Score | Confidence | Rationale |\n|---------------|-------|------------|-----------|\n| Implementation Complexity | 5/5 | High | Vendor SaaS, near-zero build |\n| Data & Platform Readiness | 4/5 | High | GitHub already in use |\n| Ease of Measuring Success | 4/5 | High | Cycle time, PR throughput, dev-survey all baseline-able |\n\nAxis average: 4.3 — High\n\n## Placement\n**Quadrant: Quick Win.** Do this first. Six-week rollout, near-zero technical risk, baseline measurement plan exists.\n\n## Recommendation\n**Pursue.** Begin pilot Q2 with one BU (200 engineers), expand based on baseline measurement at week 8.\n\n---\nSources: GitHub *Measuring the impact of AI coding assistants* (2024); McKinsey *The state of AI* (2025)."
+  },
+  {
+    "id": "fraud-explanation-gen",
+    "title": "Real-time fraud explanation generation",
+    "sponsor": "Marcus Tan, SVP Fraud & Risk",
+    "quadrant": "Transformational Value",
+    "axes": { "impact": 4.7, "speed": 1.9 },
+    "sub_scores": {
+      "financial": 5,
+      "productivity": 4,
+      "intent": 5,
+      "complexity": 1,
+      "data_platform": 2,
+      "measurement": 3
+    },
+    "status": "Pursue with conditions",
+    "one_liner": "LLM-generated SR 11-7-compliant explanations for declined transactions.",
+    "assessed_at": "2026-03-28",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nGenerate SR 11-7-compliant natural-language explanations for declined card and ACH transactions, using an LLM grounded on the underlying scoring model's feature attributions. Reduces customer-service callbacks on declines by 30-40% and gives Risk a defensible model-governance posture. Multi-quarter bet — model-governance approval and regulator acceptance are gating.\n\n## Qualification\n- AI/ML fit: Yes — natural-language generation grounded on structured signals\n- Sponsor: Marcus Tan, SVP Fraud & Risk\n- Scope: Decline-letter generation across all transaction channels\n- Duplication check: Confirmed unique — no other LLM-explanation work in flight\n\n## Value\n### Quantitative\n- Financial impact (annual): $8M – $14M, planning case $11M (callbacks deflected + reduced regulator-inquiry cost)\n- Basis: ~700k declines/yr × 18% callback rate × $40 cost per callback = baseline $5M cost; 35% deflection target\n- Productivity: Indirect — frees up service team capacity rather than direct savings\n\n### Qualitative\n- Regulatory: meaningfully strengthens SR 11-7 documentation posture\n- Risk: brand-protective when scaled correctly; brand-destructive if mis-deployed\n\n## Viability\n\n| Dimension | Status | Notes |\n|-----------|--------|-------|\n| Data | Yellow | Score-attribution feed exists but only on 60% of decline paths |\n| Platform | Red | LLM grounding layer must be built — net new |\n| Resources & Skills | Yellow | Need dedicated ML risk lead; not yet identified |\n| Budget | Yellow | $1.8M ask, board-level approval needed |\n| Timeline | Red | 9-12 months to credible production with SR 11-7 sign-off |\n\n## Scoring\n\n### Business Impact\n| Sub-dimension | Score | Confidence | Rationale |\n|---------------|-------|------------|-----------|\n| Financial Impact | 5/5 | High | $10M+ on a credible benchmark range |\n| Productivity Scale | 4/5 | Medium | Service-side capacity, not direct headcount |\n| Business Intent | 5/5 | High | Board-attention regulatory posture |\n\nAxis average: 4.7 — High\n\n### Speed to Value\n| Sub-dimension | Score | Confidence | Rationale |\n|---------------|-------|------------|-----------|\n| Implementation Complexity | 1/5 | High | Novel build, model-governance + regulator review |\n| Data & Platform Readiness | 2/5 | High | Grounding layer is net new; attribution feed gapped |\n| Ease of Measuring Success | 3/5 | Medium | Callback rate clear; SR 11-7 documentation quality harder to measure |\n\nAxis average: 2.0 — Low\n\n## Placement\n**Quadrant: Transformational Value (Very High Impact, Low Speed).** Multi-quarter bet. Worth pursuing because the upside is real and the regulatory posture is uniquely defensible. Not a quick win.\n\n## Recommendation\n**Pursue with conditions.** Conditions: identify dedicated ML risk lead by end of Q2; secure regulator pre-read on the approach; close the score-attribution gap on the remaining 40% of decline paths.\n\n---\nSources: Federal Reserve *Generative AI in fraud detection* (2024); EU AI Act final text Article 6."
+  },
+  {
+    "id": "it-helpdesk-bot",
+    "title": "Internal IT helpdesk bot",
+    "sponsor": "Sarah Cole, Manager IT Operations",
+    "quadrant": "Incremental Growth",
+    "axes": { "impact": 2.4, "speed": 4.6 },
+    "sub_scores": {
+      "financial": 2,
+      "productivity": 3,
+      "intent": 2,
+      "complexity": 5,
+      "data_platform": 4,
+      "measurement": 5
+    },
+    "status": "Pursue",
+    "one_liner": "Standard vendor chatbot for password resets and access requests.",
+    "assessed_at": "2026-02-08",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nDeploy a vendor chatbot for L1 IT helpdesk tickets (password resets, access requests, basic how-to). 25-35% deflection expected on the L1 stream, freeing the IT helpdesk team for L2/L3 work. Low-risk, low-effort, modest upside.\n\n## Qualification\n- AI/ML fit: Conditional — partly rule-based, partly intent-classification\n- Sponsor: Sarah Cole, Manager IT Operations (sub-function level)\n- Scope: L1 helpdesk only\n- Duplication check: Confirmed unique\n\n## Value\n### Quantitative\n- Financial impact (annual): $200k – $400k, planning case $300k\n- Basis: 30% L1 deflection × current L1 staffing cost\n- Productivity: 14 helpdesk agents, ~40% of their work is L1\n\n### Qualitative\n- Pilot vehicle for org-level conversational AI tooling\n\n## Placement\n**Quadrant: Incremental Growth (Low Impact, High Speed).** Do it, but it's a backlog item, not a priority.\n\n## Recommendation\n**Pursue.** Standard vendor (ServiceNow Virtual Agent or similar). 8-week rollout. Don't expect transformative impact.\n\n---\nSources: Gartner *Conversational AI for IT service management* (2024)."
+  },
+  {
+    "id": "ai-ad-copy",
+    "title": "AI-generated ad copy A/B variants",
+    "sponsor": "Marketing manager (no exec sponsor)",
+    "quadrant": "Defer",
+    "axes": { "impact": 2.1, "speed": 2.3 },
+    "sub_scores": {
+      "financial": 2,
+      "productivity": 2,
+      "intent": 2,
+      "complexity": 2,
+      "data_platform": 3,
+      "measurement": 2
+    },
+    "status": "Decline",
+    "one_liner": "No exec sponsor; existing tooling already covers; solution-in-search-of-problem.",
+    "assessed_at": "2026-03-05",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nGenerate A/B copy variants for paid social and display ad campaigns using LLM. Pitched as productivity gain for the marketing copy team. Investigation surfaced that existing tooling (Jasper, Copy.ai, our own templates) already covers 80% of the same workflow and no exec sponsor is willing to push for it.\n\n## Qualification\n- AI/ML fit: Yes (trivially)\n- Sponsor: Marketing manager — no VP backing\n- Scope: Marketing copy team only (4 people)\n- Duplication check: Significant overlap with existing Jasper subscription\n\n## Recommendation\n**Decline.** No clear unmet need, no exec sponsor, low scale. Resources better spent on use cases with real demand-pull.\n\n---\nSources: Internal benchmarking on existing copy tooling."
+  },
+  {
+    "id": "treasury-cash-forecasting",
+    "title": "AI-augmented treasury cash forecasting",
+    "sponsor": "James Whitfield, VP Treasury",
+    "quadrant": "Accelerator",
+    "axes": { "impact": 4.0, "speed": 3.0 },
+    "sub_scores": {
+      "financial": 4,
+      "productivity": 3,
+      "intent": 5,
+      "complexity": 3,
+      "data_platform": 3,
+      "measurement": 3
+    },
+    "status": "Pursue",
+    "one_liner": "ML-augmented short-horizon cash forecasting across 200+ accounts.",
+    "assessed_at": "2026-05-01",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nReplace the spreadsheet-driven 30-day cash forecast with an ML model trained on transaction history, expected receivables, and seasonal patterns across 200+ corporate bank accounts. Targets a 40% reduction in forecast error and frees treasury analyst time for scenario work rather than spreadsheet hygiene.\n\n## Recommendation\n**Pursue.** Six-month build, internal ML team available, data is already in the data warehouse. Sponsor is CFO-adjacent.\n\n---\nSources: BCG *AI in corporate treasury* (2024)."
+  },
+  {
+    "id": "underwriting-doc-review",
+    "title": "Underwriting document triage assistant",
+    "sponsor": "Linda Park, Director Commercial Underwriting",
+    "quadrant": "Accelerator",
+    "axes": { "impact": 3.9, "speed": 3.4 },
+    "sub_scores": {
+      "financial": 3,
+      "productivity": 4,
+      "intent": 5,
+      "complexity": 3,
+      "data_platform": 4,
+      "measurement": 3
+    },
+    "status": "Pursue with conditions",
+    "one_liner": "Pre-triage incoming underwriting packets, surface anomalies, generate exception summary.",
+    "assessed_at": "2026-05-14",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nAuto-triage incoming commercial underwriting packets — financial statements, prior-year tax returns, ownership disclosures, exception forms. The assistant flags anomalies, surfaces missing documents, and generates an exception summary an underwriter reviews. Targets 35% reduction in first-pass review time across a 24-person underwriting team.\n\n## Recommendation\n**Pursue with conditions.** Conditions: agree on which anomaly types are auto-routable versus human-reviewed; secure compliance sign-off on the model's audit trail.\n\n---\nSources: McKinsey *AI in commercial underwriting* (2024)."
+  },
+  {
+    "id": "regulatory-change-monitor",
+    "title": "Regulatory change monitor",
+    "sponsor": "David Liu, Chief Compliance Officer",
+    "quadrant": "Accelerator",
+    "axes": { "impact": 4.1, "speed": 2.8 },
+    "sub_scores": {
+      "financial": 3,
+      "productivity": 4,
+      "intent": 5,
+      "complexity": 2,
+      "data_platform": 3,
+      "measurement": 3
+    },
+    "status": "Pursue with conditions",
+    "one_liner": "Monitor regulatory publications, summarize changes, route to affected functions.",
+    "assessed_at": "2026-05-19",
+    "assessed_by": "Joseph",
+    "report_markdown": "# Use Case Feasibility Report\n\n## Summary\nContinuously monitor U.S. and EU regulatory publications (OCC, Fed, FINRA, ECB, EBA, CFPB), summarize relevant changes against the firm's policy taxonomy, and route the right summary to the right policy owner. Avoids the current manual scan that misses changes ~20% of the time.\n\n## Recommendation\n**Pursue with conditions.** Conditions: compliance leadership signs off on the model's accuracy floor before any auto-routing; human-in-the-loop required for changes affecting customer-facing products.\n\n---\nSources: KPMG *RegTech and the regulatory change challenge* (2024)."
+  }
+]

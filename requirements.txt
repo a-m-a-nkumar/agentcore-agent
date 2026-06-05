@@ -1,0 +1,32 @@
+bedrock-agentcore==1.1.1
+strands-agents[openai]
+boto3>=1.34.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.34.2
+python-docx>=1.1.0,<2.0.0
+cairosvg>=2.7,<3.0  # SAD DOCX export: SVG → PNG for embedded architecture diagram
+pypdf>=4.0.0
+python-multipart>=0.0.6,<1.0.0
+python-dotenv>=1.0.0
+requests>=2.31.0,<3.0.0
+PyJWT>=2.8.0,<3.0.0
+cryptography>=42.0.8
+jinja2>=3.0.0
+psycopg2-binary>=2.9.9
+langfuse>=2.0.0
+mcp>=1.0.0
+httpx>=0.27.0
+langchain-text-splitters>=0.3.0
+tiktoken>=0.7.0
+
+# Joseph (consulting agent) — web fetch text strip + optional Tavily search + optional PDF export
+beautifulsoup4>=4.12.0
+tavily-python>=0.3.0  # optional; web_search tool falls back to mock benchmarks if TAVILY_API_KEY unset
+reportlab>=4.0.0  # optional; PDF export falls back to markdown download if absent
+
+# Terraform security scanning. NOT included here because checkov 3.2.526
+# pins boto3==1.35.49, which conflicts with bedrock-agentcore>=1.1.1 (needs
+# boto3>=1.40.52). Install separately in environments that need it:
+#   pip install -r requirements-terraform.txt
+# The terraform_generator router gracefully reports "checkov_unavailable"
+# when the import fails (see services/checkov_service.py:120-128).

@@ -1,0 +1,122 @@
+default_agent: pm_agent
+agents:
+  pm_agent:
+    name: pm_agent
+    language: python
+    node_version: null
+    entrypoint: my_agent.py
+    deployment_type: container
+    runtime_type: null
+    platform: linux/amd64
+    container_runtime: docker
+    source_path: .
+    aws:
+      execution_role: arn:aws:iam::590184044598:role/sdlc-orch-dev-us-east-1-agentcore-role
+      execution_role_auto_create: false
+      account: '590184044598'
+      region: us-east-1
+      ecr_repository: 590184044598.dkr.ecr.us-east-1.amazonaws.com/sdlc-dev-repo
+      ecr_auto_create: false
+      s3_path: null
+      s3_auto_create: true
+      network_configuration:
+        network_mode: PUBLIC
+        network_mode_config: null
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: pm_agent-uDlkiNFagv
+      agent_arn: arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/pm_agent-uDlkiNFagv
+      agent_session_id: null
+    codebuild:
+      project_name: bedrock-agentcore-my_agent-builder
+      execution_role: null
+      source_bucket: bedrock-agentcore-codebuild-sources-590184044598-us-east-1
+    memory:
+      mode: STM_ONLY
+      memory_id: sdlc_dev_agentcore_memory-VF74Yf64ZB
+      memory_arn: arn:aws:bedrock-agentcore:us-east-1:590184044598:memory/sdlc_dev_agentcore_memory-VF74Yf64ZB
+      memory_name: sdlc_dev_agentcore_memory
+      event_expiry_days: 30
+      first_invoke_memory_check_done: false
+      was_created_by_toolkit: false
+    identity:
+      credential_providers: []
+      workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
+    authorizer_configuration: null
+    request_header_configuration: null
+    oauth_configuration: null
+    api_key_env_var_name: null
+    api_key_credential_provider_name: null
+    is_generated_by_agentcore_create: false
+  analyst_agent:
+    name: analyst_agent
+    language: python
+    node_version: null
+    entrypoint: analyst_agent.py
+    deployment_type: container
+    runtime_type: null
+    platform: linux/amd64
+    container_runtime: docker
+    source_path: .bedrock_agentcore/analyst_agent
+    aws:
+      execution_role: arn:aws:iam::590184044598:role/sdlc-orch-dev-us-east-1-agentcore-role
+      execution_role_auto_create: false
+      account: '590184044598'
+      region: us-east-1
+      ecr_repository: 590184044598.dkr.ecr.us-east-1.amazonaws.com/sdlc-dev-repo
+      ecr_auto_create: false
+      s3_path: null
+      s3_auto_create: true
+      network_configuration:
+        network_mode: PUBLIC
+        network_mode_config: null
+      protocol_configuration:
+        server_protocol: HTTP
+      observability:
+        enabled: true
+      lifecycle_configuration:
+        idle_runtime_session_timeout: null
+        max_lifetime: null
+    bedrock_agentcore:
+      agent_id: analyst_agent-JAa3wMFKOK
+      agent_arn: arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/analyst_agent-JAa3wMFKOK
+      agent_session_id: null
+    codebuild:
+      project_name: bedrock-agentcore-analyst_agent-builder
+      execution_role: null
+      source_bucket: bedrock-agentcore-codebuild-sources-590184044598-us-east-1
+    memory:
+      mode: STM_ONLY
+      memory_id: sdlc_dev_agentcore_memory-VF74Yf64ZB
+      memory_arn: arn:aws:bedrock-agentcore:us-east-1:590184044598:memory/sdlc_dev_agentcore_memory-VF74Yf64ZB
+      memory_name: sdlc_dev_agentcore_memory
+      event_expiry_days: 30
+      first_invoke_memory_check_done: false
+      was_created_by_toolkit: false
+    identity:
+      credential_providers: []
+      workload: null
+    aws_jwt:
+      enabled: false
+      audiences: []
+      signing_algorithm: ES384
+      issuer_url: null
+      duration_seconds: 300
+    authorizer_configuration: null
+    request_header_configuration: null
+    oauth_configuration: null
+    api_key_env_var_name: null
+    api_key_credential_provider_name: null
+    is_generated_by_agentcore_create: false

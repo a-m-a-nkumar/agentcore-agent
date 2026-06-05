@@ -1,0 +1,935 @@
+"""
+Database helper functions for vector database tables
+Handles operations for confluence_pages, jira_issues, and document_embeddings
+"""
+
+from db_helper import get_db_connection, release_db_connection
+from psycopg2.extras import RealDictCursor
+from typing import List, Dict, Optional, Any
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================
+# Confluence Pages Functions
+# ============================================
+
+def upsert_confluence_page(
+    project_id: str,
+    user_id: str,
+    page_id: str,
+    space_key: str,
+    title: str,
+    url: str,
+    version_number: int,
+    last_modified_at: str
+) -> Dict:
+    """Insert or update a Confluence page"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO confluence_pages (
+                project_id, user_id, page_id, space_key, title, url,
+                version_number, last_modified_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (project_id, page_id)
+            DO UPDATE SET
+                title = EXCLUDED.title,
+                url = EXCLUDED.url,
+                version_number = EXCLUDED.version_number,
+                last_modified_at = EXCLUDED.last_modified_at,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+        """, (project_id, user_id, page_id, space_key, title, url, version_number, last_modified_at))
+        
+        result = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        
+        return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
+
+
+def get_confluence_page(project_id: str, page_id: str) -> Optional[Dict]:
+    """Get a Confluence page by project_id and page_id"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM confluence_pages
+            WHERE project_id = %s AND page_id = %s
+        """, (project_id, page_id))
+
+        result = cursor.fetchone()
+        cursor.close()
+
+        return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
+
+
+def get_all_confluence_pages_metadata(project_id: str) -> Dict[str, Dict]:
+    """Bulk fetch page_id -> {version_number, ...} for all pages in a project (single DB call)"""
+    logger.info(f"[BULK_FETCH] Fetching all Confluence page metadata for project {project_id} in one query")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT page_id, version_number, updated_at
+            FROM confluence_pages WHERE project_id = %s
+        """, (project_id,))
+        results = cursor.fetchall()
+        cursor.close()
+        metadata_map = {r['page_id']: dict(r) for r in results}
+        logger.info(f"[BULK_FETCH] Loaded {len(metadata_map)} Confluence page metadata records in 1 DB call (instead of {len(metadata_map)} individual calls)")
+        return metadata_map
+    finally:
+        release_db_connection(conn)
+
+
+def get_sync_status_counts(project_id: str) -> Dict:
+    """Get page count, issue count, embedding count, and last sync times in ONE query (1 DB call instead of 3)"""
+    logger.info(f"[OPTIMIZATION] Fetching all sync status counts for project {project_id} in a single query")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM confluence_pages WHERE project_id = %s) as page_count,
+                (SELECT MAX(updated_at) FROM confluence_pages WHERE project_id = %s) as last_confluence_sync,
+                (SELECT COUNT(*) FROM jira_issues WHERE project_id = %s) as issue_count,
+                (SELECT MAX(updated_at) FROM jira_issues WHERE project_id = %s) as last_jira_sync,
+                (SELECT COUNT(*) FROM document_embeddings WHERE project_id = %s) as embedding_count
+        """, (project_id, project_id, project_id, project_id, project_id))
+        result = cursor.fetchone()
+        cursor.close()
+        logger.info(f"[OPTIMIZATION] Got all sync counts in 1 DB call: {result['page_count']} pages, {result['issue_count']} issues, {result['embedding_count']} embeddings")
+        return dict(result)
+    finally:
+        release_db_connection(conn)
+
+
+def get_all_confluence_pages(project_id: str) -> List[Dict]:
+    """Get all Confluence pages for a project"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM confluence_pages
+            WHERE project_id = %s
+            ORDER BY last_modified_at DESC
+        """, (project_id,))
+        
+        results = cursor.fetchall()
+        cursor.close()
+        
+        return [dict(row) for row in results]
+    finally:
+        release_db_connection(conn)
+
+
+
+# ============================================
+# Jira Issues Functions
+# ============================================
+
+def upsert_jira_issue(
+    project_id: str,
+    user_id: str,
+    issue_key: str,
+    issue_id: str,
+    project_key: str,
+    summary: str,
+    url: str,
+    issue_type: Optional[str] = None,
+    status: Optional[str] = None,
+    priority: Optional[str] = None,
+    story_points: Optional[float] = None,
+    original_estimate_seconds: Optional[int] = None,
+    time_spent_seconds: Optional[int] = None,
+    remaining_estimate_seconds: Optional[int] = None,
+    sprint_name: Optional[str] = None,
+    sprint_id: Optional[str] = None,
+    labels: Optional[List[str]] = None,
+    components: Optional[List[str]] = None,
+    created_date: Optional[str] = None,
+    updated_date: str = None,
+    resolved_date: Optional[str] = None,
+    actual_duration_days: Optional[float] = None,
+    metadata: Optional[Dict] = None
+) -> Dict:
+    """Insert or update a Jira issue"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            INSERT INTO jira_issues (
+                project_id, user_id, issue_key, issue_id, project_key, summary, url,
+                issue_type, status, priority, story_points,
+                original_estimate_seconds, time_spent_seconds, remaining_estimate_seconds,
+                sprint_name, sprint_id, labels, components,
+                created_date, updated_date, resolved_date, actual_duration_days, metadata
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (project_id, issue_key)
+            DO UPDATE SET
+                summary = EXCLUDED.summary,
+                url = EXCLUDED.url,
+                issue_type = EXCLUDED.issue_type,
+                status = EXCLUDED.status,
+                priority = EXCLUDED.priority,
+                story_points = EXCLUDED.story_points,
+                original_estimate_seconds = EXCLUDED.original_estimate_seconds,
+                time_spent_seconds = EXCLUDED.time_spent_seconds,
+                remaining_estimate_seconds = EXCLUDED.remaining_estimate_seconds,
+                sprint_name = EXCLUDED.sprint_name,
+                sprint_id = EXCLUDED.sprint_id,
+                labels = EXCLUDED.labels,
+                components = EXCLUDED.components,
+                updated_date = EXCLUDED.updated_date,
+                resolved_date = EXCLUDED.resolved_date,
+                actual_duration_days = EXCLUDED.actual_duration_days,
+                metadata = EXCLUDED.metadata,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING *
+        """, (
+            project_id, user_id, issue_key, issue_id, project_key, summary, url,
+            issue_type, status, priority, story_points,
+            original_estimate_seconds, time_spent_seconds, remaining_estimate_seconds,
+            sprint_name, sprint_id, labels, components,
+            created_date, updated_date, resolved_date, actual_duration_days,
+            json.dumps(metadata) if metadata else '{}'
+        ))
+        
+        result = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+        
+        return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
+
+
+def get_jira_issue(project_id: str, issue_key: str) -> Optional[Dict]:
+    """Get a Jira issue by project_id and issue_key"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM jira_issues
+            WHERE project_id = %s AND issue_key = %s
+        """, (project_id, issue_key))
+
+        result = cursor.fetchone()
+        cursor.close()
+
+        return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
+
+
+def get_all_jira_issues_metadata(project_id: str) -> Dict[str, Dict]:
+    """Bulk fetch issue_key -> {updated_date, ...} for all issues in a project (single DB call)"""
+    logger.info(f"[BULK_FETCH] Fetching all Jira issue metadata for project {project_id} in one query")
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT issue_key, updated_date, updated_at
+            FROM jira_issues WHERE project_id = %s
+        """, (project_id,))
+        results = cursor.fetchall()
+        cursor.close()
+        metadata_map = {r['issue_key']: dict(r) for r in results}
+        logger.info(f"[BULK_FETCH] Loaded {len(metadata_map)} Jira issue metadata records in 1 DB call (instead of {len(metadata_map)} individual calls)")
+        return metadata_map
+    finally:
+        release_db_connection(conn)
+
+
+def get_all_jira_issues(project_id: str) -> List[Dict]:
+    """Get all Jira issues for a project"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT * FROM jira_issues
+            WHERE project_id = %s
+            ORDER BY updated_date DESC
+        """, (project_id,))
+        
+        results = cursor.fetchall()
+        cursor.close()
+        
+        return [dict(row) for row in results]
+    finally:
+        release_db_connection(conn)
+
+
+
+# ============================================
+# Document Embeddings Functions
+# ============================================
+
+def find_existing_embedding(
+    source_type: str,
+    source_id: str,
+    chunk_index: int
+) -> Optional[List[float]]:
+    """
+    Check if an embedding already exists for this content from ANY project.
+    Used to avoid redundant Bedrock API calls when multiple projects
+    sync the same Confluence space or Jira project.
+
+    Uses the 4-column index: (source_type, source_id, chunk_index, content_hash)
+
+    Args:
+        source_type: 'confluence' or 'jira'
+        source_id: Page ID or Issue Key
+        chunk_index: Chunk index within the document
+
+    Returns:
+        The embedding vector as a list of floats if found, None otherwise
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            SELECT embedding
+            FROM document_embeddings
+            WHERE source_type = %s AND source_id = %s AND chunk_index = %s
+            LIMIT 1
+        """, (source_type, source_id, chunk_index))
+        result = cursor.fetchone()
+        cursor.close()
+        if result:
+            raw = result['embedding']
+            logger.info(f"[DEDUP] Found existing embedding for {source_type} {source_id} chunk {chunk_index} (type={type(raw).__name__})")
+            # pgvector returns embedding as a string like "[0.1,0.2,...]"
+            # Parse it back to a list of floats for insert_document_embedding()
+            if isinstance(raw, str):
+                parsed = [float(x) for x in raw.strip('[]').split(',')]
+                logger.info(f"[DEDUP] Parsed string to {len(parsed)} floats")
+                return parsed
+            return raw
+        logger.info(f"[DEDUP] No existing embedding for {source_type} {source_id} chunk {chunk_index} — will generate new")
+        return None
+    finally:
+        release_db_connection(conn)
+
+
+def find_existing_embeddings_bulk(
+    source_type: str,
+    source_id: str,
+    num_chunks: int,
+) -> Dict[int, List[float]]:
+    """
+    Bulk dedup lookup: for one source_id, find existing embeddings for chunks 0..num_chunks-1
+    in a SINGLE DB call (instead of N round-trips via find_existing_embedding).
+
+    Returns a dict keyed by chunk_index → embedding (parsed to List[float]). Missing
+    chunk_indexes simply aren't in the dict — caller treats them as "needs generation".
+
+    Same cross-project dedup semantics as find_existing_embedding (we don't filter by
+    project_id), so embeddings synced for the same Confluence space by a different
+    project still get reused.
+    """
+    if num_chunks <= 0:
+        return {}
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        # DISTINCT ON chunk_index keeps the first matching row per chunk —
+        # cross-project, any project's copy is fine since the content is identical.
+        cursor.execute(
+            """
+            SELECT DISTINCT ON (chunk_index) chunk_index, embedding
+            FROM document_embeddings
+            WHERE source_type = %s
+              AND source_id   = %s
+              AND chunk_index < %s
+            ORDER BY chunk_index, id
+            """,
+            (source_type, source_id, num_chunks),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+
+        result: Dict[int, List[float]] = {}
+        for r in rows:
+            raw = r['embedding']
+            if isinstance(raw, str):
+                result[r['chunk_index']] = [float(x) for x in raw.strip('[]').split(',')]
+            else:
+                result[r['chunk_index']] = raw
+
+        logger.info(
+            f"[DEDUP_BULK] {source_type} {source_id}: "
+            f"found {len(result)}/{num_chunks} chunks via existing embeddings"
+        )
+        return result
+    finally:
+        release_db_connection(conn)
+
+
+def replace_document_embeddings_bulk(
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_id: str,
+    title: str,
+    url: Optional[str],
+    rows: List[Dict],
+) -> int:
+    """
+    Atomic delete-and-bulk-insert in ONE transaction.
+
+    `rows` is a list of dicts: {chunk_index, chunk, embedding, content_hash}.
+    Each chunk's embedding is a list[float] or pgvector string.
+
+    This replaces:
+        delete_embeddings(...)   +  N x insert_document_embedding(...)
+    with a single connection borrow, one DELETE, one bulk INSERT via execute_values,
+    and one COMMIT. For an 11-chunk page that's 13 DB borrows → 1, plus all the
+    inserts go in a single statement.
+
+    If the bulk insert fails for any reason, the DELETE is rolled back too —
+    so a partial-failure mid-write no longer leaves the page in a state where
+    old embeddings are gone and new ones never landed.
+    """
+    if not rows:
+        # Caller chunked to zero — just clear any stale rows.
+        return _delete_embeddings_inplace(project_id, source_type, source_id)
+
+    from psycopg2.extras import execute_values
+
+    # Pre-serialise embeddings to the pgvector textual form once.
+    values_to_insert: List[tuple] = []
+    for r in rows:
+        emb = r['embedding']
+        if isinstance(emb, str):
+            emb_str = emb
+        else:
+            emb_str = '[' + ','.join(map(str, emb)) + ']'
+
+        values_to_insert.append((
+            project_id, user_id, source_type, source_id, title,
+            r['chunk'], r['chunk_index'], emb_str, url,
+            r.get('metadata_json', '{}'),
+            r.get('content_hash'),
+            r.get('source_updated_at'),
+        ))
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        # DELETE + bulk INSERT in one transaction — autocommit is off by default
+        # for psycopg2 connections, so neither statement is visible until commit().
+        cursor.execute(
+            "DELETE FROM document_embeddings WHERE project_id = %s AND source_type = %s AND source_id = %s",
+            (project_id, source_type, source_id),
+        )
+        deleted = cursor.rowcount
+
+        # execute_values uses one round trip to insert N rows. The :: cast
+        # template tells psycopg2 to cast the embedding placeholder to vector
+        # for each row of the VALUES list.
+        execute_values(
+            cursor,
+            """
+            INSERT INTO document_embeddings (
+                project_id, user_id, source_type, source_id, title,
+                content_chunk, chunk_index, embedding, url, metadata, content_hash,
+                source_updated_at
+            ) VALUES %s
+            """,
+            values_to_insert,
+            template="(%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s)",
+            page_size=200,
+        )
+        conn.commit()
+        cursor.close()
+
+        logger.info(
+            f"[REPLACE_BULK] {source_type} {source_id}: "
+            f"deleted {deleted} old, inserted {len(values_to_insert)} new (1 txn)"
+        )
+        return len(values_to_insert)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        release_db_connection(conn)
+
+
+def _delete_embeddings_inplace(project_id: str, source_type: str, source_id: str) -> int:
+    """Internal helper used when replace is called with zero rows."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM document_embeddings WHERE project_id = %s AND source_type = %s AND source_id = %s",
+            (project_id, source_type, source_id),
+        )
+        deleted = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        return deleted
+    finally:
+        release_db_connection(conn)
+
+
+def insert_document_embedding(
+    project_id: str,
+    user_id: str,
+    source_type: str,
+    source_id: str,
+    title: str,
+    content_chunk: str,
+    chunk_index: int,
+    embedding: List[float],
+    url: Optional[str] = None,
+    metadata: Optional[Dict] = None,
+    content_hash: Optional[str] = None,
+    source_updated_at: Optional[str] = None,
+) -> Dict:
+    """Insert a document embedding.
+
+    `source_updated_at` is the timestamp of the underlying Confluence page's
+    last_modified_at or the Jira issue's updated_date. Used by the recency
+    re-ranking stage in rag_service. Pass as an ISO-8601 string; Postgres
+    converts to TIMESTAMPTZ. NULL is acceptable — the recency function treats
+    missing timestamps as DECAY_FLOOR (conservative, never boosted).
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Convert embedding to pgvector format
+        if isinstance(embedding, str):
+            # Already a pgvector string — use as-is
+            embedding_str = embedding
+        else:
+            embedding_str = '[' + ','.join(map(str, embedding)) + ']'
+
+        cursor.execute("""
+            INSERT INTO document_embeddings (
+                project_id, user_id, source_type, source_id, title,
+                content_chunk, chunk_index, embedding, url, metadata, content_hash,
+                source_updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::vector, %s, %s, %s, %s)
+            RETURNING *
+        """, (
+            project_id, user_id, source_type, source_id, title,
+            content_chunk, chunk_index, embedding_str, url,
+            json.dumps(metadata) if metadata else '{}',
+            content_hash,
+            source_updated_at,
+        ))
+
+        result = cursor.fetchone()
+        conn.commit()
+        cursor.close()
+
+        return dict(result) if result else None
+    finally:
+        release_db_connection(conn)
+
+
+def delete_embeddings(project_id: str, source_type: str, source_id: str):
+    """Delete all embeddings for a specific source"""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        cursor.execute("""
+            DELETE FROM document_embeddings
+            WHERE project_id = %s AND source_type = %s AND source_id = %s
+        """, (project_id, source_type, source_id))
+        
+        deleted_count = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        
+        return deleted_count
+    finally:
+        release_db_connection(conn)
+
+
+def search_embeddings(
+    project_id: str,
+    query_embedding: List[float],
+    limit: int = 5,
+    source_type: Optional[str] = None
+) -> List[Dict]:
+    """
+    Search for similar embeddings using vector similarity
+    
+    Args:
+        project_id: Project ID to search within
+        query_embedding: Query vector
+        limit: Number of results to return
+        source_type: Optional filter by source type ('confluence' or 'jira')
+    
+    Returns:
+        List of similar documents with similarity scores
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Convert embedding to pgvector format
+        embedding_str = '[' + ','.join(map(str, query_embedding)) + ']'
+        
+        # Build query
+        if source_type:
+            query = """
+                SELECT *, 
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM document_embeddings
+                WHERE project_id = %s AND source_type = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+            """
+            params = (embedding_str, project_id, source_type, embedding_str, limit)
+        else:
+            query = """
+                SELECT *, 
+                       1 - (embedding <=> %s::vector) AS similarity
+                FROM document_embeddings
+                WHERE project_id = %s
+                ORDER BY embedding <=> %s::vector
+                LIMIT %s
+            """
+            params = (embedding_str, project_id, embedding_str, limit)
+        
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        cursor.close()
+        
+        return [dict(row) for row in results]
+    finally:
+        release_db_connection(conn)
+
+
+def _build_or_tsquery(query_text: str) -> str:
+    """
+    Build an OR-based tsquery string from raw text.
+    Splits into words, removes short/stop words, joins with ' | '.
+    Returns a string safe for to_tsquery('english', ...).
+    """
+    import re
+    words = re.findall(r'[a-zA-Z0-9]+', query_text.lower())
+    # Filter out very short words (likely stop words or noise)
+    stop_words = {'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been',
+                  'do', 'does', 'did', 'has', 'have', 'had', 'it', 'its',
+                  'to', 'of', 'in', 'on', 'at', 'by', 'for', 'with', 'from',
+                  'and', 'or', 'not', 'but', 'so', 'if', 'as', 'that', 'this',
+                  'what', 'how', 'all', 'can', 'will', 'my', 'i', 'we', 'they'}
+    terms = [w for w in words if len(w) >= 2 and w not in stop_words]
+    if not terms:
+        return None
+    return ' | '.join(terms)
+
+
+def keyword_search(
+    project_id: str,
+    query_text: str,
+    limit: int = 20,
+    source_type: Optional[str] = None
+) -> List[Dict]:
+    """
+    Full-text keyword search using OR-based matching and BM25-style ranking.
+    Uses OR logic so chunks matching ANY query term are returned,
+    ranked by how many terms they contain (via ts_rank_cd).
+
+    Args:
+        project_id: Project ID to search within
+        query_text: Raw user query text
+        limit: Number of results to return
+        source_type: Optional filter by source type ('confluence' or 'jira')
+
+    Returns:
+        List of matching documents with bm25_rank scores
+    """
+    or_query = _build_or_tsquery(query_text)
+    if not or_query:
+        logger.info(f"[KEYWORD_SEARCH] No valid terms in query: {query_text[:50]}...")
+        return []
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        if source_type:
+            query = """
+                SELECT *,
+                       ts_rank_cd(content_tsvector, to_tsquery('english', %s)) AS bm25_rank
+                FROM document_embeddings
+                WHERE project_id = %s AND source_type = %s
+                  AND content_tsvector @@ to_tsquery('english', %s)
+                ORDER BY bm25_rank DESC
+                LIMIT %s
+            """
+            params = (or_query, project_id, source_type, or_query, limit)
+        else:
+            query = """
+                SELECT *,
+                       ts_rank_cd(content_tsvector, to_tsquery('english', %s)) AS bm25_rank
+                FROM document_embeddings
+                WHERE project_id = %s
+                  AND content_tsvector @@ to_tsquery('english', %s)
+                ORDER BY bm25_rank DESC
+                LIMIT %s
+            """
+            params = (or_query, project_id, or_query, limit)
+
+        cursor.execute(query, params)
+        results = cursor.fetchall()
+        cursor.close()
+
+        logger.info(f"[KEYWORD_SEARCH] Found {len(results)} results for query: {query_text[:50]}... (terms: {or_query[:60]})")
+        return [dict(row) for row in results]
+    except Exception as e:
+        logger.error(f"[KEYWORD_SEARCH] Error: {e}")
+        return []
+    finally:
+        release_db_connection(conn)
+
+
+def rrf_fuse(
+    ranked_lists: List[List[Dict]],
+    k: int = 60,
+    limit: int = 10
+) -> List[Dict]:
+    """
+    Reciprocal Rank Fusion — merge multiple ranked result lists into one.
+
+    Args:
+        ranked_lists: List of ranked result lists (each from a different retriever)
+        k: RRF constant (default 60, from original paper)
+        limit: Number of results to return after fusion
+
+    Returns:
+        Fused and deduplicated results sorted by RRF score
+    """
+    scores = {}       # key -> cumulative RRF score
+    doc_map = {}      # key -> best result dict
+
+    for ranked_list in ranked_lists:
+        for rank, doc in enumerate(ranked_list, start=1):
+            key = (doc.get('source_id', ''), doc.get('chunk_index', 0))
+            rrf_contribution = 1.0 / (k + rank)
+            scores[key] = scores.get(key, 0.0) + rrf_contribution
+
+            if key not in doc_map:
+                doc_map[key] = doc
+
+    sorted_keys = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)
+
+    results = []
+    for key in sorted_keys[:limit]:
+        doc = dict(doc_map[key])
+        doc['rrf_score'] = scores[key]
+        if 'similarity' not in doc and 'bm25_rank' in doc:
+            doc['similarity'] = doc['bm25_rank']
+        results.append(doc)
+
+    logger.info(f"[RRF_FUSE] Fused {sum(len(rl) for rl in ranked_lists)} candidates into {len(results)} results")
+    return results
+
+
+def hybrid_search(
+    project_id: str,
+    query_text: str,
+    query_embedding: List[float],
+    limit: int = 10,
+    source_type: Optional[str] = None
+) -> List[Dict]:
+    """
+    Hybrid search combining vector similarity and BM25 keyword search via RRF.
+
+    Args:
+        project_id: Project ID to search within
+        query_text: Raw query text for keyword search
+        query_embedding: Query vector for similarity search
+        limit: Number of final results to return
+        source_type: Optional filter by source type ('confluence' or 'jira')
+
+    Returns:
+        List of results fused via RRF, each with 'rrf_score' field
+    """
+    candidate_limit = limit * 3
+
+    # 1. Vector search (existing function)
+    logger.info(f"[HYBRID] Running vector search for project {project_id}")
+    vector_results = search_embeddings(
+        project_id=project_id,
+        query_embedding=query_embedding,
+        limit=candidate_limit,
+        source_type=source_type
+    )
+
+    # 2. Keyword/BM25 search
+    logger.info(f"[HYBRID] Running keyword search for project {project_id}")
+    keyword_results = keyword_search(
+        project_id=project_id,
+        query_text=query_text,
+        limit=candidate_limit,
+        source_type=source_type
+    )
+
+    # 3. If keyword search returned nothing, fall back to vector-only
+    if not keyword_results:
+        logger.info(f"[HYBRID] No keyword matches — using vector-only results")
+        for doc in vector_results:
+            doc['rrf_score'] = doc.get('similarity', 0.0)
+        return vector_results[:limit]
+
+    # 4. Fuse via RRF
+    logger.info(f"[HYBRID] Fusing {len(vector_results)} vector + {len(keyword_results)} keyword results")
+    fused = rrf_fuse(
+        ranked_lists=[vector_results, keyword_results],
+        k=60,
+        limit=limit
+    )
+
+    return fused
+
+
+def get_surrounding_chunks(
+    project_id: str,
+    source_id: str,
+    chunk_index: int,
+    window: int = 1
+) -> Dict[str, Optional[str]]:
+    """
+    Get chunks before and after a specific chunk for context
+    
+    Args:
+        project_id: Project ID
+        source_id: Source document ID
+        chunk_index: Index of the matched chunk
+        window: Number of chunks before/after to retrieve
+    
+    Returns:
+        Dict with 'before' and 'after' chunk content
+    """
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Get chunk before
+        cursor.execute("""
+            SELECT content_chunk FROM document_embeddings
+            WHERE project_id = %s AND source_id = %s AND chunk_index = %s
+        """, (project_id, source_id, chunk_index - window))
+        before_result = cursor.fetchone()
+        
+        # Get chunk after
+        cursor.execute("""
+            SELECT content_chunk FROM document_embeddings
+            WHERE project_id = %s AND source_id = %s AND chunk_index = %s
+        """, (project_id, source_id, chunk_index + window))
+        after_result = cursor.fetchone()
+        
+        cursor.close()
+        
+        return {
+            'before': before_result['content_chunk'] if before_result else None,
+            'after': after_result['content_chunk'] if after_result else None
+        }
+    finally:
+        release_db_connection(conn)
+
+
+def get_surrounding_chunks_batch(
+    project_id: str,
+    chunk_identifiers: List[Dict[str, Any]],
+    window: int = 1
+) -> Dict[str, Dict[str, Optional[str]]]:
+    """
+    Get surrounding chunks for multiple chunks using a single DB connection and query
+    
+    Args:
+        project_id: Project ID
+        chunk_identifiers: List of dicts with 'source_id' and 'chunk_index'
+        window: Number of chunks before/after to retrieve
+    
+    Returns:
+        Dict keyed by f"{source_id}_{chunk_index}" containing 'before' and 'after'
+    """
+    if not chunk_identifiers:
+        return {}
+    
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # Build a list of all (source_id, chunk_index) tuples we need to fetch
+        # For each chunk, we need: chunk-1 (before) and chunk+1 (after)
+        fetch_list = []
+        for item in chunk_identifiers:
+            source_id = item['source_id']
+            chunk_index = item['chunk_index']
+            # Add before chunk
+            fetch_list.append((source_id, chunk_index - window))
+            # Add after chunk
+            fetch_list.append((source_id, chunk_index + window))
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_fetch_list = []
+        for sid, cidx in fetch_list:
+            key = (sid, cidx)
+            if key not in seen:
+                seen.add(key)
+                unique_fetch_list.append(key)
+        
+        # Single batch query using VALUES and IN clause
+        # Build the query dynamically
+        if not unique_fetch_list:
+            return {}
+        
+        # Use psycopg2's execute_values for efficient batch query
+        from psycopg2.extras import execute_values
+        
+        query = """
+            SELECT source_id, chunk_index, content_chunk
+            FROM document_embeddings
+            WHERE project_id = %s
+            AND (source_id, chunk_index) IN %s
+        """
+        
+        # Execute batch query
+        cursor.execute(query, (project_id, tuple(unique_fetch_list)))
+        rows = cursor.fetchall()
+        
+        # Build a lookup map: (source_id, chunk_index) -> content_chunk
+        chunk_map = {}
+        for row in rows:
+            key = (row['source_id'], row['chunk_index'])
+            chunk_map[key] = row['content_chunk']
+        
+        # Build results for each original chunk
+        results = {}
+        for item in chunk_identifiers:
+            source_id = item['source_id']
+            chunk_index = item['chunk_index']
+            result_key = f"{source_id}_{chunk_index}"
+            
+            results[result_key] = {
+                'before': chunk_map.get((source_id, chunk_index - window)),
+                'after': chunk_map.get((source_id, chunk_index + window))
+            }
+        
+        cursor.close()
+        return results
+    finally:
+        release_db_connection(conn)

@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentCore BRD Generator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: Arial, sans-serif;
+            background: #f0f2f5;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            padding: 30px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 { 
+            color: #333;
+            margin-bottom: 30px;
+            text-align: center;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+        }
+        .section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        h2 {
+            color: #444;
+            margin-bottom: 20px;
+            font-size: 1.5em;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #555;
+        }
+        input[type="file"],
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            width: 100%;
+            font-weight: 600;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        button:disabled {
+            background: #ccc;
+            cursor: not-allowed;
+        }
+        .status {
+            margin-top: 15px;
+            padding: 15px;
+            border-radius: 4px;
+            display: none;
+        }
+        .status.show {
+            display: block;
+        }
+        .status.success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+        .status.info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+        #brd-content {
+            margin-top: 20px;
+            padding: 25px;
+            background: white;
+            border: 2px solid #dee2e6;
+            border-radius: 8px;
+            max-height: 600px;
+            overflow-y: auto;
+            display: none;
+            line-height: 1.8;
+        }
+        #brd-content.show {
+            display: block;
+        }
+        #brd-content h1 {
+            color: #2c3e50;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+            font-size: 2em;
+        }
+        #brd-content h2 {
+            color: #34495e;
+            border-bottom: 2px solid #95a5a6;
+            padding-bottom: 8px;
+            margin-top: 30px;
+            margin-bottom: 15px;
+            font-size: 1.6em;
+        }
+        #brd-content h3 {
+            color: #555;
+            margin-top: 20px;
+            margin-bottom: 10px;
+            font-size: 1.3em;
+        }
+        #brd-content p {
+            margin-bottom: 12px;
+            text-align: justify;
+        }
+        #brd-content ul, #brd-content ol {
+            margin-left: 25px;
+            margin-bottom: 15px;
+        }
+        #brd-content li {
+            margin-bottom: 8px;
+        }
+        #brd-content table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 15px 0;
+        }
+        #brd-content table th,
+        #brd-content table td {
+            border: 1px solid #ddd;
+            padding: 10px;
+            text-align: left;
+        }
+        #brd-content table th {
+            background: #f8f9fa;
+            font-weight: 600;
+        }
+        #brd-content strong {
+            color: #2c3e50;
+        }
+        #brd-content code {
+            background: #f8f9fa;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Courier New', monospace;
+        }
+        #brd-content hr {
+            border: none;
+            border-top: 2px solid #e9ecef;
+            margin: 20px 0;
+        }
+        .chat-box {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            height: 500px;
+            display: flex;
+            flex-direction: column;
+        }
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 15px;
+            background: #fafafa;
+        }
+        .chat-input-area {
+            padding: 15px;
+            border-top: 1px solid #ddd;
+            background: white;
+        }
+        .message {
+            margin-bottom: 15px;
+            padding: 10px;
+            border-radius: 6px;
+        }
+        .message.user {
+            background: #e3f2fd;
+            margin-left: 20%;
+        }
+        .message.agent {
+            background: #f1f8e9;
+            margin-right: 20%;
+        }
+        .message .role {
+            font-weight: bold;
+            font-size: 12px;
+            margin-bottom: 5px;
+            color: #666;
+        }
+        .message .content {
+            white-space: pre-wrap;
+        }
+        .badge {
+            display: inline-block;
+            padding: 4px 8px;
+            background: #007bff;
+            color: white;
+            border-radius: 3px;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🤖 AgentCore BRD Generator</h1>
+        
+        <div class="grid">
+            <!-- Left: Generation & BRD Display -->
+            <div>
+                <div class="section">
+                    <h2>📝 Generate BRD</h2>
+                    <form id="generateForm">
+                        <div class="form-group">
+                            <label>Transcript File (.docx or .txt):</label>
+                            <input type="file" id="transcript" accept=".docx,.txt" required>
+                        </div>
+                        <div class="form-group">
+                            <label>Template File (.docx):</label>
+                            <input type="file" id="template" accept=".docx" required>
+                        </div>
+                        <button type="submit" id="generateBtn">Generate BRD</button>
+                    </form>
+                    <div id="status" class="status"></div>
+                </div>
+
+                <!-- BRD Display -->
+                <div id="brd-content"></div>
+                <button id="downloadBtn" style="margin-top: 15px; display: none; background: #28a745;" onclick="downloadBRD()">
+                    📥 Download BRD
+                </button>
+            </div>
+
+            <!-- Right: Live Chat -->
+            <div>
+                <div class="section">
+                    <h2>💬 Chat with Agent <span id="brdBadge" class="badge" style="display:none;"></span></h2>
+                    <div class="chat-box">
+                        <div class="chat-messages" id="chatMessages">
+                            <div class="message agent">
+                                <div class="role">Agent</div>
+                                <div class="content">Welcome! Upload a transcript and template to generate a BRD.</div>
+                            </div>
+                        </div>
+                        <div class="chat-input-area">
+                            <form id="chatForm" style="display: flex; gap: 10px;">
+                                <input type="text" id="chatInput" placeholder="Type a message..." style="flex: 1;" required>
+                                <button type="submit" style="width: auto; padding: 12px 20px;">Send</button>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentBrdId = null;
+        // Generate session ID (min 33 chars required)
+        // Format: session-timestamp-random = 8 + 13 + 1 + 15 = 37+ chars guaranteed
+        let currentSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2) + Math.random().toString(36).substring(2, 10);
+        let currentBrdText = null;
+        console.log('Session ID length:', currentSessionId.length, 'ID:', currentSessionId);
+
+        // Generate BRD
+        document.getElementById('generateForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const btn = document.getElementById('generateBtn');
+            const status = document.getElementById('status');
+            const brdContent = document.getElementById('brd-content');
+            
+            btn.disabled = true;
+            btn.textContent = 'Generating...';
+            status.className = 'status show info';
+            status.textContent = 'Uploading files and generating BRD... Please wait 30-60 seconds.';
+            brdContent.classList.remove('show');
+
+            const formData = new FormData();
+            formData.append('transcript', document.getElementById('transcript').files[0]);
+            formData.append('template', document.getElementById('template').files[0]);
+
+            try {
+                const response = await fetch('/generate', { method: 'POST', body: formData });
+                const data = await response.json();
+                
+                console.log('Full data response:', data);
+                console.log('data.result type:', typeof data.result);
+                console.log('data.brd_id:', data.brd_id);
+                
+                // Extract BRD text and ID from response
+                let brdText = data.result || '';
+                let brdId = data.brd_id || null;
+                
+                console.log('Extracted brdText length:', brdText.length);
+                console.log('Extracted brdId:', brdId);
+                
+                // If still no ID, try to extract from text
+                if (!brdId && brdText) {
+                    const idMatch = brdText.match(/([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})/);
+                    if (idMatch) {
+                        brdId = idMatch[1];
+                        console.log('BRD ID extracted from text:', brdId);
+                    }
+                }
+                
+                if (brdText) {
+                    // Store BRD data
+                    currentBrdId = brdId || 'generated-' + Date.now();
+                    currentBrdText = brdText;
+                    
+                    // Get session_id from response if provided (created by backend)
+                    if (data.session_id) {
+                        currentSessionId = data.session_id;
+                        console.log('✅ Using AgentCore Memory session:', currentSessionId);
+                    } else {
+                        // Fallback: generate session ID based on BRD ID (will be auto-created by Lambda)
+                        currentSessionId = 'brd-session-' + currentBrdId;
+                        console.log('⚠️  No session_id from backend, using:', currentSessionId);
+                    }
+                    
+                    console.log('Stored BRD ID:', currentBrdId);
+                    console.log('BRD text length:', brdText.length);
+                    console.log('Session ID:', currentSessionId);
+                    
+                    status.className = 'status show success';
+                    status.innerHTML = '✅ BRD Generated Successfully!' + (brdId ? '<br>ID: ' + brdId : '');
+                    
+                    // Format and display BRD
+                    brdContent.innerHTML = formatBRD(brdText);
+                    brdContent.classList.add('show');
+                    document.getElementById('downloadBtn').style.display = 'block';
+                    
+                    if (currentBrdId) {
+                        document.getElementById('brdBadge').textContent = 'ID: ' + currentBrdId.substring(0,8) + '...';
+                        document.getElementById('brdBadge').style.display = 'inline-block';
+                    }
+                    
+                    addChatMessage('agent', '✅ BRD generated! BRD ID: ' + currentBrdId + '\n\nYou can now:\n- Download the BRD\n- Ask me to make edits\n- Request specific changes to any section');
+                } else {
+                    status.className = 'status show error';
+                    status.textContent = '❌ No BRD content received. Response: ' + JSON.stringify(data).substring(0, 200);
+                }
+
+            } catch (error) {
+                console.error('Error:', error);
+                status.className = 'status show error';
+                status.textContent = '❌ Error: ' + error.message;
+            } finally {
+                btn.disabled = false;
+                btn.textContent = 'Generate BRD';
+            }
+        });
+
+        // Chat
+        document.getElementById('chatForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (!message) return;
+            
+            addChatMessage('user', message);
+            input.value = '';
+            
+            // Include BRD ID in message for agent context
+            let enhancedMessage = message;
+            if (currentBrdId && currentBrdId !== 'none') {
+                enhancedMessage = `[BRD_ID: ${currentBrdId}] ${message}`;
+                console.log('Enhanced message with BRD ID:', enhancedMessage);
+            }
+            
+            const formData = new FormData();
+            formData.append('message', enhancedMessage);
+            formData.append('brd_id', currentBrdId || 'none');
+            formData.append('session_id', currentSessionId);
+
+            try {
+                const response = await fetch('/chat', { method: 'POST', body: formData });
+                const data = await response.json();
+                
+                console.log('Chat response:', data);
+                
+                // Extract agent message from response
+                let agentMsg = '';
+                if (typeof data.result === 'string') {
+                    agentMsg = data.result;
+                } else if (typeof data.result === 'object') {
+                    agentMsg = JSON.stringify(data.result, null, 2);
+                } else if (data.message) {
+                    agentMsg = data.message;
+                } else {
+                    agentMsg = JSON.stringify(data, null, 2);
+                }
+                
+                addChatMessage('agent', agentMsg);
+                
+            } catch (error) {
+                console.error('Chat error:', error);
+                addChatMessage('agent', '❌ Error: ' + error.message);
+            }
+        });
+
+        function addChatMessage(role, text) {
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'message ' + role;
+            msgDiv.innerHTML = `<div class="role">${role === 'user' ? 'You' : 'Agent'}</div><div class="content">${escapeHtml(text)}</div>`;
+            document.getElementById('chatMessages').appendChild(msgDiv);
+            document.getElementById('chatMessages').scrollTop = 999999;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        function formatBRD(text) {
+            // Convert markdown-style formatting to HTML
+            let html = text
+                // Headers
+                .replace(/^### (.*$)/gim, '<h3>$1</h3>')
+                .replace(/^## (.*$)/gim, '<h2>$1</h2>')
+                .replace(/^# (.*$)/gim, '<h1>$1</h1>')
+                // Bold
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                // Lists
+                .replace(/^\- (.*$)/gim, '<li>$1</li>')
+                .replace(/^\* (.*$)/gim, '<li>$1</li>')
+                // Horizontal rules
+                .replace(/^---$/gim, '<hr>')
+                // Tables
+                .replace(/\|/g, '</td><td>')
+                // Line breaks
+                .replace(/\n\n/g, '</p><p>')
+                .replace(/\n/g, '<br>');
+            
+            // Wrap lists
+            html = html.replace(/(<li>.*?<\/li>)/gs, '<ul>$1</ul>');
+            
+            // Wrap paragraphs
+            html = '<p>' + html + '</p>';
+            
+            return html;
+        }
+
+        async function downloadBRD() {
+            if (!currentBrdId || currentBrdId === 'none') {
+                alert('No BRD ID available. Please generate a BRD first.');
+                return;
+            }
+            
+            try {
+                // Fetch the latest BRD from S3 (always get the most recent version)
+                console.log('Downloading latest BRD from S3:', currentBrdId);
+                const response = await fetch(`/download-brd/${currentBrdId}`);
+                
+                if (!response.ok) {
+                    let errorMsg = 'Unknown error';
+                    try {
+                        const error = await response.json();
+                        errorMsg = error.error || error.message || JSON.stringify(error);
+                    } catch (e) {
+                        const text = await response.text();
+                        errorMsg = text || `HTTP ${response.status}: ${response.statusText}`;
+                    }
+                    console.error('Download error:', errorMsg);
+                    alert('Failed to download BRD: ' + errorMsg);
+                    return;
+                }
+                
+                // Get the BRD DOCX file from response
+                const brdBlob = await response.blob();
+                
+                // Create download
+                const url = window.URL.createObjectURL(brdBlob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'BRD_' + currentBrdId + '.docx';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                window.URL.revokeObjectURL(url);
+                
+                addChatMessage('agent', '📥 BRD downloaded successfully as DOCX! (Latest version from S3)');
+            } catch (error) {
+                console.error('Download error:', error);
+                alert('Error downloading BRD: ' + error.message);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"name": "agentcore-agent",
+			"path": "."
+		},
+		{
+			"name": "deluxe-sdlc-frontend",
+			"path": "../deluxe-sdlc-frontend"
+		},
+		{
+			"name": "Agentcore_runtime_s3_test",
+			"path": "../../Agentcore_runtime_s3_test"
+		}
+	],
+	"settings": {
+		"python-envs.defaultEnvManager": "ms-python.python:system"
+	}
+}

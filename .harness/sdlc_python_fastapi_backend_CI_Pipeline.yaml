@@ -1,0 +1,100 @@
+{
+  "pipeline": {
+    "name": "sdlc_python_fastapi_backend_CI_Pipeline",
+    "identifier": "sdlc_python_fastapi_backend_CI_Pipeline",
+    "projectIdentifier": "SDLCOR",
+    "orgIdentifier": "Tools",
+    "tags": {},
+    "properties": {
+      "ci": {
+        "codebase": {
+          "connectorRef": "account.BitbucketCloudHarnessCI0Connector",
+          "repoName": "sdlc_python_fastapi_backend",
+          "build": "<+input>",
+          "cloneDirectory": "/python-cache/sdlc_python_fastapi_backend"
+        }
+      }
+    },
+    "stages": [
+      {
+        "stage": {
+          "name": "Build Python Lambda",
+          "identifier": "Build_Python_Lambda",
+          "template": {
+            "templateRef": "account.Build_Python_Lambda",
+            "versionLabel": "1.0.3",
+            "gitBranch": "develop",
+            "templateInputs": {
+              "type": "CI",
+              "variables": [
+                {
+                  "name": "APP_NAME",
+                  "type": "String",
+                  "value": "sdlc_python_fastapi_backend"
+                },
+                {
+                  "name": "SONARQUBE_PROJECT_KEY",
+                  "type": "String",
+                  "value": "SDLCOR-sdlc_python_fastapi_backend"
+                },
+                {
+                  "name": "JFROG_ARTIFACTORY_TARGET",
+                  "type": "String",
+                  "value": "dlx-sdlcora-lower-generic-local.artifacts.deluxe.com"
+                },
+                {
+                  "name": "COVERAGE_FAILURE_PERCENTAGE",
+                  "type": "String",
+                  "value": "<+input>.default(80)"
+                },
+                {
+                  "name": "Artifact_type",
+                  "type": "String",
+                  "value": "Zip"
+                },
+              ],
+                "spec": {
+                      "execution": {
+                        "steps": [
+                              {
+                                "stepGroup": {
+                                  "identifier": "Package_and_Push_Artifacts",
+                                  "steps": [
+                                    {
+                                      "step": {
+                                        "identifier": "Push_Artifact",
+                                        "type": "ArtifactoryUpload",
+                                        "spec": {
+                                          "connectorRef": "dlxsdlcoralowergenericlocal"
+                                        }
+                                      }
+                                    }
+                                  ]
+                                }
+                              }
+                        ]
+                      }
+                    }
+            }
+          }
+        }
+      }
+    ],
+    "variables": [
+      {
+        "name": "ARTIFACT_TARGET",
+        "type": "String",
+        "description": "",
+        "required": false,
+        "value": "<+steps.Zip_Artifacts.output.outputVariables.artifactTarget>"
+      },
+      {
+        "name": "ZipName",
+        "type": "String",
+        "description": "",
+        "required": false,
+        "value": "<+steps.Zip_Artifacts.output.outputVariables.zipName>"
+      }
+    ]
+    }
+  }

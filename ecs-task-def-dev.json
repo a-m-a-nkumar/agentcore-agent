@@ -1,0 +1,164 @@
+{
+    "family": "sdlc-dev-task",
+    "containerDefinitions": [
+        {
+            "name": "backend",
+            "image": "dlx-sdlcora-lower-docker-local.artifacts.deluxe.com/backend:latest",
+            "cpu": 2048,
+            "memory": 4096,
+            "portMappings": [
+                {
+                    "name": "backend-8000-tcp",
+                    "containerPort": 8000,
+                    "hostPort": 8000,
+                    "protocol": "tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {"name": "AWS_REGION", "value": "us-east-1"},
+                {"name": "ENVIRONMENT", "value": "sdlc-dev"},
+                {"name": "DATABASE_HOST", "value": "sdlc-orch-dev-us-east-1-pg-rds-db.cvmmysogs29x.us-east-1.rds.amazonaws.com"},
+                {"name": "DATABASE_NAME", "value": "postgres"},
+                {"name": "DATABASE_PORT", "value": "5432"},
+                {"name": "DATABASE_USER", "value": "postgres"},
+                {"name": "RDS_HOST", "value": "sdlc-orch-dev-us-east-1-pg-rds-db.cvmmysogs29x.us-east-1.rds.amazonaws.com"},
+                {"name": "RDS_DATABASE", "value": "postgres"},
+                {"name": "RDS_PORT", "value": "5432"},
+                {"name": "S3_BUCKET_NAME", "value": "sdlc-orch-dev-us-east-1-app-data"},
+                {"name": "APP_DATA_BUCKET", "value": "sdlc-orch-dev-us-east-1-app-data"},
+                {"name": "KMS_KEY_ARN", "value": "arn:aws:kms:us-east-1:590184044598:key/mrk-29bf4d8d90604305976882df6c91149e"},
+                {"name": "BEDROCK_MODEL_ID", "value": "global.anthropic.claude-sonnet-4-5-20250929-v1:0"},
+                {"name": "BEDROCK_REGION", "value": "us-east-1"},
+                {"name": "BEDROCK_MAX_TOKENS", "value": "32000"},
+                {"name": "BEDROCK_TEMPERATURE", "value": "0"},
+                {"name": "BEDROCK_GUARDRAIL_ARN", "value": ""},
+                {"name": "BEDROCK_GUARDRAIL_VERSION", "value": "1"},
+                {"name": "AGENT_ARN", "value": "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/pm_agent-uDlkiNFagv"},
+                {"name": "ANALYST_AGENT_ARN", "value": "arn:aws:bedrock-agentcore:us-east-1:590184044598:runtime/analyst_agent-JAa3wMFKOK"},
+                {"name": "AGENTCORE_MEMORY_ID", "value": "sdlc_dev_agentcore_memory-VF74Yf64ZB"},
+                {"name": "AGENTCORE_ACTOR_ID", "value": "analyst-session"},
+                {"name": "AGENTCORE_GATEWAY_ID", "value": "sdlc-dev-agentcore-gateway-z8tkb0pspy"},
+                {"name": "AZURE_CLIENT_ID", "value": "b9b2bfa9-6fb9-4474-8cc5-6e2d682e26ed"},
+                {"name": "AZURE_TENANT_ID", "value": "1f7c1878-7408-4f86-b429-cf17f96a717c"},
+                {"name": "DLXAI_GATEWAY_URL", "value": "https://dlxai-dev.deluxe.com/proxy"},
+                {"name": "DLXAI_GATEWAY_KEY", "value": "sk-2cdb551cf35f418ea88b36"},
+                {"name": "DLXAI_CHAT_MODEL", "value": "Claude-4.5-Sonnet"},
+                {"name": "LAMBDA_BRD_CHAT", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-chat"},
+                {"name": "LAMBDA_BRD_FROM_HISTORY", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history"},
+                {"name": "LAMBDA_BRD_GENERATOR", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-generator"},
+                {"name": "LAMBDA_REQUIREMENTS_GATHERING", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering"},
+                {"name": "LAMBDA_BRD_CHAT_ARN", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-chat"},
+                {"name": "LAMBDA_BRD_GENERATOR_ARN", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-generator"},
+                {"name": "LAMBDA_BRD_HISTORY_ARN", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-brd-from-history"},
+                {"name": "LAMBDA_REQUIREMENTS_ARN", "value": "arn:aws:lambda:us-east-1:590184044598:function:sdlc-dev-requirements-gathering"},
+                {"name": "MAX_HISTORY_MESSAGES", "value": "50"},
+                {"name": "INTERNAL_API_KEYS", "value": "{\"dev-key-aman\": \"mcp-enhancer\"}"}
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "linuxParameters": {
+                "initProcessEnabled": true
+            },
+            "secrets": [
+                {
+                    "name": "DATABASE_PASSWORD",
+                    "valueFrom": "arn:aws:secretsmanager:us-east-1:590184044598:secret:sdlc-orch/rds/rds-credentials/sdlc-orchestration-agent-laxYHZ:POSTGRES_PASSWORD::"
+                }
+            ],
+            "startTimeout": 30,
+            "stopTimeout": 120,
+            "user": "0",
+            "privileged": false,
+            "readonlyRootFilesystem": false,
+            "interactive": false,
+            "pseudoTerminal": false,
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/aws/ecs/sdlc-dev-service/backend",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        },
+        {
+            "name": "frontend",
+            "image": "dlx-sdlcora-lower-docker-local.artifacts.deluxe.com/frontend:latest",
+            "cpu": 1024,
+            "memory": 2048,
+            "portMappings": [
+                {
+                    "name": "frontend-8080-tcp",
+                    "containerPort": 8080,
+                    "hostPort": 8080,
+                    "protocol": "tcp"
+                }
+            ],
+            "essential": true,
+            "environment": [
+                {"name": "ALB_DNS", "value": "internal-sdlc-orch-dev-us-east-1-alb-2100965785.us-east-1.elb.amazonaws.com"},
+                {"name": "AWS_REGION", "value": "us-east-1"},
+                {"name": "VITE_AZURE_TENANT_ID", "value": "1f7c1878-7408-4f86-b429-cf17f96a717c"},
+                {"name": "VITE_AZURE_CLIENT_ID", "value": "b9b2bfa9-6fb9-4474-8cc5-6e2d682e26ed"},
+                {"name": "APP_DATA_BUCKET", "value": "sdlc-orch-dev-us-east-1-app-data"},
+                {"name": "ENVIRONMENT", "value": "sdlc-dev"},
+                {"name": "BACKEND_URL", "value": "http://localhost:8000"},
+                {"name": "CONFLUENCE_URL", "value": "https://deluxe.atlassian.net"},
+                {"name": "CONFLUENCE_HOST", "value": "deluxe.atlassian.net"}
+            ],
+            "mountPoints": [],
+            "volumesFrom": [],
+            "linuxParameters": {
+                "initProcessEnabled": true
+            },
+            "startTimeout": 30,
+            "stopTimeout": 120,
+            "user": "0",
+            "privileged": false,
+            "readonlyRootFilesystem": false,
+            "interactive": false,
+            "pseudoTerminal": false,
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/aws/ecs/sdlc-dev-service/frontend",
+                    "awslogs-region": "us-east-1",
+                    "awslogs-stream-prefix": "ecs"
+                },
+                "secretOptions": []
+            },
+            "systemControls": []
+        }
+    ],
+    "taskRoleArn": "arn:aws:iam::590184044598:role/sdlc-orch-dev-us-east-1-ecs-task-role",
+    "executionRoleArn": "arn:aws:iam::590184044598:role/sdlc-orch-dev-us-east-1-ecs-execution-role",
+    "networkMode": "awsvpc",
+    "volumes": [],
+    "placementConstraints": [],
+    "requiresCompatibilities": [
+        "FARGATE"
+    ],
+    "cpu": "4096",
+    "memory": "8192",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "tags": [
+        {"key": "TerraformPath", "value": "../../DEV/us-east-1/DEV/ecs"},
+        {"key": "AccountId", "value": "590184044598"},
+        {"key": "ManagedBy", "value": "Terraform"},
+        {"key": "AwsRegion", "value": "us-east-1"},
+        {"key": "ProjectName", "value": "SDLC-ORCH"},
+        {"key": "DeploymentTeam", "value": "DevOps"},
+        {"key": "Environment", "value": "Development"},
+        {"key": "GCOProject", "value": "GS-GENAI"},
+        {"key": "Component", "value": "ecs"},
+        {"key": "Application", "value": "devops-sdlc-orch"},
+        {"key": "GCOStack", "value": "DEV"},
+        {"key": "AccountName", "value": "DEV"}
+    ]
+}

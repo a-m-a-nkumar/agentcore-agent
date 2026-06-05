@@ -1,0 +1,1709 @@
+{
+  "sections": [
+    {
+      "title": "1. Document Overview",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "**Document Title:** Internal Developer Portal - Project Provisioning and Management System"
+        },
+        {
+          "type": "paragraph",
+          "text": "**Project Name:** Internal Developer Portal (IDP)"
+        },
+        {
+          "type": "paragraph",
+          "text": "**Document Owner:** [AI ASSUMPTION - TO BE CONFIRMED] Technology Organization Leadership / Platform Engineering Team"
+        },
+        {
+          "type": "paragraph",
+          "text": "**Version:** 1.0"
+        },
+        {
+          "type": "paragraph",
+          "text": "**Last Updated:** [Current Date]"
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "2. Purpose",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] The purpose of this document is to define the requirements for creating an Internal Developer Portal that serves as a single stop for all Engineers to:"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "Create new projects",
+            "Add members to existing projects",
+            "Remove members from existing projects",
+            "Automatically provision required backend scaffolding and infrastructure"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "[AI ASSUMPTION - HIGH CONFIDENCE] This portal aims to eliminate manual, repetitive provisioning tasks, reduce time-to-productivity for engineering teams, and enforce organizational standards across all project creation activities."
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "3. Background / Context",
+      "content": []
+    },
+    {
+      "title": "# Current State Pain Points",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] Engineers currently face significant friction when setting up new projects:"
+        }
+      ]
+    },
+    {
+      "section_number": 1,
+      "title": "**Manual Multi-System Workflow:**",
+      "content": [
+        {
+          "type": "bullet",
+          "items": [
+            "Engineer submits a request to Tooling team to create a Bitbucket repository",
+            "Engineer submits a ticket to Saviynt to get access to the repository",
+            "Engineer submits another request to Saviynt to add team members to the repository",
+            "Engineer generates a CI/CD pipeline to support the repository",
+            "Engineer manually creates boilerplate code as the first \"Hello World\" code into the repository",
+            "Engineer tests all functions manually"
+          ]
+        }
+      ]
+    },
+    {
+      "section_number": 2,
+      "title": "**Swivel Chair Operations:**",
+      "content": [
+        {
+          "type": "bullet",
+          "items": [
+            "Engineers must navigate across multiple systems to complete project setup",
+            "Significant manual work required at each step",
+            "Context switching between different tools and interfaces"
+          ]
+        }
+      ]
+    },
+    {
+      "section_number": 3,
+      "title": "**Lack of Standardization:**",
+      "content": [
+        {
+          "type": "bullet",
+          "items": [
+            "No consistent process across teams for project creation",
+            "Inconsistent folder structures, naming conventions, and configurations",
+            "Knowledge silos and tribal knowledge dependencies"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# Business Impact",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "[AI ASSUMPTION - HIGH CONFIDENCE] The current state results in:"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "Extended time-to-first-commit for new projects (estimated days vs. minutes)",
+            "High ticket volume for Tooling and Access Management teams",
+            "Inconsistent project structures leading to maintenance challenges",
+            "Poor developer experience and reduced productivity",
+            "Risk of security/compliance gaps due to manual provisioning errors"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "4. Stakeholders",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Name",
+              "Role",
+              "Responsibility"
+            ],
+            [
+              "------",
+              "------",
+              "----------------"
+            ],
+            [
+              "[TO BE CONFIRMED]",
+              "Product Owner / Sponsor",
+              "[AI ASSUMPTION] Overall project approval, funding, and strategic alignment"
+            ],
+            [
+              "[TO BE CONFIRMED]",
+              "Engineering Leadership",
+              "[AI ASSUMPTION] Define engineering standards and adoption requirements"
+            ],
+            [
+              "[USER-PROVIDED] Tooling Team",
+              "System Administrators / Operators",
+              "[USER-PROVIDED] Maintain template definitions, approve project requests via ServiceNow, manage Admin Panel, resolve provisioning failures"
+            ],
+            [
+              "[USER-PROVIDED] Technology Organization Engineers",
+              "Primary End Users",
+              "[USER-PROVIDED] Use portal to create projects, add/remove team members"
+            ],
+            [
+              "[TO BE CONFIRMED]",
+              "Platform Engineering Team",
+              "[AI ASSUMPTION] Build and maintain the portal, integrate with backend systems"
+            ],
+            [
+              "[TO BE CONFIRMED]",
+              "Security & Compliance Team",
+              "[AI ASSUMPTION] Review access provisioning workflows and security controls"
+            ],
+            [
+              "[TO BE CONFIRMED]",
+              "ServiceNow Administrators",
+              "[AI ASSUMPTION] Configure approval workflows and integration triggers"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "5. Scope",
+      "content": []
+    },
+    {
+      "title": "# In Scope",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **Core Functionality:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "New Project Setup workflow",
+            "Add Member to existing Project workflow",
+            "Remove Member from existing Project workflow",
+            "Backend scaffolding automation for each scenario",
+            "Bitbucket repository creation via API",
+            "Saviynt access provisioning for requesters and team members",
+            "Basic folder structure creation based on project type and language"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **MVP Focus - Bitbucket & Saviynt Only:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **Approval Workflow:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "ServiceNow work request submission from portal",
+            "Tooling team approval process in ServiceNow",
+            "Automated provisioning triggered upon ServiceNow approval",
+            "Admin Panel for Tooling team to manage template definitions",
+            "Template mapping to project type + language combinations",
+            "Template versioning and updates (applies to new projects only)"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **Template Management:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **User Experience:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "Wizard-based interface asking targeted questions",
+            "Smart defaults and narrowed-down options",
+            "Asynchronous processing with email notifications",
+            "Confirmation emails with project details and next steps",
+            "Folder structure varies by project type (microservice, batch job, frontend app, etc.)",
+            "Language-specific templates (Java, Python, Node.js, React, etc.)",
+            "Template library maintained by Tooling team"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "[AGREED - AI SUGGESTION] **Project Type & Language Variations:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "[AI ASSUMPTION - MEDIUM CONFIDENCE] **Access Control:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "SSO authentication for portal access",
+            "Role-based access (engineers can create projects, Tooling team accesses Admin Panel)",
+            "Audit logging of all provisioning activities"
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# Out of Scope",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **Deferred to Future Phases:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "Harness CI/CD pipeline setup (separate process for now)",
+            "Boilerplate application code beyond basic folder structure",
+            "Ongoing automated team member synchronization",
+            "Project deletion or archival workflows",
+            "Non-standard project configurations requiring manual intervention",
+            "Projects requiring special security controls or compliance sign-off",
+            "Custom infrastructure requests beyond standard templates",
+            "[USER-PROVIDED] Engineers directed to contact EAToolingTeam@xyz.com for non-standard scenarios"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "[USER-PROVIDED] **Edge Cases:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "[AI ASSUMPTION - MEDIUM CONFIDENCE] **Not Included:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "Integration with monitoring/observability tools",
+            "Cost tracking or chargeback mechanisms",
+            "Project analytics or usage dashboards (beyond basic admin visibility)",
+            "Self-service pipeline modification or infrastructure changes"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "6. Business Objectives & ROI",
+      "content": []
+    },
+    {
+      "title": "# Primary Objectives",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Objective ID",
+              "Description",
+              "Priority",
+              "Success Metrics"
+            ],
+            [
+              "--------------",
+              "-------------",
+              "----------",
+              "-----------------"
+            ],
+            [
+              "OBJ-001",
+              "[USER-PROVIDED] Eliminate manual ticket-based provisioning for Bitbucket repository creation",
+              "High",
+              "[AI ASSUMPTION] 100% of standard project requests automated; zero tickets to Tooling team for repo creation"
+            ],
+            [
+              "OBJ-002",
+              "[USER-PROVIDED] Automate Saviynt access provisioning for new projects and team member changes",
+              "High",
+              "[AI ASSUMPTION] 100% of access requests automated; zero tickets to Saviynt team"
+            ],
+            [
+              "OBJ-003",
+              "[USER-PROVIDED] Establish single entry point for all project provisioning activities across Technology Organization",
+              "High",
+              "[AI ASSUMPTION] 100% adoption rate; portal becomes default tool for project creation"
+            ],
+            [
+              "OBJ-004",
+              "[USER-PROVIDED] Enforce standardized folder structures and project configurations",
+              "Medium",
+              "[AI ASSUMPTION] 100% of projects follow template standards; zero configuration drift"
+            ],
+            [
+              "OBJ-005",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Reduce time-to-first-commit for new projects",
+              "High",
+              "Baseline: Days \u2192 Target: Minutes (< 5 minutes end-to-end)"
+            ],
+            [
+              "OBJ-006",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Improve developer experience and satisfaction",
+              "Medium",
+              "Developer NPS score improvement; reduced onboarding friction"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# ROI Analysis",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "[AI ASSUMPTION - MEDIUM CONFIDENCE] **Cost Savings:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "**Ticket Reduction:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "**Metric:** Manual tickets eliminated per month",
+            "**Baseline:** Estimated 200-400 tickets/month (Bitbucket creation + Saviynt access requests + team member changes)",
+            "**Post-Implementation:** < 20 tickets/month (edge cases only)",
+            "**Impact:** 90-95% reduction in ticket volume",
+            "**Time Savings:** 15-30 minutes per ticket \u00d7 180-380 tickets = 45-190 hours/month saved across Tooling and Saviynt teams",
+            "**Currency Value:** $50-75/hour loaded cost \u00d7 45-190 hours = $2,250-$14,250/month savings",
+            "**Annual Savings:** $27,000-$171,000/year",
+            "**Metric:** Time to provision new project",
+            "**Baseline:** 2-5 days (waiting for tickets, manual setup)",
+            "**Post-Implementation:** < 5 minutes (automated)",
+            "**Impact:** 99% time reduction",
+            "**Affected Users:** Estimated 50-100 new projects/month across Technology Organization",
+            "**Productivity Gain:** 2-5 days \u00d7 50-100 projects = 100-500 engineer-days/month recovered",
+            "**Currency Value:** $500/day loaded cost \u00d7 100-500 days = $50,000-$250,000/month",
+            "**Annual Value:** $600,000-$3,000,000/year"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "**Engineering Productivity:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "**Quality & Consistency:**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "**Metric:** Configuration errors and rework",
+            "**Baseline:** Estimated 10-20% of manual setups require rework",
+            "**Post-Implementation:** < 2% (template-driven automation)",
+            "**Impact:** 80-90% reduction in setup errors",
+            "**Time Savings:** 2-4 hours rework \u00d7 5-20 incidents/month = 10-80 hours/month",
+            "**Annual Value:** $6,000-$48,000/year",
+            "**Conservative Estimate:** $633,000/year",
+            "**Optimistic Estimate:** $3,219,000/year",
+            "**Payback Period:** [AI ASSUMPTION - TO BE CONFIRMED] 3-6 months (assuming development cost of $150,000-$300,000)"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "**Total Annual ROI:**"
+        },
+        {
+          "type": "paragraph",
+          "text": "[AI ASSUMPTION - LOW CONFIDENCE] **Additional Benefits (Not Quantified):**"
+        },
+        {
+          "type": "bullet",
+          "items": [
+            "Improved security posture through consistent access provisioning",
+            "Better compliance audit trail",
+            "Reduced onboarding time for new engineers",
+            "Increased engineering satisfaction and retention",
+            "Foundation for future automation initiatives"
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "7. Functional Requirements",
+      "content": []
+    },
+    {
+      "title": "# FR-001: Project Creation Wizard",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-001.1",
+              "[USER-PROVIDED] Portal shall present a wizard-based interface for new project creation",
+              "High",
+              "New",
+              "Multi-step guided workflow"
+            ],
+            [
+              "FR-001.2",
+              "[USER-PROVIDED] Wizard shall ask: \"What are you building?\" with options for project types (microservice, batch job, frontend app, etc.)",
+              "High",
+              "New",
+              "[AI ASSUMPTION] Initial list: Microservice, Batch Job, Frontend App, Full-Stack App, Library, Data Pipeline"
+            ],
+            [
+              "FR-001.3",
+              "[USER-PROVIDED] Wizard shall ask: \"What language/framework?\" with options varying by project type",
+              "High",
+              "New",
+              "[AI ASSUMPTION] Examples: Java/Spring Boot, Python/Flask, Node.js, React, Angular"
+            ],
+            [
+              "FR-001.4",
+              "[USER-PROVIDED] Wizard shall collect project name from user",
+              "High",
+              "New",
+              "[AI ASSUMPTION] Validation rules to be defined (naming conventions, uniqueness)"
+            ],
+            [
+              "FR-001.5",
+              "[USER-PROVIDED] Wizard shall allow optional addition of team members with role assignment",
+              "Medium",
+              "New",
+              "Roles: Admin, Developer, Read-Only"
+            ],
+            [
+              "FR-001.6",
+              "[USER-PROVIDED] Wizard shall make smart decisions and provide narrowed-down options based on previous selections",
+              "High",
+              "New",
+              "Context-aware option filtering"
+            ],
+            [
+              "FR-001.7",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Wizard shall validate all inputs before submission (required fields, format validation, duplicate checking)",
+              "High",
+              "New",
+              "Client-side and server-side validation"
+            ],
+            [
+              "FR-001.8",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Wizard shall display summary/confirmation screen before final submission",
+              "Medium",
+              "New",
+              "Allow user to review selections"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-002: ServiceNow Integration & Approval Workflow",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-002.1",
+              "[USER-PROVIDED] Portal shall create ServiceNow work request upon wizard submission",
+              "High",
+              "New",
+              "API integration with ServiceNow"
+            ],
+            [
+              "FR-002.2",
+              "[USER-PROVIDED] Portal shall validate request in the tool before submitting to ServiceNow",
+              "High",
+              "New",
+              "Pre-submission validation layer"
+            ],
+            [
+              "FR-002.3",
+              "[USER-PROVIDED] ServiceNow work request shall route to Tooling team for approval",
+              "High",
+              "New",
+              "Configured approval workflow"
+            ],
+            [
+              "FR-002.4",
+              "[USER-PROVIDED] Tooling team shall review and approve/reject requests in ServiceNow",
+              "High",
+              "New",
+              "Manual approval checkpoint"
+            ],
+            [
+              "FR-002.5",
+              "[USER-PROVIDED] ServiceNow approval event shall trigger automated provisioning workflow",
+              "High",
+              "New",
+              "Event-driven architecture"
+            ],
+            [
+              "FR-002.6",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] ServiceNow work request shall include all wizard inputs and metadata for approval decision",
+              "High",
+              "New",
+              "Complete context for approvers"
+            ],
+            [
+              "FR-002.7",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal shall provide status tracking for submitted requests (Pending Approval, Approved, Provisioning, Complete, Failed)",
+              "Medium",
+              "New",
+              "User visibility into request state"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-003: Bitbucket Repository Creation",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-003.1",
+              "[USER-PROVIDED] System shall create Bitbucket repository via API upon ServiceNow approval",
+              "High",
+              "New",
+              "Automated repo creation"
+            ],
+            [
+              "FR-003.2",
+              "[USER-PROVIDED] Repository shall be created with folder structure based on project type and language",
+              "High",
+              "New",
+              "Template-driven structure"
+            ],
+            [
+              "FR-003.3",
+              "[USER-PROVIDED] System shall seed repository with README.md file",
+              "High",
+              "New",
+              "Standard documentation starting point"
+            ],
+            [
+              "FR-003.4",
+              "[USER-PROVIDED] System shall seed repository with boilerplate code folder based on language/framework",
+              "High",
+              "New",
+              "Language-specific starter code"
+            ],
+            [
+              "FR-003.5",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Repository shall include standard configuration files (.gitignore, build files, etc.) appropriate to language",
+              "Medium",
+              "New",
+              "Examples: pom.xml for Java, package.json for Node.js"
+            ],
+            [
+              "FR-003.6",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Repository naming shall follow organizational conventions (validation enforced in wizard)",
+              "High",
+              "New",
+              "Consistent naming standards"
+            ],
+            [
+              "FR-003.7",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall handle Bitbucket API failures gracefully with retry logic",
+              "High",
+              "New",
+              "Error handling and resilience"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-004: Saviynt Access Provisioning",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-004.1",
+              "[USER-PROVIDED] System shall provision Saviynt access for project requester upon ServiceNow approval",
+              "High",
+              "New",
+              "Automated access grant"
+            ],
+            [
+              "FR-004.2",
+              "[USER-PROVIDED] System shall provision Saviynt access for all team members specified in wizard",
+              "High",
+              "New",
+              "Bulk access provisioning"
+            ],
+            [
+              "FR-004.3",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] System shall assign appropriate access roles based on selections in wizard (Admin, Developer, Read-Only)",
+              "High",
+              "New",
+              "Role-based access control"
+            ],
+            [
+              "FR-004.4",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] System shall synchronize access between Bitbucket and Saviynt",
+              "High",
+              "New",
+              "Consistent permissions across systems"
+            ],
+            [
+              "FR-004.5",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall handle Saviynt API failures gracefully with retry logic",
+              "High",
+              "New",
+              "Error handling and resilience"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-005: Template Management (Admin Panel)",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-005.1",
+              "[USER-PROVIDED] System shall provide Admin Panel accessible only to Tooling team",
+              "High",
+              "New",
+              "Role-based access control"
+            ],
+            [
+              "FR-005.2",
+              "[USER-PROVIDED] Admin Panel shall allow Tooling team to add new templates",
+              "High",
+              "New",
+              "Template creation interface"
+            ],
+            [
+              "FR-005.3",
+              "[USER-PROVIDED] Admin Panel shall allow Tooling team to update existing templates",
+              "High",
+              "New",
+              "Template modification interface"
+            ],
+            [
+              "FR-005.4",
+              "[USER-PROVIDED] Admin Panel shall allow mapping templates to project type + language combinations",
+              "High",
+              "New",
+              "Template association logic"
+            ],
+            [
+              "FR-005.5",
+              "[USER-PROVIDED] Admin Panel shall allow retiring or versioning templates",
+              "Medium",
+              "New",
+              "Template lifecycle management"
+            ],
+            [
+              "FR-005.6",
+              "[USER-PROVIDED] Template updates shall apply only to new projects going forward (no retroactive changes)",
+              "High",
+              "New",
+              "Version control for templates"
+            ],
+            [
+              "FR-005.7",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Admin Panel shall provide template preview/validation before publishing",
+              "Medium",
+              "New",
+              "Quality control mechanism"
+            ],
+            [
+              "FR-005.8",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Admin Panel shall maintain audit log of all template changes",
+              "Medium",
+              "New",
+              "Change tracking and accountability"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-006: Notification System",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-006.1",
+              "[USER-PROVIDED] System shall send email notification to requester upon successful provisioning completion",
+              "High",
+              "New",
+              "Success notification"
+            ],
+            [
+              "FR-006.2",
+              "[USER-PROVIDED] Email shall include confirmation that project is ready",
+              "High",
+              "New",
+              "Clear status communication"
+            ],
+            [
+              "FR-006.3",
+              "[USER-PROVIDED] Email shall include direct link to Bitbucket repository",
+              "High",
+              "New",
+              "Immediate access to repo"
+            ],
+            [
+              "FR-006.4",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Email shall include git clone command for easy copy-paste",
+              "Medium",
+              "New",
+              "Developer convenience"
+            ],
+            [
+              "FR-006.5",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Email shall include summary of what was provisioned (repo, access, team members)",
+              "Medium",
+              "New",
+              "Complete context"
+            ],
+            [
+              "FR-006.6",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Email shall include next steps or getting started instructions",
+              "Medium",
+              "New",
+              "Onboarding guidance"
+            ],
+            [
+              "FR-006.7",
+              "[USER-PROVIDED] System shall send email notification to requester if provisioning fails",
+              "High",
+              "New",
+              "Failure notification"
+            ],
+            [
+              "FR-006.8",
+              "[USER-PROVIDED] Failure email shall indicate that Tooling team has been notified and will resolve backend",
+              "High",
+              "New",
+              "Transparency and reassurance"
+            ],
+            [
+              "FR-006.9",
+              "[USER-PROVIDED] System shall alert Tooling team of any provisioning failures with sufficient context for troubleshooting",
+              "High",
+              "New",
+              "Operational alerting"
+            ],
+            [
+              "FR-006.10",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall send email notification upon ServiceNow approval (before provisioning begins)",
+              "Low",
+              "New",
+              "Intermediate status update"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-007: Add Member to Existing Project",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-007.1",
+              "[USER-PROVIDED] Portal shall provide \"Add Member to existing Project\" workflow from landing page",
+              "High",
+              "New",
+              "Separate workflow from project creation"
+            ],
+            [
+              "FR-007.2",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Workflow shall allow user to search/select existing project",
+              "High",
+              "New",
+              "Project picker interface"
+            ],
+            [
+              "FR-007.3",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Workflow shall allow user to search/select user to add",
+              "High",
+              "New",
+              "User search interface"
+            ],
+            [
+              "FR-007.4",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Workflow shall allow selection of role for new member (Admin, Developer, Read-Only)",
+              "High",
+              "New",
+              "Role assignment"
+            ],
+            [
+              "FR-007.5",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] System shall provision access in both Bitbucket and Saviynt",
+              "High",
+              "New",
+              "Consistent access across systems"
+            ],
+            [
+              "FR-007.6",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall send notification to requester and new member upon completion",
+              "Medium",
+              "New",
+              "Confirmation communications"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-008: Remove Member from Existing Project",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-008.1",
+              "[USER-PROVIDED] Portal shall provide \"Remove Member from Project\" workflow from landing page",
+              "High",
+              "New",
+              "Separate workflow from project creation"
+            ],
+            [
+              "FR-008.2",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Workflow shall allow user to search/select existing project",
+              "High",
+              "New",
+              "Project picker interface"
+            ],
+            [
+              "FR-008.3",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Workflow shall display current members of selected project",
+              "High",
+              "New",
+              "Member list view"
+            ],
+            [
+              "FR-008.4",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Workflow shall allow selection of member to remove",
+              "High",
+              "New",
+              "Member selection interface"
+            ],
+            [
+              "FR-008.5",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] System shall revoke access in both Bitbucket and Saviynt",
+              "High",
+              "New",
+              "Consistent access removal"
+            ],
+            [
+              "FR-008.6",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall require confirmation before removing member",
+              "Medium",
+              "New",
+              "Prevent accidental removal"
+            ],
+            [
+              "FR-008.7",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall send notification to requester upon completion",
+              "Medium",
+              "New",
+              "Confirmation communication"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# FR-009: Landing Page & Navigation",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Req ID",
+              "Requirement Description",
+              "Priority",
+              "Status",
+              "Notes"
+            ],
+            [
+              "--------",
+              "------------------------",
+              "----------",
+              "--------",
+              "-------"
+            ],
+            [
+              "FR-009.1",
+              "[USER-PROVIDED] Portal shall display landing page with high-level categories: 1) New Project Setup, 2) Add Member to existing Project, 3) Remove Member from Project",
+              "High",
+              "New",
+              "Clear action-oriented interface"
+            ],
+            [
+              "FR-009.2",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Landing page shall provide clear descriptions of each workflow option",
+              "Medium",
+              "New",
+              "User guidance"
+            ],
+            [
+              "FR-009.3",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Portal shall be accessible via internal SharePoint link",
+              "High",
+              "New",
+              "[USER-PROVIDED] Distribution via SharePoint"
+            ],
+            [
+              "FR-009.4",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal shall display user's recent requests/projects",
+              "Low",
+              "New",
+              "Personalized dashboard"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "8. Non-Functional Requirements",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "NFR ID",
+              "Description",
+              "Category",
+              "Target/Threshold"
+            ],
+            [
+              "--------",
+              "-------------",
+              "----------",
+              "------------------"
+            ],
+            [
+              "NFR-001",
+              "[USER-PROVIDED] Provisioning workflow shall complete within few minutes (target: < 5 minutes end-to-end)",
+              "Performance",
+              "< 5 minutes from approval to completion"
+            ],
+            [
+              "NFR-002",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Portal shall be available 24/7 with 99.5% uptime",
+              "Availability",
+              "99.5% uptime (standard for internal tools)"
+            ],
+            [
+              "NFR-003",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Portal shall support concurrent usage by entire Technology Organization (estimated 500-2000 engineers)",
+              "Scalability",
+              "Support 2000+ concurrent users"
+            ],
+            [
+              "NFR-004",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] Portal shall authenticate users via SSO (corporate identity provider)",
+              "Security",
+              "SSO integration required"
+            ],
+            [
+              "NFR-005",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] All API communications shall use encrypted channels (TLS 1.2+)",
+              "Security",
+              "Encryption in transit"
+            ],
+            [
+              "NFR-006",
+              "[AI ASSUMPTION - HIGH CONFIDENCE] System shall maintain audit log of all provisioning activities for minimum 2 years",
+              "Compliance",
+              "2-year retention minimum"
+            ],
+            [
+              "NFR-007",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal UI shall be responsive and support modern browsers (Chrome, Firefox, Edge, Safari)",
+              "Usability",
+              "Cross-browser compatibility"
+            ],
+            [
+              "NFR-008",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] Wizard workflow shall be completable in < 3 minutes for standard projects",
+              "Usability",
+              "< 3 minutes to submit request"
+            ],
+            [
+              "NFR-009",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall provide clear error messages and recovery guidance for all failure scenarios",
+              "Usability",
+              "User-friendly error handling"
+            ],
+            [
+              "NFR-010",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall retry failed API calls up to 3 times with exponential backoff",
+              "Reliability",
+              "Automatic retry logic"
+            ],
+            [
+              "NFR-011",
+              "[AI ASSUMPTION - MEDIUM CONFIDENCE] System shall gracefully degrade if non-critical services are unavailable",
+              "Reliability",
+              "Partial functionality during outages"
+            ],
+            [
+              "NFR-012",
+              "[AI ASSUMPTION - LOW CONFIDENCE] Portal shall comply with organizational data privacy and security policies",
+              "Compliance",
+              "Policy adherence required"
+            ],
+            [
+              "NFR-013",
+              "[AI ASSUMPTION - LOW CONFIDENCE] System shall support rollback of failed provisioning attempts",
+              "Reliability",
+              "Cleanup on failure"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "9. User Stories / Use Cases",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "ID",
+              "Title",
+              "As a...",
+              "I want to...",
+              "So that..."
+            ],
+            [
+              "----",
+              "-------",
+              "---------",
+              "--------------",
+              "------------"
+            ],
+            [
+              "US-001",
+              "Create New Microservice Project",
+              "[USER-PROVIDED] Software Engineer",
+              "[USER-PROVIDED] Use a wizard to create a new Java microservice project with my team members",
+              "[AI ASSUMPTION] I can start coding immediately without waiting for manual provisioning"
+            ],
+            [
+              "US-002",
+              "Receive Project Ready Notification",
+              "[USER-PROVIDED] Software Engineer",
+              "[USER-PROVIDED] Receive an email when my project is ready with the repo link",
+              "[AI ASSUMPTION] I know exactly when I can start working and how to access my repo"
+            ],
+            [
+              "US-003",
+              "Add Team Member to Project",
+              "[USER-PROVIDED] Tech Lead",
+              "[USER-PROVIDED] Add a new developer to my existing project through the portal",
+              "[AI ASSUMPTION] They get access to Bitbucket and all necessary systems without submitting tickets"
+            ],
+            [
+              "US-004",
+              "Remove Team Member from Project",
+              "[USER-PROVIDED] Tech Lead",
+              "[USER-PROVIDED] Remove a team member who moved to another project",
+              "[AI ASSUMPTION] Their access is revoked consistently across all systems"
+            ],
+            [
+              "US-005",
+              "Approve Project Request",
+              "[USER-PROVIDED] Tooling Team Member",
+              "[USER-PROVIDED] Review and approve project creation requests in ServiceNow",
+              "[AI ASSUMPTION] I can ensure requests meet standards before provisioning occurs"
+            ],
+            [
+              "US-006",
+              "Manage Project Templates",
+              "[USER-PROVIDED] Tooling Team Member",
+              "[USER-PROVIDED] Update the Java microservice template with new organizational standards",
+              "[AI ASSUMPTION] All future Java projects automatically use the updated structure"
+            ],
+            [
+              "US-007",
+              "Troubleshoot Failed Provisioning",
+              "[USER-PROVIDED] Tooling Team Member",
+              "[USER-PROVIDED] Receive alerts when provisioning fails with enough context to resolve the issue",
+              "[AI ASSUMPTION] I can quickly fix problems and complete the setup manually if needed"
+            ],
+            [
+              "US-008",
+              "Create Frontend Application",
+              "[AI ASSUMPTION] Frontend Engineer",
+              "[AI ASSUMPTION] Create a new React application project with appropriate folder structure",
+              "[AI ASSUMPTION] I get a standardized React setup that follows team conventions"
+            ],
+            [
+              "US-009",
+              "Create Batch Job Project",
+              "[AI ASSUMPTION] Data Engineer",
+              "[AI ASSUMPTION] Create a new Python batch job project with scheduling configuration",
+              "[AI ASSUMPTION] I have the right structure for scheduled data processing tasks"
+            ],
+            [
+              "US-010",
+              "Track Request Status",
+              "[AI ASSUMPTION] Software Engineer",
+              "[AI ASSUMPTION] Check the status of my project creation request",
+              "[AI ASSUMPTION] I know if it's pending approval, provisioning, or complete"
+            ],
+            [
+              "US-011",
+              "Handle Non-Standard Request",
+              "[USER-PROVIDED] Software Engineer",
+              "[USER-PROVIDED] Contact EAToolingTeam@xyz.com for edge cases not supported by the portal",
+              "[AI ASSUMPTION] I have a clear escalation path for special requirements"
+            ],
+            [
+              "US-012",
+              "Onboard New Engineer",
+              "[AI ASSUMPTION] Engineering Manager",
+              "[AI ASSUMPTION] Direct new team members to the portal for self-service project creation",
+              "[AI ASSUMPTION] New engineers can be productive quickly without extensive hand-holding"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "10. Assumptions",
+      "content": []
+    },
+    {
+      "title": "# Technical Assumptions",
+      "content": []
+    },
+    {
+      "section_number": 1,
+      "title": "[USER-PROVIDED] All required backend systems (Bitbucket, Saviynt, ServiceNow) have APIs available for integration",
+      "content": []
+    },
+    {
+      "section_number": 2,
+      "title": "[USER-PROVIDED] Tooling team has existing template library that can be plugged into the workflow",
+      "content": []
+    },
+    {
+      "section_number": 3,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Corporate SSO/identity provider is available for portal authentication",
+      "content": []
+    },
+    {
+      "section_number": 4,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] ServiceNow can trigger external webhooks/APIs upon approval events",
+      "content": []
+    },
+    {
+      "section_number": 5,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Network connectivity and firewall rules allow portal to communicate with all backend systems",
+      "content": []
+    },
+    {
+      "section_number": 6,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] API rate limits for backend systems are sufficient for expected usage volume",
+      "content": []
+    },
+    {
+      "section_number": 7,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Existing Bitbucket and Saviynt configurations support programmatic access provisioning",
+      "content": []
+    },
+    {
+      "title": "# Organizational Assumptions",
+      "content": []
+    },
+    {
+      "section_number": 8,
+      "title": "[USER-PROVIDED] Portal will be made available via internal SharePoint",
+      "content": []
+    },
+    {
+      "section_number": 9,
+      "title": "[USER-PROVIDED] There will be broader communication about the portal to the Technology Organization",
+      "content": []
+    },
+    {
+      "section_number": 10,
+      "title": "[USER-PROVIDED] No resistance expected from engineering community; portal will be default tool used 100% of cases",
+      "content": []
+    },
+    {
+      "section_number": 11,
+      "title": "[USER-PROVIDED] Tooling team will maintain template definitions over time as standards evolve",
+      "content": []
+    },
+    {
+      "section_number": 12,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Tooling team has capacity to review and approve ServiceNow requests in timely manner",
+      "content": []
+    },
+    {
+      "section_number": 13,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Engineering leadership supports mandate for portal usage",
+      "content": []
+    },
+    {
+      "section_number": 14,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Budget and resources are approved for portal development and maintenance",
+      "content": []
+    },
+    {
+      "title": "# Process Assumptions",
+      "content": []
+    },
+    {
+      "section_number": 15,
+      "title": "[USER-PROVIDED] Template updates apply only to new projects (no retroactive migration of existing repos)",
+      "content": []
+    },
+    {
+      "section_number": 16,
+      "title": "[USER-PROVIDED] Edge cases and non-standard requests will be handled outside portal via email to EAToolingTeam@xyz.com",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "17. [USER-PROVIDED] Tooling team will resolve provisioning failures manually on the backend\n18. [AI ASSUMPTION - HIGH CONFIDENCE] Current manual provisioning process will be deprecated once portal is live\n19. [AI ASSUMPTION - MEDIUM CONFIDENCE] Project naming conventions and standards are documented and can be enforced programmatically\n20. [AI ASSUMPTION - MEDIUM CONFIDENCE] Approval turnaround time in ServiceNow will be < 24 hours for standard requests"
+        },
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "11. Constraints",
+      "content": []
+    },
+    {
+      "title": "# Technical Constraints",
+      "content": []
+    },
+    {
+      "section_number": 1,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Portal must integrate with existing enterprise systems (Bitbucket, Saviynt, ServiceNow) without requiring changes to those platforms",
+      "content": []
+    },
+    {
+      "section_number": 2,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Portal must operate within corporate network security policies and firewall restrictions",
+      "content": []
+    },
+    {
+      "section_number": 3,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal must use approved technology stack and hosting infrastructure",
+      "content": []
+    },
+    {
+      "section_number": 4,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] API rate limits and quotas of backend systems may limit concurrent provisioning operations",
+      "content": []
+    },
+    {
+      "title": "# Organizational Constraints",
+      "content": []
+    },
+    {
+      "section_number": 5,
+      "title": "[USER-PROVIDED] Tooling team is the only user of Admin Panel (not exposed to broader organization)",
+      "content": []
+    },
+    {
+      "section_number": 6,
+      "title": "[USER-PROVIDED] ServiceNow approval workflow is mandatory; no auto-approval for MVP",
+      "content": []
+    },
+    {
+      "section_number": 7,
+      "title": "[USER-PROVIDED] MVP scope limited to Bitbucket and Saviynt; Harness integration deferred",
+      "content": []
+    },
+    {
+      "section_number": 8,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Development team size and timeline are fixed (to be confirmed)",
+      "content": []
+    },
+    {
+      "section_number": 9,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal must comply with existing IT governance and change management processes",
+      "content": []
+    },
+    {
+      "title": "# Process Constraints",
+      "content": []
+    },
+    {
+      "section_number": 10,
+      "title": "[USER-PROVIDED] Portal cannot modify existing projects or repositories (only creates new ones)",
+      "content": []
+    },
+    {
+      "section_number": 11,
+      "title": "[USER-PROVIDED] Template changes do not trigger notifications or migrations for existing projects",
+      "content": []
+    },
+    {
+      "section_number": 12,
+      "title": "[AI ASSUMPTION - HIGH CONFIDENCE] Portal cannot bypass existing security and compliance requirements",
+      "content": []
+    },
+    {
+      "section_number": 13,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Manual intervention by Tooling team required for all provisioning failures",
+      "content": []
+    },
+    {
+      "title": "# Business Constraints",
+      "content": []
+    },
+    {
+      "section_number": 14,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal must be delivered within fiscal year budget",
+      "content": []
+    },
+    {
+      "section_number": 15,
+      "title": "[AI ASSUMPTION - MEDIUM CONFIDENCE] Portal must not disrupt existing project workflows during rollout",
+      "content": []
+    },
+    {
+      "section_number": 16,
+      "title": "[AI ASSUMPTION - LOW CONFIDENCE] Portal must demonstrate ROI within 6-12 months of launch",
+      "content": [
+        {
+          "type": "paragraph",
+          "text": "---"
+        }
+      ]
+    },
+    {
+      "title": "12. Acceptance Criteria / KPIs",
+      "content": []
+    },
+    {
+      "title": "# Functional Acceptance Criteria",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Metric / Goal",
+              "Target Value/Threshold"
+            ],
+            [
+              "---------------",
+              "------------------------"
+            ],
+            [
+              "[USER-PROVIDED] Wizard completes project creation request submission",
+              "100% success rate for valid inputs"
+            ],
+            [
+              "[USER-PROVIDED] ServiceNow work request created for all submissions",
+              "100% of submissions create ServiceNow ticket"
+            ],
+            [
+              "[USER-PROVIDED] Bitbucket repository created upon ServiceNow approval",
+              "100% success rate (excluding system outages)"
+            ],
+            [
+              "[USER-PROVIDED] Saviynt access provisioned for requester and team members",
+              "100% success rate (excluding system outages)"
+            ],
+            [
+              "[USER-PROVIDED] Email notification sent upon successful completion",
+              "100% of successful provisions trigger email"
+            ],
+            [
+              "[USER-PROVIDED] Email notification sent upon provisioning failure",
+              "100% of failures trigger email to requester and Tooling team"
+            ],
+            [
+              "[USER-PROVIDED] Admin Panel allows template CRUD operations",
+              "All template management functions operational"
+            ],
+            [
+              "[USER-PROVIDED] Add Member workflow provisions access in Bitbucket and Saviynt",
+              "100% success rate for valid requests"
+            ],
+            [
+              "[USER-PROVIDED] Remove Member workflow revokes access in Bitbucket and Saviynt",
+              "100% success rate for valid requests"
+            ],
+            [
+              "[AI ASSUMPTION] Folder structure matches selected template",
+              "100% of repos match template definition"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# Performance Acceptance Criteria",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Metric / Goal",
+              "Target Value/Threshold"
+            ],
+            [
+              "---------------",
+              "------------------------"
+            ],
+            [
+              "[USER-PROVIDED] End-to-end provisioning time (approval to completion)",
+              "< 5 minutes (target: 2-3 minutes)"
+            ],
+            [
+              "[AI ASSUMPTION] Wizard submission response time",
+              "< 2 seconds"
+            ],
+            [
+              "[AI ASSUMPTION] Portal page load time",
+              "< 3 seconds"
+            ],
+            [
+              "[AI ASSUMPTION] Concurrent user support",
+              "100+ simultaneous users without degradation"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# Adoption & Usage KPIs",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Metric / Goal",
+              "Target Value/Threshold"
+            ],
+            [
+              "---------------",
+              "------------------------"
+            ],
+            [
+              "[USER-PROVIDED] Portal adoption rate",
+              "100% of new projects created via portal within 3 months of launch"
+            ],
+            [
+              "[AI ASSUMPTION] Ticket volume reduction",
+              "90%+ reduction in manual provisioning tickets"
+            ],
+            [
+              "[AI ASSUMPTION] Time-to-first-commit for new projects",
+              "< 1 day (vs. 2-5 days baseline)"
+            ],
+            [
+              "[AI ASSUMPTION] Developer satisfaction score",
+              "NPS > 50 or satisfaction rating > 4/5"
+            ],
+            [
+              "[AI ASSUMPTION] Provisioning error rate",
+              "< 5% of requests require manual intervention"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "# Operational KPIs",
+      "content": [
+        {
+          "type": "table",
+          "rows": [
+            [
+              "Metric / Goal",
+              "Target Value/Threshold"
+            ],
+            [
+              "---------------",
+              "------------------------"
+            ],
+            [
+              "[AI ASSUMPTION] Portal uptime",
+              "99.5% availability"
+            ],
+            [
+              "[AI ASSUMPTION] Mean time to resolution for provisioning failures",
+              "< 4 hours"
+            ]
+          ]
+        },
+        {
+          "type": "paragraph",
+          "text": "| [AI"
+        }
+      ]
+    }
+  ]
+}

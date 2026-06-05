@@ -1,0 +1,105 @@
+[
+  {
+    "id": "kb-001",
+    "title": "ResponseAI — Proposal for Customer Experience",
+    "url": "https://scribeflow.io/proposals/responseai-cx-2026.pdf",
+    "type": "vendor",
+    "icon": "vendor",
+    "snippet": "ScribeFlow's drafting assistant proposal claiming 70% acceptance rate, $1.5M annual capacity creation, 10-week implementation. Includes Forrester/McKinsey/Gartner benchmark references.",
+    "keywords": ["ai", "drafting", "email", "support", "responseai", "scribeflow", "deflection", "acceptance", "vendor", "customer service", "response", "draft"],
+    "source_file": "vendor_proposal.md",
+    "source_format": "markdown"
+  },
+  {
+    "id": "kb-002",
+    "title": "Customer Support Operations — Current Architecture (Q1 2026)",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/CX/pages/8821/Support-Operations-Architecture",
+    "type": "internal",
+    "icon": "internal",
+    "snippet": "50 agents across Americas / EMEA / APAC pods, Salesforce + Zendesk hybrid, 18 months tagged email history (~480k tickets), no ML team in CX, executive sponsor Priya Sharma (SVP CX).",
+    "keywords": ["cx", "support", "architecture", "salesforce", "zendesk", "agents", "drafting", "macros", "team", "mlops", "snowflake", "infrastructure"],
+    "source_file": "confluence_fallback.json",
+    "source_format": "confluence-json"
+  },
+  {
+    "id": "kb-003",
+    "title": "CX-421 — Evaluate AI response drafting for support agent productivity",
+    "url": "https://deluxe.atlassian.net/browse/CX-421",
+    "type": "ticket",
+    "icon": "ticket",
+    "snippet": "Open Jira ticket (Reporter: Daniel Ortiz VP CX, Assignee: Priya Sharma) for FY26 cost-to-serve initiative. Comments include vendor-claim skepticism (Priya) and PII/data-residency flag (Aisha Khan, Privacy).",
+    "keywords": ["jira", "ticket", "cx-421", "evaluate", "drafting", "cost-to-serve", "fy26", "board mandate", "ortiz", "sharma", "privacy", "pii"],
+    "source_file": "jira_fallback.json",
+    "source_format": "jira-json"
+  },
+  {
+    "id": "kb-004",
+    "title": "AI Fraud Detection Pilot — Post-Mortem Lessons Learned (2024)",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/RISK/pages/4421/Fraud-AI-Lessons",
+    "type": "lessons",
+    "icon": "lessons",
+    "snippet": "Retro on the 2024 fraud-detection ML rollout. Three lessons: dedicated MLOps owner is non-negotiable; vendor 'acceptance' metrics ≠ production reality; rejection-feedback labels must be captured from day one.",
+    "keywords": ["ai", "ml", "fraud", "lessons-learned", "mlops", "post-mortem", "retrospective", "model-tuning", "feedback-loop"],
+    "content": "## Background\n\nIn 2024 Deluxe Risk deployed a vendor ML fraud-detection system across consumer transactions. The model performed well in vendor benchmarks but underdelivered in production through year 1.\n\n## What we learned\n\n1. **Dedicated MLOps owner is non-negotiable.** Risk didn't have an embedded data scientist. The vendor's 'managed tuning' service turned out to be ad-hoc quarterly retrains. By month 6 the model's false-positive rate had drifted 40% from pilot baseline. No one inside Deluxe was watching.\n2. **Vendor acceptance metrics are not production reality.** Vendor claimed 92% precision in pilot. Steady-state in production was 71%. The gap was real — vendor pilot was on a curated sample with clean labels; production sample is messier.\n3. **Rejection-feedback labels MUST be captured from day one.** When the team finally tried to retrain in month 8, the rejection data wasn't labeled with 'why' it was rejected. The model couldn't learn from it.\n\n## Recommendations for future AI projects\n\n- Embed a data scientist or MLOps engineer into the team owning the model, before launch\n- Negotiate a managed-tuning SLA with explicit performance targets and fee adjustments\n- Instrument rejection/correction feedback collection into the workflow from day one\n- Time-box pilots with a kill criterion before scaling"
+  },
+  {
+    "id": "kb-005",
+    "title": "FY26 Cost-to-Serve Roadmap — Consumer Operations",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/STRAT/pages/9001/FY26-Cost-to-Serve",
+    "type": "internal",
+    "icon": "internal",
+    "snippet": "Board-approved roadmap to cut consumer-ops cost-per-ticket by 20% in FY26. CX is the largest cost line; named levers: AI tooling, agent productivity, offshore arbitrage, channel deflection.",
+    "keywords": ["cost-to-serve", "fy26", "roadmap", "board", "consumer-ops", "cx", "20-percent", "cost-reduction", "mandate", "strategy"],
+    "content": "## FY26 Cost-to-Serve Initiative\n\n**Goal:** 20% reduction in cost-per-ticket across consumer operations by end of FY26.\n\n**Board context:** Approved in Q4 FY25 board review. Tied to broader margin-expansion target. Daniel Ortiz (VP CX) and the Consumer Ops leadership team are accountable.\n\n**Named levers (in priority order):**\n1. AI tooling (drafting, deflection, knowledge surfacing) — primary lever, $3-5M target\n2. Agent productivity programs (training, ramp acceleration) — secondary, $1-2M target\n3. Offshore arbitrage on tier-1 support — secondary, $1-3M target (politically sensitive)\n4. Channel deflection (self-serve, chatbot expansion) — tertiary, $0.5-1M target\n\n**Reporting:** Monthly to CFO, quarterly to board.\n\n**Risks already flagged:**\n- AI tooling depends on vendor delivery + internal MLOps capacity (gap noted)\n- Offshore arbitrage carries reputational risk if scaled too aggressively\n- Self-serve has historically capped at ~25% deflection"
+  },
+  {
+    "id": "kb-006",
+    "title": "Salesforce Service Cloud Integration Patterns — Engineering Reference",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/ENG/pages/7733/SF-Integration-Patterns",
+    "type": "internal",
+    "icon": "internal",
+    "snippet": "Engineering reference for Salesforce Service Cloud integrations. Covers API rate limits, custom object schema for cases, AppExchange-vs-custom decision tree, and the standard side-panel widget pattern.",
+    "keywords": ["salesforce", "service-cloud", "integration", "engineering", "api", "side-panel", "widget", "appexchange"],
+    "content": "## Salesforce Service Cloud Integration Patterns\n\n### Standard patterns we use\n\n**Side-panel widget**: For tools that surface data alongside a case (e.g., draft suggestions, knowledge articles), embed via Lightning Component in the case sidebar. ~2-week implementation for new vendors.\n\n**Custom case object fields**: For vendor-injected metadata (e.g., AI confidence scores, draft acceptance), use namespaced custom fields. Avoid polluting Salesforce-standard fields.\n\n**API rate limits**: Salesforce Service Cloud caps at 100k API calls / 24h for our edition. Real-time integrations should batch / cache.\n\n**Single sign-on**: Use SAML via Azure AD for vendor login (same auth as the rest of CX tooling)."
+  },
+  {
+    "id": "kb-007",
+    "title": "EMEA Pod Expansion Business Case (2024)",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/CX/pages/6611/EMEA-Pod-Expansion",
+    "type": "internal",
+    "icon": "internal",
+    "snippet": "2024 business case to expand the EMEA support pod from 12 to 16 agents. Approved but under-delivered due to hiring delays. Includes EMEA-specific tone and language considerations relevant to any AI rollout.",
+    "keywords": ["emea", "expansion", "pod", "agents", "hiring", "tone", "language", "internationalization"],
+    "content": "## EMEA Pod Expansion (FY24)\n\n**Approved:** Q1 2024. **Delivered:** Q4 2024 (3 quarters late).\n\n**Backstory:** EMEA pod was 12 agents handling 30% of inbound volume but 45% of complex tier-2/3 escalations. Ramp time for new EMEA hires was 9-10 weeks vs 6-8 in Americas due to language fluency screening.\n\n**Relevance to AI tooling:** Any AI drafting solution must accommodate EMEA-specific tone (more formal, less American conversational) and at least passive multilingual support (English/French/German). Vendor pilots done on US English data will need EMEA-specific calibration."
+  },
+  {
+    "id": "kb-008",
+    "title": "CSAT Quarterly Review — Q4 2025",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/CX/pages/9544/CSAT-Q4-2025",
+    "type": "internal",
+    "icon": "internal",
+    "snippet": "Q4 2025 customer satisfaction review. CSAT averaged 4.1/5 across pods. Notable: first-response time inversely correlated with CSAT (each hour of delay = 0.1 CSAT point drop on tickets exceeding 4h SLA).",
+    "keywords": ["csat", "customer-satisfaction", "quarterly-review", "first-response", "sla", "metrics"],
+    "content": "## Q4 2025 CSAT Review\n\nOverall CSAT: 4.1/5 (target 4.2). EMEA pod at 3.9 dragged blended down.\n\n**Key finding:** First-response time is the strongest CSAT lever we have. Each additional hour beyond the 4h SLA drops average CSAT for that ticket by ~0.1 point.\n\n**Implication for AI tooling:** Anything that reduces first-response time (faster drafting, faster triage) has CSAT upside beyond pure capacity savings. Estimated value: $200k-400k/yr in churn-prevention terms, though we haven't been able to isolate causation cleanly."
+  },
+  {
+    "id": "kb-009",
+    "title": "Generative AI Procurement Guide — Vendor Evaluation Criteria",
+    "url": "https://deluxe.atlassian.net/wiki/spaces/PROC/pages/8800/GenAI-Procurement-Guide",
+    "type": "internal",
+    "icon": "internal",
+    "snippet": "Procurement standard for evaluating GenAI vendors. Covers PII handling, data residency, model-IP ownership, indemnification, and tuning-service SLAs. Required reading before any GenAI vendor contract.",
+    "keywords": ["procurement", "vendor-evaluation", "genai", "pii", "data-residency", "indemnification", "sla", "contract", "compliance"],
+    "content": "## GenAI Vendor Evaluation Criteria\n\n**Required clauses for any GenAI vendor contract:**\n\n1. **PII handling**: Vendor must NOT use customer data for model training outside our tenant. Get this in writing in the MSA.\n2. **Data residency**: For EMEA customers, data must stay in EU. Vendor must confirm region pinning.\n3. **Model-IP ownership**: Fine-tuned weights belong to us. Vendor cannot use them for other customers.\n4. **Indemnification**: Vendor must indemnify for IP-infringement claims on model outputs.\n5. **Tuning-service SLA**: If vendor markets a 'managed' product, performance targets and remedy must be in the contract. 'Best efforts' is not enough.\n6. **Exit clause**: Ability to export training data and switch vendors with reasonable notice."
+  },
+  {
+    "id": "kb-010",
+    "title": "Forrester Wave: AI in Customer Service, Q1 2025",
+    "url": "https://www.forrester.com/report/the-forrester-wave-ai-customer-service-q1-2025/",
+    "type": "benchmark",
+    "icon": "benchmark",
+    "snippet": "External benchmark. Leaders include ScribeFlow, Forethought, ASAPP, Yellow.ai. Blended draft-acceptance across enterprise deployments 35-55%; leaders hit 60-65% after 4-6 months of tuning. Caveat: vendor 'pilot' acceptance rates routinely 15-25 percentage points above steady-state.",
+    "keywords": ["forrester", "benchmark", "wave", "customer-service", "ai", "vendors", "acceptance-rate", "external"],
+    "content": "## Forrester Wave: AI in Customer Service — Q1 2025 (summary)\n\n**Leaders:** ScribeFlow, Forethought, ASAPP, Yellow.ai.\n\n**Strong Performers:** Cresta, Ada, Drift.\n\n**Key data points:**\n- Blended draft-acceptance across enterprise deployments: **35-55%** (median 42%)\n- Leaders reach **60-65%** after 4-6 months of internal tuning\n- **Vendor pilot acceptance rates run 15-25 percentage points above steady-state** across the entire category — this is a structural pattern, not vendor-specific\n- Ticket complexity is the single largest predictor of acceptance ceiling\n- Deployments without dedicated MLOps function plateau within 6 months\n\n**Forrester's recommendation:** Plan against the lower end of vendor projections. Treat the upper end as a stretch case, not a baseline."
+  }
+]

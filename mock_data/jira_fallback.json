@@ -1,0 +1,29 @@
+{
+  "key": "CX-421",
+  "summary": "Evaluate AI response drafting for support agent productivity",
+  "status": "In Discovery",
+  "priority": "High",
+  "reporter": "Daniel Ortiz (VP Customer Experience)",
+  "assignee": "Priya Sharma (SVP Customer Experience)",
+  "created": "2026-03-18",
+  "updated": "2026-05-12",
+  "labels": ["ai-strategy", "cx", "cost-to-serve", "fy26-priority"],
+  "description": "Board has set a 20% cost-per-ticket reduction target for CX over FY26. Support team is the largest cost center within CX ($3.5M/yr loaded on the 50-agent team).\n\nObjective: evaluate whether an AI drafting assistant can deliver meaningful (>$1M) annual productivity gains within a 12-month payback window, while keeping us inside our PII and tone-of-voice requirements.\n\nIn scope:\n- Feasibility on our Salesforce + Snowflake stack\n- 2-3 vendor proposals (ResponseAI received; two others TBD)\n- Build-vs-buy analysis (org-level Data Science can advise but cannot lead)\n- PII / privacy review\n\nOut of scope:\n- Voice / phone support automation (separate workstream)\n- Tier-3 enterprise escalations (high judgment, low automation value)\n\nDecision target: Q3 2026 funding committee.",
+  "comments": [
+    {
+      "author": "Daniel Ortiz",
+      "created": "2026-03-18",
+      "body": "Kicking this off — Priya, can you own discovery? Board wants the 20% cost-per-ticket target hit by end of FY26 so we need a clear path by Q3."
+    },
+    {
+      "author": "Priya Sharma",
+      "created": "2026-03-26",
+      "body": "ResponseAI proposal received, attached. Their 70% acceptance claim feels high to me — most of their pilot was on retail shipping questions, very different from our enterprise tech mix. Need to pressure-test."
+    },
+    {
+      "author": "Aisha Khan",
+      "created": "2026-04-10",
+      "body": "From Privacy perspective: any LLM that reads customer emails needs a clear data-residency story for EMEA tickets, and we need to confirm no customer PII is used for model fine-tuning outside our tenant. ResponseAI ToS is ambiguous on the second point — flag for review before contract."
+    }
+  ]
+}

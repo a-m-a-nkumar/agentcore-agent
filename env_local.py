@@ -1,0 +1,332 @@
+"""
+LOCAL ENVIRONMENT CONFIGURATION
+================================
+Use this file when running the project on your LOCAL machine.
+
+In environment.py, make sure this line is UNcommented:
+    from env_local import *
+
+Local settings:
+  - S3 uploads use plain boto3 (NO KMS encryption)
+  - Database uses a direct password from DATABASE_PASSWORD env var
+  - LLM calls go directly to AWS Bedrock (no API Gateway proxy)
+  - Agent ARNs point to the local AWS account (448049797912)
+  - Strands agents use BedrockModel directly (no Deluxe gateway)
+  - Lambda names use local account (448049797912)
+"""
+
+import os
+import json
+import logging
+import boto3
+from typing import Dict, List, Optional, Union
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# S3 Configuration  (no KMS)
+# ---------------------------------------------------------------------------
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "test-development-bucket-siriusai")
+AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+
+
+def get_s3_client():
+    """Return a plain boto3 S3 client (no KMS)."""
+    return boto3.client("s3", region_name=AWS_REGION)
+
+
+def s3_put_object(
+    key: str,
+    body,
+    content_type: str = "application/octet-stream",
+    bucket: str = None,
+) -> str:
+    """Upload an object to S3 without KMS encryption (local dev)."""
+    if bucket is None:
+        bucket = S3_BUCKET_NAME
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    client = get_s3_client()
+    client.put_object(Key=key, Body=body, Bucket=bucket, ContentType=content_type)
+    logger.info(f"[LOCAL S3] Uploaded s3://{bucket}/{key}")
+    return f"s3://{bucket}/{key}"
+
+
+# ---------------------------------------------------------------------------
+# Database Configuration  (direct password, no Secrets Manager)
+# ---------------------------------------------------------------------------
+def get_db_params() -> dict:
+    """Return DB connection params using a plain password from env vars."""
+    return {
+        "host": os.getenv("DATABASE_HOST", os.getenv("POSTGRES_HOST", "localhost")),
+        "port": int(os.getenv("DATABASE_PORT", os.getenv("POSTGRES_PORT", "5432"))),
+        "database": os.getenv("DATABASE_NAME", os.getenv("POSTGRES_DB", "postgres")),
+        "user": os.getenv("DATABASE_USER", os.getenv("POSTGRES_USER", "postgres")),
+        "password": os.getenv("DATABASE_PASSWORD", ""),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Agent ARNs  (local AWS account: 448049797912)
+# ---------------------------------------------------------------------------
+DEFAULT_AGENT_ARN = os.getenv(
+    "AGENT_ARN",
+    "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/my_agent-0BLwDgF9uK",
+)
+DEFAULT_ANALYST_AGENT_ARN = os.getenv(
+    "ANALYST_AGENT_ARN",
+    "arn:aws:bedrock-agentcore:us-east-1:448049797912:runtime/Analyst_agent-kCoE8v38c0",
+)
+
+
+# ---------------------------------------------------------------------------
+# LLM  (direct AWS Bedrock, no API Gateway proxy)
+# ---------------------------------------------------------------------------
+DEFAULT_BEDROCK_MODEL = os.getenv(
+    "BEDROCK_MODEL_ID",
+    "global.anthropic.claude-sonnet-4-5-20250929-v1:0",
+)
+
+
+# ---------------------------------------------------------------------------
+# Agent Model — Strands agents use Bedrock directly (Local)
+# ---------------------------------------------------------------------------
+AGENT_MODEL_PROVIDER = "bedrock"
+DEFAULT_DLXAI_GATEWAY_URL = ""   # Not used locally
+DEFAULT_DLXAI_GATEWAY_KEY = ""   # Not used locally
+DEFAULT_GATEWAY_MODEL = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
+
+# ---------------------------------------------------------------------------
+# Embedding config  (Local: Titan v1 at 1536 dimensions)
+# ---------------------------------------------------------------------------
+EMBEDDING_DIMENSIONS = 1536
+BEDROCK_EMBEDDING_MODEL = "amazon.titan-embed-text-v1"
+
+# ---------------------------------------------------------------------------
+# Lambda name defaults  (Local AWS account: 448049797912)
+# ---------------------------------------------------------------------------
+DEFAULT_LAMBDA_BRD_GENERATOR           = "brd_generator_lambda"
+DEFAULT_LAMBDA_BRD_RETRIEVER           = "brd_retriever_lambda"
+DEFAULT_LAMBDA_BRD_CHAT                = "brd_chat_lambda"
+DEFAULT_LAMBDA_REQUIREMENTS_GATHERING  = "requirements_gathering_lambda"
+DEFAULT_LAMBDA_BRD_FROM_HISTORY        = "brd_from_history_lambda"
+
+# ---------------------------------------------------------------------------
+# AgentCore defaults  (Local)
+# ---------------------------------------------------------------------------
+DEFAULT_AGENTCORE_MEMORY_ID  = os.getenv("AGENTCORE_MEMORY_ID", "Test-DGwqpP7Rvj")
+DEFAULT_AGENTCORE_ACTOR_ID   = os.getenv("AGENTCORE_ACTOR_ID", "brd-session")
+DEFAULT_AGENTCORE_GATEWAY_ID = os.getenv("AGENTCORE_GATEWAY_ID", "testgatewayfbdd062d-e2eo4q0y09")
+
+# ---------------------------------------------------------------------------
+# Lambda ARN defaults  (Local — full ARN form for direct invocation)
+# ---------------------------------------------------------------------------
+DEFAULT_LAMBDA_REQUIREMENTS_GATHERING_ARN = os.getenv(
+    "LAMBDA_REQUIREMENTS_GATHERING_ARN",
+    "arn:aws:lambda:us-east-1:448049797912:function:requirements_gathering_lambda",
+)
+DEFAULT_LAMBDA_BRD_FROM_HISTORY_ARN = os.getenv(
+    "LAMBDA_BRD_FROM_HISTORY_ARN",
+    "arn:aws:lambda:us-east-1:448049797912:function:brd_from_history_lambda",
+)
+
+
+def _get_bedrock_config():
+    from botocore.config import Config
+    return Config(
+        connect_timeout=60,
+        read_timeout=300,
+        retries={"max_attempts": 3, "mode": "standard"},
+    )
+
+
+def chat_completion(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    temperature: float = 0.9,
+    max_tokens: Optional[int] = None,
+    system_prompt: Optional[str] = None,
+    return_metadata: bool = False,
+    user_id: Optional[str] = None,
+    token_source: Optional[str] = None,
+) -> Union[str, Dict]:
+    """
+    Send a chat request directly to AWS Bedrock (local dev — no gateway).
+
+    Accepts the same interface as llm_gateway.chat_completion so that the
+    lambda files work unchanged when switching environments.
+    """
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        config=_get_bedrock_config(),
+    )
+
+    model_id = model or DEFAULT_BEDROCK_MODEL
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": messages,
+        "max_tokens": max_tokens or 4000,
+        "temperature": temperature,
+    }
+    if system_prompt:
+        body["system"] = system_prompt
+
+    logger.info(f"[LOCAL LLM] Invoking Bedrock model: {model_id}")
+    response = client.invoke_model(
+        modelId=model_id,
+        body=json.dumps(body),
+        contentType="application/json",
+    )
+    result = json.loads(response["body"].read())
+    content = (result.get("content", [{}])[0].get("text", "") or "").strip()
+
+    # Record per-user token usage (fire-and-forget, same pattern as gateway)
+    if user_id:
+        usage = result.get("usage") or {}
+        total = (usage.get("input_tokens", 0) or 0) + (usage.get("output_tokens", 0) or 0)
+        if total > 0:
+            try:
+                import threading
+                from db_helper import increment_user_token_usage
+                threading.Thread(
+                    target=lambda: increment_user_token_usage(user_id, total),
+                    daemon=True,
+                ).start()
+            except Exception as e:
+                logger.warning(f"[LOCAL LLM] token_usage write failed: {e}")
+
+    if return_metadata:
+        stop_reason = result.get("stop_reason")
+        finish_reason = "length" if stop_reason == "max_tokens" else stop_reason
+        return {"content": content, "finish_reason": finish_reason}
+    return content
+
+
+def chat_completion_with_tools(
+    messages: List[Dict],
+    tools: List[Dict],
+    model: Optional[str] = None,
+    temperature: float = 0.0,
+    max_tokens: Optional[int] = None,
+) -> Dict:
+    """
+    Bedrock call with Anthropic-native tool use (local dev).
+    Accepts OpenAI tool format, converts to Anthropic format for Bedrock.
+    Returns dict with "message" and "finish_reason" matching the gateway interface.
+    """
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        config=_get_bedrock_config(),
+    )
+    model_id = model or DEFAULT_BEDROCK_MODEL
+
+    # Convert OpenAI tool format → Anthropic tool format
+    anthropic_tools = []
+    for t in tools:
+        fn = t.get("function", t)
+        anthropic_tools.append({
+            "name": fn["name"],
+            "description": fn.get("description", ""),
+            "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
+        })
+
+    # Separate system messages from user/assistant messages
+    system_parts = []
+    chat_messages = []
+    for m in messages:
+        if m["role"] == "system":
+            system_parts.append(m["content"])
+        else:
+            chat_messages.append(m)
+
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": chat_messages,
+        "tools": anthropic_tools,
+        "max_tokens": max_tokens or 4000,
+        "temperature": temperature,
+    }
+    if system_parts:
+        body["system"] = "\n\n".join(system_parts)
+
+    logger.info(f"[LOCAL LLM] Tool call → Bedrock model: {model_id}")
+    response = client.invoke_model(
+        modelId=model_id,
+        body=json.dumps(body),
+        contentType="application/json",
+    )
+    result = json.loads(response["body"].read())
+
+    # Convert Anthropic response to OpenAI-compatible structure
+    stop_reason = result.get("stop_reason", "end_turn")
+    content_blocks = result.get("content", [])
+
+    text_parts = []
+    tool_calls = []
+    for block in content_blocks:
+        if block.get("type") == "text":
+            text_parts.append(block["text"])
+        elif block.get("type") == "tool_use":
+            tool_calls.append(type("ToolCall", (), {
+                "id": block["id"],
+                "function": type("Function", (), {
+                    "name": block["name"],
+                    "arguments": json.dumps(block["input"]),
+                })(),
+                "type": "function",
+            })())
+
+    # Build a message-like object matching OpenAI SDK structure
+    msg = type("Message", (), {
+        "content": "\n".join(text_parts) if text_parts else None,
+        "tool_calls": tool_calls if tool_calls else None,
+        "role": "assistant",
+    })()
+
+    finish_reason = "tool_calls" if stop_reason == "tool_use" else "stop"
+    return {"message": msg, "finish_reason": finish_reason}
+
+
+def chat_completion_stream(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    temperature: float = 0.5,
+    max_tokens: Optional[int] = None,
+    system_prompt: Optional[str] = None,
+):
+    """
+    Stream a chat request directly to AWS Bedrock (local dev — no gateway).
+    Yields SSE-formatted data strings: { type: 'chunk', text: '...' } and a final { type: 'done' }.
+    """
+    client = boto3.client(
+        "bedrock-runtime",
+        region_name=AWS_REGION,
+        config=_get_bedrock_config(),
+    )
+
+    model_id = model or DEFAULT_BEDROCK_MODEL
+    body = {
+        "anthropic_version": "bedrock-2023-05-31",
+        "messages": messages,
+        "max_tokens": max_tokens or 8192,
+        "temperature": temperature,
+    }
+    if system_prompt:
+        body["system"] = system_prompt
+
+    logger.info(f"[LOCAL LLM STREAM] Invoking Bedrock model: {model_id}")
+    response = client.invoke_model_with_response_stream(
+        modelId=model_id,
+        body=json.dumps(body),
+        contentType="application/json",
+        accept="application/json",
+    )
+    for event in response["body"]:
+        chunk = json.loads(event["chunk"]["bytes"])
+        if chunk.get("type") == "content_block_delta":
+            text = chunk.get("delta", {}).get("text", "")
+            if text:
+                yield f"data: {json.dumps({'type': 'chunk', 'text': text})}\n\n"
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"
