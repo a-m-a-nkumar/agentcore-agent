@@ -1009,11 +1009,43 @@ _PARSE_FIX_RULES = (
 
 @router.post("/scan-fix")
 async def scan_and_fix_terraform(req: ScanFixRequest, token_data: dict = Depends(verify_azure_token)):
-    """Scan → fix parse errors → fix Checkov failures → re-scan. Loops up to max_iterations."""
-    user_id = token_data.get("oid") or token_data.get("sub")
+    """Scan → fix parse errors → fix Checkov failures → re-scan, with regression
+    guard and best-snapshot tracking.
+
+    Returns the BEST file set observed across iterations, not necessarily the last.
+    The LLM's full-file rewrites can introduce new findings while clearing old ones
+    (e.g. fix 2 issues but reshape a resource and trigger 3 new flags), so blindly
+    returning the latest state can hand the user a worse result than they started
+    with. We track the snapshot with the fewest unresolved findings and bail out
+    of the loop the moment an iteration strictly regresses.
+    """
+    # Defensive user-id extraction. Other terraform endpoints resolve `oid`/`sub`
+    # cleanly, but scan-fix logs were showing `user=unknown` in token-tracking.
+    # Fall back through every plausible Azure claim and log the token shape if
+    # nothing matched, so the next occurrence is diagnosable.
+    user_id = (
+        token_data.get("oid")
+        or token_data.get("sub")
+        or token_data.get("preferred_username")
+        or token_data.get("upn")
+    )
+    if not user_id:
+        logger.warning(
+            "[scan-fix] Could not resolve user_id from token. Available claims: %s",
+            sorted(token_data.keys()),
+        )
+
     files = dict(req.files)
-    history = []
+    history: list[dict] = []
     max_iter = min(req.max_iterations or 3, 5)
+
+    # Best-so-far snapshot. Updated whenever a scan returns fewer total findings
+    # (failed_checks + parse_errors) than the previous best.
+    best_files: dict = dict(files)
+    best_failed_count: Optional[int] = None
+    best_iteration: int = 0
+    prev_failed_count: Optional[int] = None
+    regression_detected = False
 
     for iteration in range(1, max_iter + 1):
         results, available = run_checkov(files)
@@ -1028,6 +1060,7 @@ async def scan_and_fix_terraform(req: ScanFixRequest, token_data: dict = Depends
 
         failed = results.get("failed_checks", [])
         parse_errors = results.get("parse_errors", [])
+        failed_count = len(failed) + len(parse_errors)
         history.append({
             "iteration": iteration,
             "passed": results["summary"].get("passed", 0),
@@ -1041,9 +1074,34 @@ async def scan_and_fix_terraform(req: ScanFixRequest, token_data: dict = Depends
                 "files": files,
                 "history": history,
                 "final_status": "passed",
+                "skip_candidates": [],
+                "best_iteration": iteration,
                 "message": f"All checks passed after {iteration} iteration(s).",
             }
 
+        # Best-snapshot update.
+        if best_failed_count is None or failed_count < best_failed_count:
+            best_files = dict(files)
+            best_failed_count = failed_count
+            best_iteration = iteration
+
+        # Regression guard. If this iteration is strictly worse than the previous,
+        # the LLM is reshaping resources unhelpfully — stop and fall through to
+        # the best-snapshot return path below.
+        if prev_failed_count is not None and failed_count > prev_failed_count:
+            logger.info(
+                "[scan-fix] Regression at iteration %d: failures %d → %d. "
+                "Stopping; will return best snapshot from iteration %d.",
+                iteration, prev_failed_count, failed_count, best_iteration,
+            )
+            regression_detected = True
+            break
+
+        prev_failed_count = failed_count
+
+        # Parse-error fixes are per-file rewrites of files Checkov couldn't even
+        # parse — they don't drive Checkov-rule regressions the way full rewrites
+        # of well-parsed files do, so apply unconditionally.
         for pe in parse_errors:
             rel_path = pe.get("file", "")
             detail = pe.get("detail", "")
@@ -1069,24 +1127,38 @@ Requirements:
             except Exception as e:
                 logger.error(f"Parse fix failed for {rel_path}: {e}")
 
+        # Checkov-failure fix. Pass ONLY the files that have failures, not the
+        # whole tree. Smaller surface area = less room for the LLM to restructure
+        # unrelated resources and trip new rules.
         if failed:
-            failures_text = format_failures_for_prompt(failed)
-            files_snapshot = "\n\n".join(
-                f"=== {path} ===\n{content}" for path, content in files.items()
-                if path.endswith((".tf", ".tfvars"))
+            failing_paths = sorted({
+                (c.get("file") or "").lstrip("/").replace("\\", "/")
+                for c in failed
+                if c.get("file")
+            })
+            failing_files_snapshot = "\n\n".join(
+                f"===FILE: {p}===\n{files[p]}"
+                for p in failing_paths
+                if p in files
             )
+            failures_text = format_failures_for_prompt(failed)
 
-            fix_prompt = f"""You are a senior AWS infrastructure engineer. Fix ONLY the Checkov failures listed below. Do not change anything else. Return ALL files in the same delimiter format.
+            fix_prompt = f"""You are a senior AWS infrastructure engineer fixing Checkov security findings.
+
+STRICT RULES — violating any of these makes your output unusable:
+- Modify ONLY the resources/blocks named in the failures list below.
+- DO NOT add, remove, rename, or reshape any other resource, variable, output, data source, or module block.
+- DO NOT introduce new top-level resources to satisfy a finding — set attributes on the EXISTING resource.
+- Preserve every existing line not directly related to a flagged finding (whitespace, comments, ordering all stay).
+- Use the minimal change that clears the finding (e.g. add an encryption attribute, not a refactor).
 
 {failures_text}
 
-Current Terraform files:
-{files_snapshot[:12000]}
+FAILING FILES (return these — and only these — using the delimiter format):
+{failing_files_snapshot[:12000]}
 
-Return every file (changed and unchanged) using this exact format:
+Return each failing file using this exact delimiter format:
 ===FILE: path/to/file.tf===
-<content>
-===FILE: path/to/other.tf===
 <content>
 ===END==="""
 
@@ -1100,27 +1172,65 @@ Return every file (changed and unchanged) using this exact format:
                 logger.error(f"Claude fix failed on iteration {iteration}: {e}")
                 break
 
+    # Loop exited (max iterations, regression, or fix-call exception). Re-scan
+    # to capture the final post-loop state.
     final_results, _ = run_checkov(files)
     final_failed = final_results.get("failed_checks", [])
     final_parse_errors = final_results.get("parse_errors", [])
+    final_failed_count = len(final_failed) + len(final_parse_errors)
     history.append({
-        "iteration": max_iter + 1,
+        "iteration": len(history) + 1,
         "passed": final_results["summary"].get("passed", 0),
         "failed": final_results["summary"].get("failed", 0),
         "failed_checks": final_failed,
         "parse_errors": final_parse_errors,
     })
 
+    # If the kept-aside best snapshot is strictly better than the final state,
+    # hand that back instead. Re-scan the chosen snapshot so the response payload
+    # reflects what the user actually receives in `files`.
+    if best_failed_count is not None and best_failed_count < final_failed_count:
+        logger.info(
+            "[scan-fix] Returning best snapshot from iteration %d (%d failed) "
+            "instead of final state (%d failed).",
+            best_iteration, best_failed_count, final_failed_count,
+        )
+        files = best_files
+        best_scan, _ = run_checkov(files)
+        final_failed = best_scan.get("failed_checks", [])
+        final_parse_errors = best_scan.get("parse_errors", [])
+
+    # Skip-candidate surfaces. Some Checkov rules need human judgment (intentional
+    # public endpoints, intentional permissive SG rules, encryption choices) — the
+    # caller's UI should let the user accept these per-rule rather than treating
+    # them as auto-fixable.
+    skip_candidates = sorted({c["check_id"] for c in final_failed if c.get("check_id")})
+
     all_clean = not final_failed and not final_parse_errors
+    if all_clean:
+        message = f"All checks passed (best at iteration {best_iteration})."
+    elif regression_detected:
+        message = (
+            f"{len(final_failed)} check(s) remain after a regression at iteration "
+            f"{prev_failed_count and best_iteration + 1}. Returned best snapshot "
+            f"from iteration {best_iteration}. Review and skip per-rule if intentional: "
+            f"{', '.join(skip_candidates) or '—'}"
+        )
+    else:
+        message = (
+            f"{len(final_failed)} check(s) remain after {max_iter} iteration(s). "
+            f"Returned best snapshot from iteration {best_iteration}. "
+            f"Review and skip per-rule if intentional: {', '.join(skip_candidates) or '—'}"
+        )
+
     return {
         "files": files,
         "history": history,
         "final_status": "passed" if all_clean else "manual_review_required",
-        "message": (
-            "All checks passed."
-            if all_clean
-            else f"{len(final_failed)} check(s) could not be auto-fixed. Manual review required."
-        ),
+        "skip_candidates": skip_candidates,
+        "best_iteration": best_iteration,
+        "regression_detected": regression_detected,
+        "message": message,
     }
 
 
