@@ -1029,18 +1029,28 @@ async def scan_and_fix_terraform(req: ScanFixRequest, token_data: dict = Depends
         or token_data.get("preferred_username")
         or token_data.get("upn")
     )
-    if not user_id:
-        logger.warning(
-            "[scan-fix] Could not resolve user_id from token. Available claims: %s",
-            sorted(token_data.keys()),
-        )
+    # Always log the resolved user_id + available claims so user=unknown in the
+    # downstream LLM gateway log is debuggable. INFO level (not WARN) so it shows
+    # in normal operation, not just on failure.
+    logger.info(
+        "[scan-fix] resolved user_id=%s from token claims: %s",
+        user_id if user_id else "<UNRESOLVED>",
+        sorted(token_data.keys()),
+    )
 
     files = dict(req.files)
     history: list[dict] = []
     max_iter = min(req.max_iterations or 3, 5)
 
-    # Best-so-far snapshot. Updated whenever a scan returns fewer total findings
-    # (failed_checks + parse_errors) than the previous best.
+    # Parse errors mean Checkov couldn't even parse a file — most of the file's
+    # checks didn't run, so its `failed` count is artificially low. A
+    # parse-error state must NEVER win the "best snapshot" race against a state
+    # that fully scanned with real findings. Penalty large enough to dominate
+    # any realistic real-finding count.
+    PARSE_ERROR_PENALTY = 1000
+
+    # Best-so-far snapshot. Updated whenever a scan returns a lower weighted
+    # cost (failed_checks + heavy penalty per parse_error) than the previous best.
     best_files: dict = dict(files)
     best_failed_count: Optional[int] = None
     best_iteration: int = 0
@@ -1060,7 +1070,7 @@ async def scan_and_fix_terraform(req: ScanFixRequest, token_data: dict = Depends
 
         failed = results.get("failed_checks", [])
         parse_errors = results.get("parse_errors", [])
-        failed_count = len(failed) + len(parse_errors)
+        failed_count = len(failed) + PARSE_ERROR_PENALTY * len(parse_errors)
         history.append({
             "iteration": iteration,
             "passed": results["summary"].get("passed", 0),
@@ -1177,7 +1187,7 @@ Return each failing file using this exact delimiter format:
     final_results, _ = run_checkov(files)
     final_failed = final_results.get("failed_checks", [])
     final_parse_errors = final_results.get("parse_errors", [])
-    final_failed_count = len(final_failed) + len(final_parse_errors)
+    final_failed_count = len(final_failed) + PARSE_ERROR_PENALTY * len(final_parse_errors)
     history.append({
         "iteration": len(history) + 1,
         "passed": final_results["summary"].get("passed", 0),
