@@ -1132,7 +1132,7 @@ Requirements:
 - Keep ALL resources/variables that are already present — do not remove anything"""
 
             try:
-                fixed_content = invoke_claude(parse_fix_prompt, max_tokens=6000, temperature=0, user_id=user_id)
+                fixed_content = invoke_claude(parse_fix_prompt, max_tokens=20000, temperature=0, user_id=user_id)
                 files[rel_path] = strip_fences(fixed_content)
             except Exception as e:
                 logger.error(f"Parse fix failed for {rel_path}: {e}")
@@ -1173,7 +1173,7 @@ Return each failing file using this exact delimiter format:
 ===END==="""
 
             try:
-                raw = invoke_claude(fix_prompt, max_tokens=8000, temperature=0, user_id=user_id)
+                raw = invoke_claude(fix_prompt, max_tokens=20000, temperature=0, user_id=user_id)
                 fixed = parse_delimited_files(raw)
                 for path, content in fixed.items():
                     if path in files:
