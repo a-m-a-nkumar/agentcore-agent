@@ -40,18 +40,53 @@ COVERAGE_AREAS = (
     "instinct",
 )
 
+# Sub-sections per discovery area, mirrored from the DISCOVERY INTELLIGENCE
+# framework in the system prompt. Joseph emits a `findings` map keyed by these
+# slugs so each area card can show what was gathered per sub-section. Keys here
+# are authoritative — the parser drops any finding whose key isn't listed.
+COVERAGE_SUBSECTIONS: dict[str, tuple[str, ...]] = {
+    "qualification": ("solution_fit", "sponsor", "duplication", "scope"),
+    "value": ("quantitative", "qualitative"),
+    "viability": ("data", "platform", "resources", "money", "time"),
+    "drivers": (
+        "monetary",
+        "regulatory",
+        "strategic",
+        "ease",
+        "dependencies",
+        "reversibility",
+        "cost_of_delay",
+    ),
+    "instinct": (
+        "politics",
+        "track_record",
+        "adoption",
+        "failure_mode",
+        "build_buy",
+        "constraints",
+    ),
+}
+
 
 @dataclass
 class SubScore:
     value: float | None = None
     confidence: str | None = None
-    rationale: str | None = None
+    # Two-part rationale shown as separate sections in the "Why this score"
+    # panel. `consumed` = the facts/inputs/documents the score rests on;
+    # `ranking` = why those facts map to this 1–5 band rather than the
+    # adjacent ones.
+    consumed: str | None = None
+    ranking: str | None = None
 
 
 @dataclass
 class CoverageArea:
     touched: bool = False
     note: str | None = None
+    # Per-sub-section gathered info, keyed by the slugs in COVERAGE_SUBSECTIONS.
+    # Accumulates across turns — a sub-section stays filled once gathered.
+    findings: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -142,7 +177,8 @@ class ConsultingState:
                 k: {
                     "value": v.value,
                     "confidence": v.confidence,
-                    "rationale": v.rationale,
+                    "consumed": v.consumed,
+                    "ranking": v.ranking,
                 }
                 for k, v in self.scores.items()
             },
@@ -152,7 +188,11 @@ class ConsultingState:
 
     def to_coverage_payload(self) -> dict[str, Any]:
         return {
-            k: {"touched": v.touched, "note": v.note}
+            k: {
+                "touched": v.touched,
+                "note": v.note,
+                "findings": dict(v.findings),
+            }
             for k, v in self.coverage.items()
         }
 

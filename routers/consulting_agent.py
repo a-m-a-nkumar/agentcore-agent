@@ -52,6 +52,7 @@ from consulting_agent_tools import (
 from joseph_prompt import get_full_prompt
 from services.consulting_state import (
     KBSnapshot,
+    SUB_SCORE_KEYS,
     UploadedFile,
     clear_request_context,
     get_or_create_state,
@@ -60,6 +61,17 @@ from services.consulting_state import (
     reset_state,
     set_request_context,
 )
+
+# Human-readable labels for the six sub-scores, used when telling Joseph which
+# rationale the user edited in the scoring panel.
+_SUBSCORE_LABELS = {
+    "financial": "Financial Impact",
+    "productivity": "Scale of Impact on Productivity",
+    "intent": "Business Intent and Need",
+    "complexity": "Implementation Complexity",
+    "data_platform": "Data and Platform Readiness",
+    "measurement": "Ease of Measuring Success",
+}
 from services.knowledge_base import (
     fetch_full_content as kb_fetch_full_content,
     lookup_by_id_or_title as kb_lookup,
@@ -125,6 +137,12 @@ class ChatRequest(BaseModel):
     message: str
     session_id: Optional[str] = None
     reset: bool = False
+
+
+class RescoreRequest(BaseModel):
+    session_id: str
+    sub_score: str
+    rationale: str
 
 
 class ExportRequest(BaseModel):
@@ -605,6 +623,120 @@ async def chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+# ───────────────────────── /rescore ─────────────────────────
+
+@router.post("/rescore")
+async def rescore(
+    request: RescoreRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Re-evaluate a single sub-score after the user edits its rationale in the
+    scoring panel.
+
+    The user's edited rationale is treated as new evidence. Joseph re-scores
+    that sub-score (and any other sub-score the new information genuinely
+    bears on), re-emits the full `[[JOSEPH_EVENT:scores]]` block, and we return
+    the updated scores payload. The axis averages and quadrant are computed
+    properties of the state, so the overall placement updates automatically.
+
+    Non-streaming: a rationale edit is a small, focused round-trip, so we run
+    the agent once and return JSON rather than opening an SSE stream.
+    """
+    if not _STRANDS_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Strands SDK not installed")
+
+    key = request.sub_score
+    if key not in SUB_SCORE_KEYS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown sub_score '{key}'. Valid: {list(SUB_SCORE_KEYS)}",
+        )
+
+    new_rationale = (request.rationale or "").strip()
+    if not new_rationale:
+        raise HTTPException(status_code=400, detail="rationale cannot be empty")
+
+    state = get_state(request.session_id)
+    if state is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No active session state for {request.session_id}",
+        )
+
+    session_id = request.session_id
+    label = _SUBSCORE_LABELS.get(key, key)
+
+    # Persist the user's edit immediately as the "consumed" facts of record, so
+    # it isn't lost even if the agent call fails. The user edits the inputs;
+    # Joseph re-derives the `ranking` (why-this-level) judgement on re-score.
+    state.scores[key].consumed = new_rationale
+
+    # Snapshot current scores so Joseph knows his own baseline — markers are
+    # stripped from stored history, so prior numeric scores aren't in context.
+    snapshot_lines = []
+    for k in SUB_SCORE_KEYS:
+        ss = state.scores[k]
+        v = ss.value if ss.value is not None else "—"
+        c = ss.confidence or "—"
+        snapshot_lines.append(f"- {_SUBSCORE_LABELS[k]} ({k}): {v}/5, confidence {c}")
+    current_snapshot = "\n".join(snapshot_lines)
+
+    instruction = (
+        "[FACTS EDIT — re-score request]\n"
+        f'The user opened the scoring panel and edited the "Consumed" facts for the '
+        f'"{label}" sub-score ({key}) — the inputs the score is built from. Their '
+        "revised / added facts are:\n\n"
+        f'"""\n{new_rationale}\n"""\n\n'
+        "Treat this as corrected evidence from the user. Re-evaluate the 1-5 value and "
+        f"confidence for {key} against the scoring framework, using these facts. "
+        "If — and only if — they also bear on another sub-score, adjust that one too; "
+        "otherwise leave the others exactly as they are.\n\n"
+        "Current scores on record:\n"
+        f"{current_snapshot}\n\n"
+        "Re-emit the FULL [[JOSEPH_EVENT:scores]] block with all six sub-scores "
+        "(keep unchanged ones at their current value/confidence and both text "
+        "fields). For the edited sub-score: `consumed` must preserve the substance "
+        "of the facts the user wrote (tightened into clean prose, not discarded), and "
+        "`ranking` is your own 2-3 sentence justification — re-derived from those "
+        "facts — for why it lands at this band.\n\n"
+        "Then reply to the user in 1-2 sentences: say whether the score moved, to what, "
+        "and why. Do not run discovery questions or restate the whole framework."
+    )
+
+    history = _load_history(session_id)
+    prompt_input = _build_input(history, instruction, session_id)
+
+    # No SSE queue here: parse_and_fire_events mutates state directly, and
+    # push_state_event no-ops when no queue is set. We read the state back
+    # and return it as JSON.
+    try:
+        agent = _build_agent()
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, lambda: agent(prompt_input))
+        final_text = _extract_text(result).strip()
+    except Exception as e:
+        logger.exception("Rescore agent run failed")
+        # The user's edited rationale is already persisted; surface a clear
+        # error but keep the saved text so the panel reflects the edit.
+        raise HTTPException(status_code=502, detail=f"Agent error during rescore: {e}")
+
+    cleaned_text = parse_and_fire_events(session_id, final_text)
+
+    # Keep the conversation log coherent for subsequent turns.
+    _append_to_memory(
+        session_id, "user",
+        f'[Edited rationale for "{label}" in the scoring panel]\n{new_rationale}',
+    )
+    if cleaned_text:
+        _append_to_memory(session_id, "assistant", cleaned_text)
+
+    state = get_or_create_state(session_id)
+    return {
+        "scores": state.to_scores_payload(),
+        "message": cleaned_text,
+    }
 
 
 # ───────────────────────── /upload ─────────────────────────

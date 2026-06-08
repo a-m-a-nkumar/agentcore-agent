@@ -500,29 +500,75 @@ Place them anywhere in your response — they will be removed before display.
 Emit this whenever you form OR revise a sub-score hypothesis. Always send
 the FULL current set of all six sub-scores (UI redraws from each emission).
 Each sub-score has value (1-5 or null), confidence ("low"|"medium"|"high"),
-and a one-line rationale. Use `null` for sub-scores you have not yet
-hypothesized.
+and TWO rationale fields — `consumed` and `ranking`. Use `null` for the
+value of sub-scores you have not yet hypothesized.
+
+The user clicks each score in the panel and reads two labelled sections, so
+both fields must be self-contained prose they can read without having seen
+the chat. Never ship a bare fragment like "VP sponsor, board mandate" — write
+full sentences.
+
+**`consumed` — what you used to make this score.** Name the specific
+evidence the number rests on: the figure, the headcount, the sponsor level,
+the data reality, the document or KB item it came from. Be concrete and
+attributable ("the vendor proposal's $2M/yr saving", "the 80-agent dispute
+team", "the architecture page you had me consume"). 2–3 sentences. If you
+have nothing yet, say what's missing — what you'd need to discover before
+you can place it.
+
+**`ranking` — why it lands at this level.** Explain why that evidence maps
+to THIS point on the 1–5 band rather than the one above or below it, tied to
+the band definitions in the scoring framework. 2–3 sentences. For a `null`
+value, say what would have to be true for it to land in a given band.
+
+Keep the two distinct: `consumed` is the inputs, `ranking` is the judgement.
+When the underlying facts change (the user corrects a number, shares a doc,
+you research a benchmark), re-emit the FULL block — the `value` and both text
+fields move together so the panel and the reasoning stay in sync.
 
 Example:
 [[JOSEPH_EVENT:scores]]
 {
-  "financial":     {"value": 3, "confidence": "low",    "rationale": "Vendor claim $2M/yr — needs validation against benchmark"},
-  "productivity":  {"value": 4, "confidence": "medium", "rationale": "80 agents, 14min AHT, deflectable workload"},
-  "intent":        {"value": 5, "confidence": "high",   "rationale": "VP sponsor, board-level cost-to-serve mandate"},
-  "complexity":    {"value": 3, "confidence": "low",    "rationale": "Standard ML triage, two integrations"},
-  "data_platform": {"value": null, "confidence": "low", "rationale": "Data & platform not yet discussed"},
-  "measurement":   {"value": 4, "confidence": "medium", "rationale": "Existing dispute metrics, baseline known"}
+  "financial":     {"value": 3, "confidence": "low",    "consumed": "The vendor proposal claims roughly $2M/year in saved cost-to-serve. That's the only value figure on record, and it's a vendor estimate with no internal validation yet.", "ranking": "$2M sits at the top of the 3 band ($500k–$2M), so I'm holding it at a 3 rather than a 4. An internally validated saving comfortably above $2M is what it would take to move up."},
+  "productivity":  {"value": 4, "confidence": "medium", "consumed": "The use case touches the full dispute-handling function — around 80 agents at a 14-minute average handle time, with a large share of contacts being deflectable.", "ranking": "That's a BU-wide process rather than a single team, which is the 4 band. It isn't a 5 because it's one function, not enterprise-wide."},
+  "intent":        {"value": 5, "confidence": "high",   "consumed": "There's a named VP sponsor and the work ties to a board-level cost-to-serve mandate, both confirmed in conversation rather than inferred.", "ranking": "Executive sponsorship plus a stated top-line priority is exactly the 5 band — the organizational pull is unambiguous."},
+  "complexity":    {"value": 3, "confidence": "low",    "consumed": "This is standard ML triage rather than novel research, with roughly two integration points into the case and telephony systems. Change management for 80 agents is still unscoped.", "ranking": "A standard model plus 1–2 integrations is the mid-band 3. Heavier-than-expected change management is what keeps it off a 4; off-the-shelf integrations would push it there."},
+  "data_platform": {"value": null, "confidence": "low", "consumed": "We haven't discussed whether the dispute data exists at usable volume and quality, or whether the platform can host and serve a model.", "ranking": "I can't place a band until I see data access, labeling, and current MLOps maturity. Production-grade data on a proven platform would land it at 4–5; missing data or platform would pull it to 1–2."},
+  "measurement":   {"value": 4, "confidence": "medium", "consumed": "The team already tracks dispute volume, handle time, and resolution rate, so there's a real baseline to measure against.", "ranking": "An existing metric and baseline is the 4 band. It isn't a 5 because there's no clean A/B control set up yet."}
 }
 [[/JOSEPH_EVENT]]
 
-**2. `coverage` — Marks a discovery area as touched.**
+**2. `coverage` — Marks a discovery area as touched and records what you
+gathered per sub-section.**
 
-Emit when your discovery touches a new area. Valid areas:
-"qualification", "value", "viability", "drivers", "instinct".
+Emit when your discovery touches an area. Valid areas: "qualification",
+"value", "viability", "drivers", "instinct". `note` is a one-line summary of
+the area. `findings` is a map from sub-section slug → a short sentence on what
+you actually learned about that sub-section (not what it means — what the user
+told you or you concluded). The user opens each area card and reads these
+sub-section findings, so write them as concrete, self-contained notes.
+
+Only include sub-sections you have something real to say about — omit the rest
+and they show as "not yet explored". Re-emit an area as you learn more; new
+findings merge in and earlier ones are kept, so you can fill an area
+sub-section by sub-section across turns.
+
+Valid sub-section slugs per area:
+- **qualification**: `solution_fit` (needs to learn/recognize something new),
+  `sponsor` (real decision owner / who'd defend it), `duplication` (not already
+  in flight), `scope` (a use case, not a portfolio)
+- **value**: `quantitative` (named numerator/denominator, baseline, delta,
+  basis, confidence), `qualitative` (DX, CX, regulatory posture, brand,
+  learning, optionality)
+- **viability**: `data`, `platform`, `resources`, `money`, `time`
+- **drivers**: `monetary`, `regulatory`, `strategic`, `ease`, `dependencies`,
+  `reversibility`, `cost_of_delay`
+- **instinct**: `politics`, `track_record`, `adoption`, `failure_mode`,
+  `build_buy`, `constraints`
 
 Example:
 [[JOSEPH_EVENT:coverage]]
-{"area": "qualification", "note": "Confirmed AI/ML fit, real sponsor at VP level"}
+{"area": "qualification", "note": "Confirmed AI/ML fit, real sponsor at VP level", "findings": {"solution_fit": "Drafting first-pass support replies is genuine NLG, not a rules engine — clears the AI/ML bar.", "sponsor": "VP of Customer Support owns the decision and would defend it in a steering committee.", "duplication": "User confirmed nothing similar is in flight elsewhere."}}
 [[/JOSEPH_EVENT]]
 
 **3. `citation` — Records a source you cited.**

@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 from services.consulting_state import (
     COVERAGE_AREAS,
+    COVERAGE_SUBSECTIONS,
     Citation,
     SUB_SCORE_KEYS,
     get_or_create_state,
@@ -143,8 +144,14 @@ def _handle_scores(state, payload):
             conf = entry["confidence"]
             if conf in ("low", "medium", "high"):
                 ss.confidence = conf
-        if "rationale" in entry:
-            ss.rationale = str(entry["rationale"]) if entry["rationale"] is not None else None
+        if "consumed" in entry:
+            ss.consumed = str(entry["consumed"]) if entry["consumed"] is not None else None
+        if "ranking" in entry:
+            ss.ranking = str(entry["ranking"]) if entry["ranking"] is not None else None
+        # Tolerate the old single-field shape: fold a stray `rationale` into
+        # `ranking` so an out-of-date emission doesn't drop its reasoning.
+        elif "rationale" in entry:
+            ss.ranking = str(entry["rationale"]) if entry["rationale"] is not None else None
 
 
 def _handle_coverage(state, payload):
@@ -158,6 +165,19 @@ def _handle_coverage(state, payload):
     note = payload.get("note")
     if note is not None:
         state.coverage[area].note = str(note)
+
+    # Merge per-sub-section findings. Accumulate (don't clear) so a partial
+    # emission keeps earlier sub-sections; drop unknown keys and blanks.
+    findings = payload.get("findings")
+    if isinstance(findings, dict):
+        allowed = COVERAGE_SUBSECTIONS.get(area, ())
+        for sub_key, sub_val in findings.items():
+            key = str(sub_key).lower().strip()
+            if key not in allowed:
+                continue
+            if sub_val is None or not str(sub_val).strip():
+                continue
+            state.coverage[area].findings[key] = str(sub_val).strip()
 
 
 def _handle_citation(state, payload):

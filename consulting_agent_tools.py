@@ -26,6 +26,7 @@ from strands import tool
 
 from services.consulting_state import (
     COVERAGE_AREAS,
+    COVERAGE_SUBSECTIONS,
     Citation,
     SUB_SCORE_KEYS,
     SubScore,
@@ -62,7 +63,19 @@ def propose_scores(scores_json: str) -> str:
     FULL current set of all six sub-scores as a JSON string; the UI
     redraws from each call.
 
-    The JSON object must have these six keys, each with value/confidence/rationale:
+    Every score carries TWO rationale fields, shown as separate sections in
+    the panel:
+      - `consumed`: the specific evidence the score rests on (figure,
+        headcount, sponsor level, data reality, the document or KB item it
+        came from). Concrete and attributable; if you have nothing yet, say
+        what's missing.
+      - `ranking`: why that evidence maps to this 1-5 band rather than the
+        next one up or down, tied to the framework's band definitions.
+    Both are 2-3 sentences of self-contained prose, not one-line labels — the
+    user reads them without having seen the chat. A null-valued score still
+    takes both fields: what you'd need to discover, and what would place it.
+
+    The JSON object must have these six keys, each with value/confidence/consumed/ranking:
       Business Impact axis:
         - "financial": net annual value (cost saved + revenue + risk avoided)
         - "productivity": how many people and how much of their work
@@ -75,12 +88,12 @@ def propose_scores(scores_json: str) -> str:
     Args:
         scores_json: A JSON-encoded string of shape:
             {
-              "financial":     {"value": 3, "confidence": "low",    "rationale": "..."},
-              "productivity":  {"value": 4, "confidence": "medium", "rationale": "..."},
-              "intent":        {"value": 5, "confidence": "high",   "rationale": "..."},
-              "complexity":    {"value": 3, "confidence": "low",    "rationale": "..."},
-              "data_platform": {"value": 3, "confidence": "medium", "rationale": "..."},
-              "measurement":   {"value": 4, "confidence": "high",   "rationale": "..."}
+              "financial":     {"value": 3, "confidence": "low",    "consumed": "...", "ranking": "..."},
+              "productivity":  {"value": 4, "confidence": "medium", "consumed": "...", "ranking": "..."},
+              "intent":        {"value": 5, "confidence": "high",   "consumed": "...", "ranking": "..."},
+              "complexity":    {"value": 3, "confidence": "low",    "consumed": "...", "ranking": "..."},
+              "data_platform": {"value": 3, "confidence": "medium", "consumed": "...", "ranking": "..."},
+              "measurement":   {"value": 4, "confidence": "high",   "consumed": "...", "ranking": "..."}
             }
         Use `value: null` if you do not yet have a hypothesis for a sub-score.
 
@@ -110,25 +123,40 @@ def propose_scores(scores_json: str) -> str:
             ss.value = float(raw) if raw is not None else None
         if "confidence" in entry:
             ss.confidence = entry["confidence"]
-        if "rationale" in entry:
-            ss.rationale = entry["rationale"]
+        if "consumed" in entry:
+            ss.consumed = entry["consumed"]
+        if "ranking" in entry:
+            ss.ranking = entry["ranking"]
+        elif "rationale" in entry:
+            ss.ranking = entry["rationale"]
 
     push_state_event("scores", state.to_scores_payload())
     return f"scores updated; axis impact={state.axes['impact']}, speed={state.axes['speed']}, quadrant={state.quadrant}"
 
 
 @tool
-def coverage_tracker(area: str, note: str) -> str:
+def coverage_tracker(area: str, note: str, findings_json: str = "") -> str:
     """
-    Mark one of the five discovery areas as touched and record a brief note.
+    Mark one of the five discovery areas as touched, record a brief note, and
+    optionally log what you gathered per sub-section.
 
     Call this when your discovery touches a new area. The UI uses this to
     show the user that you have a plan — that you are not just running a
-    questionnaire.
+    questionnaire. Sub-section findings merge across calls and earlier ones
+    are kept, so you can fill an area sub-section by sub-section.
 
     Args:
         area: one of "qualification", "value", "viability", "drivers", "instinct"
         note: one-line summary of what you learned about this area in this turn
+        findings_json: optional JSON object mapping sub-section slug -> a short
+            sentence on what you gathered. Valid slugs by area:
+              qualification: solution_fit, sponsor, duplication, scope
+              value: quantitative, qualitative
+              viability: data, platform, resources, money, time
+              drivers: monetary, regulatory, strategic, ease, dependencies,
+                       reversibility, cost_of_delay
+              instinct: politics, track_record, adoption, failure_mode,
+                        build_buy, constraints
 
     Returns:
         Status string for the agent's own context.
@@ -143,6 +171,18 @@ def coverage_tracker(area: str, note: str) -> str:
     state = get_or_create_state(session_id)
     state.coverage[area].touched = True
     state.coverage[area].note = note
+
+    if findings_json:
+        try:
+            findings = json.loads(findings_json)
+        except json.JSONDecodeError as e:
+            return f"coverage updated for {area}, but findings_json was invalid ({e})"
+        if isinstance(findings, dict):
+            allowed = COVERAGE_SUBSECTIONS.get(area, ())
+            for sub_key, sub_val in findings.items():
+                key = str(sub_key).lower().strip()
+                if key in allowed and sub_val is not None and str(sub_val).strip():
+                    state.coverage[area].findings[key] = str(sub_val).strip()
 
     push_state_event("coverage", state.to_coverage_payload())
     return f"coverage updated for {area}"
