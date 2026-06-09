@@ -1,0 +1,35 @@
+{
+  "workflow": {
+    "name": "B2B Invoice Dispute Resolution Pipeline",
+    "description": "Automates the end-to-end dispute resolution process for B2B invoice discrepancies — from intake to GL adjustment and stakeholder notification.",
+    "version": "1.2.0",
+    "trigger": "Dispute Ticket Raised (Email / Portal)",
+    "output": "Dispute Resolved — GL Updated & Stakeholders Notified"
+  },
+  "agents": [
+    {
+      "name": "Dispute Intake Agent",
+      "role": "Parses and classifies incoming dispute requests from email and customer portal",
+      "tools": ["email-inbox", "ocr-parser", "crm-read", "ticket-create"],
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "name": "Invoice Validation Engine",
+      "role": "Cross-references disputed invoice against PO and contract terms in the ERP",
+      "tools": ["erp-read", "gl-lookup", "match-algo", "audit-log"],
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "name": "Resolution Decision Agent",
+      "role": "Applies business rules to determine resolution path — credit note, partial payment, or escalation",
+      "tools": ["risk-model", "crm-write", "gl-write", "notify-send"],
+      "model": "claude-opus-4-7"
+    },
+    {
+      "name": "Stakeholder Notifier",
+      "role": "Sends resolution outcome to the client and internal finance team with full audit trail",
+      "tools": ["email-send", "webhook-send", "audit-log"],
+      "model": "claude-haiku-4-5"
+    }
+  ]
+}

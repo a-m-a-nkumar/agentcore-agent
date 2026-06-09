@@ -1,0 +1,33 @@
+{
+  "overview": {
+    "totalAgents": 6,
+    "activeAgents": 4,
+    "tasksToday": 4313,
+    "totalSavings": 204600,
+    "successRate": 96.4,
+    "uptimePercent": 99.97
+  },
+  "segments": [
+    { "name": "Print",          "revenue": 53.3, "agents": 2, "savings": 21800,  "color": "#6B7280" },
+    { "name": "Merchant Svc",   "revenue": 18.7, "agents": 2, "savings": 106400, "color": "#0EA5E9" },
+    { "name": "B2B Payments",   "revenue": 13.6, "agents": 1, "savings": 31800,  "color": "#8B5CF6" },
+    { "name": "Data Solutions", "revenue": 14.4, "agents": 1, "savings": 44600,  "color": "#10B981" }
+  ],
+  "activityTimeline": [
+    { "time": "08:00", "tasks": 280, "savings": 8400 },
+    { "time": "09:00", "tasks": 410, "savings": 12300 },
+    { "time": "10:00", "tasks": 620, "savings": 18600 },
+    { "time": "11:00", "tasks": 590, "savings": 17700 },
+    { "time": "12:00", "tasks": 380, "savings": 11400 },
+    { "time": "13:00", "tasks": 470, "savings": 14100 },
+    { "time": "14:00", "tasks": 710, "savings": 21300 },
+    { "time": "15:00", "tasks": 853, "savings": 25590 }
+  ],
+  "roiProjection": {
+    "monthlyAgentCost": 48000,
+    "monthlyOperationalSavings": 204600,
+    "netMonthlyROI": 156600,
+    "annualProjected": 1879200,
+    "paybackWeeks": 10
+  }
+}

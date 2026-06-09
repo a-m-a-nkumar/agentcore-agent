@@ -1,0 +1,56 @@
+[
+  {
+    "id": "m-001",
+    "businessName": "Sunrise Bakery LLC",
+    "owner": "Maria Chen",
+    "email": "maria@sunrisebakery.com",
+    "type": "Food & Beverage",
+    "annualRevenue": 420000,
+    "status": "in_progress",
+    "currentStep": 3,
+    "steps": [
+      { "id": 1, "name": "Application received",  "status": "completed", "completedAt": "09:14 AM" },
+      { "id": 2, "name": "KYB verification",       "status": "completed", "completedAt": "09:16 AM" },
+      { "id": 3, "name": "Risk assessment",        "status": "running",   "completedAt": null },
+      { "id": 4, "name": "Terminal configuration", "status": "pending",   "completedAt": null },
+      { "id": 5, "name": "Account activation",     "status": "pending",   "completedAt": null },
+      { "id": 6, "name": "Welcome & training",     "status": "pending",   "completedAt": null }
+    ]
+  },
+  {
+    "id": "m-002",
+    "businessName": "Atlas Auto Parts",
+    "owner": "James Kowalski",
+    "email": "j.kowalski@atlasauto.com",
+    "type": "Automotive",
+    "annualRevenue": 1200000,
+    "status": "completed",
+    "currentStep": 6,
+    "steps": [
+      { "id": 1, "name": "Application received",  "status": "completed", "completedAt": "08:02 AM" },
+      { "id": 2, "name": "KYB verification",       "status": "completed", "completedAt": "08:04 AM" },
+      { "id": 3, "name": "Risk assessment",        "status": "completed", "completedAt": "08:09 AM" },
+      { "id": 4, "name": "Terminal configuration", "status": "completed", "completedAt": "08:11 AM" },
+      { "id": 5, "name": "Account activation",     "status": "completed", "completedAt": "08:12 AM" },
+      { "id": 6, "name": "Welcome & training",     "status": "completed", "completedAt": "08:18 AM" }
+    ]
+  },
+  {
+    "id": "m-003",
+    "businessName": "Verde Garden Supply",
+    "owner": "Sofia Reyes",
+    "email": "sofia@verdegarden.com",
+    "type": "Retail",
+    "annualRevenue": 780000,
+    "status": "pending",
+    "currentStep": 1,
+    "steps": [
+      { "id": 1, "name": "Application received",  "status": "pending", "completedAt": null },
+      { "id": 2, "name": "KYB verification",       "status": "pending", "completedAt": null },
+      { "id": 3, "name": "Risk assessment",        "status": "pending", "completedAt": null },
+      { "id": 4, "name": "Terminal configuration", "status": "pending", "completedAt": null },
+      { "id": 5, "name": "Account activation",     "status": "pending", "completedAt": null },
+      { "id": 6, "name": "Welcome & training",     "status": "pending", "completedAt": null }
+    ]
+  }
+]

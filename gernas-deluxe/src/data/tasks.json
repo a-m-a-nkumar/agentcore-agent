@@ -1,0 +1,10 @@
+[
+  { "id": "t-001", "agentId": "agent-001", "action": "KYB verified",              "result": "Sunrise Bakery — approved",        "segment": "merchant", "timestamp": "09:16 AM", "status": "success" },
+  { "id": "t-002", "agentId": "agent-005", "action": "Transaction flagged",       "result": "Txn #TXN-88291 — hold placed",     "segment": "merchant", "timestamp": "09:14 AM", "status": "alert"   },
+  { "id": "t-003", "agentId": "agent-003", "action": "Invoice matched",           "result": "INV-2024-8841 — $12,400 cleared",  "segment": "b2b",      "timestamp": "09:10 AM", "status": "success" },
+  { "id": "t-004", "agentId": "agent-002", "action": "At-risk customer detected", "result": "Account #DLX-4421 — email sent",   "segment": "print",    "timestamp": "09:08 AM", "status": "success" },
+  { "id": "t-005", "agentId": "agent-004", "action": "Profile enriched",          "result": "892 SMB records updated",          "segment": "data",     "timestamp": "09:01 AM", "status": "success" },
+  { "id": "t-006", "agentId": "agent-006", "action": "Opportunity scored",        "result": "18 print leads generated",         "segment": "print",    "timestamp": "08:55 AM", "status": "success" },
+  { "id": "t-007", "agentId": "agent-005", "action": "Anomaly detected",          "result": "Txn #TXN-88190 — cleared",         "segment": "merchant", "timestamp": "08:50 AM", "status": "success" },
+  { "id": "t-008", "agentId": "agent-001", "action": "Terminal configured",       "result": "Atlas Auto Parts — live",          "segment": "merchant", "timestamp": "08:11 AM", "status": "success" }
+]

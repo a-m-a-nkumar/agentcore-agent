@@ -1,0 +1,52 @@
+[
+  {
+    "id": "workflow-001",
+    "name": "Merchant Onboarding & Fraud Prevention",
+    "description": "End-to-end merchant lifecycle — from application to fraud-safe live transactions",
+    "agents": ["agent-001", "agent-005"],
+    "steps": [
+      { "order": 1, "agentId": "agent-001", "role": "Onboard merchant, verify KYB, provision terminal" },
+      { "order": 2, "agentId": "agent-005", "role": "Monitor all transactions for fraud in real-time" }
+    ],
+    "solves": ["Merchant onboarding automation", "Real-time fraud detection", "KYB verification", "Terminal provisioning"],
+    "segment": "Merchant Services",
+    "tags": ["onboarding", "fraud", "merchant", "kyb", "terminal"]
+  },
+  {
+    "id": "workflow-002",
+    "name": "Invoice-to-Cash Automation",
+    "description": "Automated invoice matching, reconciliation, and GL posting across ERP systems",
+    "agents": ["agent-003"],
+    "steps": [
+      { "order": 1, "agentId": "agent-003", "role": "Match invoices to payments, post to GL, flag exceptions" }
+    ],
+    "solves": ["Invoice-to-payment matching", "GL journal entry automation", "Exception flagging", "Multi-ERP integration"],
+    "segment": "B2B Payments",
+    "tags": ["invoice", "reconciliation", "erp", "gl", "b2b", "payments"]
+  },
+  {
+    "id": "workflow-003",
+    "name": "Print Customer Retention Pipeline",
+    "description": "Detect churn signals early and trigger retention + upsell before customers leave",
+    "agents": ["agent-002", "agent-006"],
+    "steps": [
+      { "order": 1, "agentId": "agent-002", "role": "Monitor order patterns, score churn risk, send retention emails" },
+      { "order": 2, "agentId": "agent-006", "role": "Score upsell propensity and route high-value leads to sales" }
+    ],
+    "solves": ["Early churn signal detection", "Automated retention emails", "Upsell propensity scoring", "Sales team routing"],
+    "segment": "Print",
+    "tags": ["churn", "retention", "print", "upsell", "email"]
+  },
+  {
+    "id": "workflow-004",
+    "name": "SMB Data Enrichment & Scoring",
+    "description": "Continuously enrich SMB profiles with firmographic and payment signals",
+    "agents": ["agent-004"],
+    "steps": [
+      { "order": 1, "agentId": "agent-004", "role": "Enrich profiles, score payment behavior, push to CRM and marketing" }
+    ],
+    "solves": ["Firmographic enrichment", "Payment behavior scoring", "Profile deduplication", "CRM sync"],
+    "segment": "Data Solutions",
+    "tags": ["enrichment", "data", "scoring", "smb", "crm"]
+  }
+]
