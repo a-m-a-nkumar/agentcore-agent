@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List, Dict
 import logging
@@ -968,7 +969,17 @@ def get_confluence_pages_bulk(
 @router.get("/jira/issues/{project_key}")
 def get_jira_issues(
     project_key: str,
-    current_user: dict = Depends(get_current_user)
+    since_days: Optional[int] = Query(
+        180,
+        ge=0,
+        description=(
+            "If > 0, only fetch Epics + issues updated within the last N days. "
+            "Set to 0 to fetch ALL issues (slow for large projects — e.g. EPAY "
+            "with 28k issues takes minutes because Atlassian's /search/jql "
+            "endpoint silently caps responses at 100/page). Default 180 days."
+        ),
+    ),
+    current_user: dict = Depends(get_current_user),
 ):
     """List-view fetch for the Jira UI module.
 
@@ -977,10 +988,22 @@ def get_jira_issues(
     Description is loaded lazily via GET /jira/issue/{issue_key} when the
     user clicks a row in the sidebar.
 
+    `since_days` filter:
+      - Default 180 → only Epics + issues updated in the last 6 months.
+        Trims EPAY (~28k issues) to ~3-5k, dropping cold-load wall time
+        from minutes to ~30 seconds.
+      - Pass 0 explicitly when the user clicks "Load all" in the UI.
+
+    Response includes `is_filtered` + `since_days` so the frontend can
+    render the "showing recent N of total" banner with a Load-all CTA.
+
     The RAG sync flow still uses the heavier `get_project_issues` because
-    embeddings need the full body text. This endpoint only serves the UI.
+    embeddings need the full body text.
     """
-    logger.info(f"Fetching Jira issue summaries for project_key: '{project_key}' (user: {current_user['id']})")
+    logger.info(
+        f"Fetching Jira issue summaries for project_key: '{project_key}' "
+        f"(user: {current_user['id']}, since_days={since_days})"
+    )
 
     credentials = get_user_atlassian_credentials(current_user['id'])
 
@@ -998,13 +1021,83 @@ def get_jira_issues(
         )
 
         logger.info(f"Using Jira domain: {credentials['atlassian_domain']}")
-        issues = jira_service.get_project_issues_lite(project_key)
-        logger.info(f"Successfully fetched {len(issues)} issue summaries for project {project_key}")
-        return {"issues": issues, "total": len(issues)}
+        effective_since = since_days if (since_days and since_days > 0) else None
+        issues = jira_service.get_project_issues_lite(project_key, since_days=effective_since)
+        logger.info(
+            f"Successfully fetched {len(issues)} issue summaries for project {project_key} "
+            f"(since_days={effective_since})"
+        )
+        return {
+            "issues": issues,
+            "total": len(issues),
+            "is_filtered": effective_since is not None,
+            "since_days": effective_since,
+        }
 
     except Exception as e:
         logger.error(f"Error fetching Jira issues for project {project_key}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/jira/issues/{project_key}/stream")
+def stream_jira_issues(
+    project_key: str,
+    since_days: Optional[int] = Query(180, ge=0),
+    current_user: dict = Depends(get_current_user),
+):
+    """SSE-streaming variant of /jira/issues/{project_key}.
+
+    Yields one event per Atlassian page (typically 100 issues each) so the
+    Jira sidebar can render progressively instead of blocking on the full
+    fetch. Event shapes:
+
+      data: {"type": "batch", "issues": [...], "running_total": N,
+             "batch_num": K, "is_last": false, "from_cache": false}\\n\\n
+      ...
+      data: {"type": "done", "total": N, "batches": K, "from_cache": false}\\n\\n
+
+    On error: data: {"type": "error", "message": "..."}\\n\\n
+
+    A cache hit emits exactly one `batch` event (with `from_cache: true` and
+    `is_last: true`) followed by `done`. The frontend logic is identical for
+    cold-fetch and warm-cache paths.
+    """
+    credentials = get_user_atlassian_credentials(current_user['id'])
+    if not credentials or not credentials.get('atlassian_api_token'):
+        raise HTTPException(
+            status_code=400,
+            detail="Atlassian account not linked. Please link your account first."
+        )
+
+    jira_service = JiraService(
+        credentials['atlassian_domain'],
+        credentials['atlassian_email'],
+        credentials['atlassian_api_token'],
+    )
+    effective_since = since_days if (since_days and since_days > 0) else None
+    logger.info(
+        f"[Jira-lite] streaming issues for project={project_key} "
+        f"user={current_user['id']} since_days={effective_since}"
+    )
+
+    def event_stream():
+        try:
+            for event in jira_service.stream_project_issues_lite(
+                project_key, since_days=effective_since
+            ):
+                # Tag every event with the filter context the consumer needs.
+                event.setdefault("since_days", effective_since)
+                event.setdefault("is_filtered", effective_since is not None)
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as e:
+            logger.error(f"[Jira-lite] stream endpoint error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.get("/jira/issue/{issue_key}")

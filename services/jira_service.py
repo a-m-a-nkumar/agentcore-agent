@@ -8,10 +8,19 @@ logger = logging.getLogger(__name__)
 
 # Module-level cache of the FULL Jira project list, keyed by user email so
 # different users never see each other's projects. Mirrors the equivalent
-# cache in confluence_service. 5-min TTL: new Jira projects appear within
+# cache in confluence_service. 30-min TTL: new Jira projects appear within
 # that window but every modal open after the first hits memory, not Jira.
 _PROJECT_LIST_CACHE: Dict[str, Tuple[float, List[Dict]]] = {}
-_PROJECT_LIST_CACHE_TTL_SECS = 300  # 5 minutes
+_PROJECT_LIST_CACHE_TTL_SECS = 1800  # 30 minutes (bumped from 5 — project list
+                                     # changes are rare; warm cache wins are huge)
+
+# Per-(user, project, since_days) cache of the slim issues-lite list. The
+# original load of EPAY (~28k issues) takes minutes because Atlassian's
+# /search/jql endpoint silently caps responses at 100 per page regardless of
+# what we ask for. Once paid for, keep the result warm so re-navigating into
+# the Jira module within the TTL is instant.
+_ISSUES_LITE_CACHE: Dict[Tuple[str, str, Optional[int]], Tuple[float, List[Dict]]] = {}
+_ISSUES_LITE_CACHE_TTL_SECS = 1800  # 30 minutes
 
 
 class JiraService:
@@ -276,117 +285,227 @@ class JiraService:
             logger.error(f"Error fetching Jira issues: {e}")
             raise Exception(f"Failed to fetch Jira issues: {str(e)}")
 
-    def get_project_issues_lite(self, project_key: str) -> List[Dict]:
-        """List-view variant of get_project_issues — fetches ONLY the fields
-        the Jira UI sidebar row needs (id + summary + type + status +
-        assignee + priority + updated + parent links). Description, comments,
-        labels, story points, reporter, and created timestamp are deliberately
-        skipped here and lazy-fetched per-issue by `get_issue_detail` when the
-        user clicks a row.
+    # ─── Slim list endpoints (sidebar) ──────────────────────────────────────
+    #
+    # Cold-load reality check: Atlassian's /rest/api/3/search/jql endpoint
+    # silently caps responses at 100 issues per request regardless of what we
+    # ask for via `maxResults`. Cursor pagination means we can't parallelize.
+    # So 28k issues = 280 sequential round-trips = minutes of wall time.
+    #
+    # Two-pronged mitigation:
+    #   1. `since_days` — JQL filter to load only Epics + recently-updated
+    #      issues (typical default: last 6 months). Reduces 28k → ~3-5k.
+    #   2. Streaming generator (`stream_project_issues_lite`) — yields each
+    #      batch as it lands so the UI can render progressively instead of
+    #      blocking on the full list.
+    #
+    # Both share `_fetch_issues_lite_batches` so the slim-field-set,
+    # JQL-construction, and Atlassian quirk handling live in one place.
 
-        Why this matters: on the EPAY project (~50k issues), the full-fat
-        fetch produced ~500 sequential round-trips with multi-paragraph
-        descriptions in every payload — minutes of wall time before the
-        sidebar could render. This variant slashes the per-page payload AND
-        bumps page_size to 1000, dropping the round-trip count to ~50.
+    # Fields the sidebar row needs. Description / comments / labels / story
+    # points / reporter / created are deliberately skipped here and lazy-loaded
+    # per-issue via `get_issue_detail` when the user clicks a row.
+    _LITE_FIELDS = [
+        "summary",
+        "status",
+        "assignee",
+        "priority",
+        "issuetype",
+        "updated",
+        "parent",
+        # Epic Link on classic / company-managed projects. Team-managed projects
+        # unify under `parent`; ask for both so the frontend can resolve
+        # hierarchy regardless of project style.
+        "customfield_10014",
+    ]
 
-        The RAG sync path (services/sync_service.py:get_project_issues call)
-        still uses the full fetch — embeddings need the description text.
+    @staticmethod
+    def _build_lite_jql(project_key: str, since_days: Optional[int]) -> str:
+        """JQL for the sidebar list. When `since_days` is set, restrict to
+        Epics (so the structural backbone is always present) OR issues touched
+        in the recency window. Without `since_days`, return all issues."""
+        if since_days and since_days > 0:
+            return (
+                f"project = {project_key} "
+                f"AND (issuetype = Epic OR updated >= -{since_days}d) "
+                f"ORDER BY updated DESC"
+            )
+        return f"project = {project_key} ORDER BY updated DESC"
+
+    def _fetch_issues_lite_batches(self, project_key: str, since_days: Optional[int]):
+        """Generator — yields each page's issues as a list[Dict] the moment it
+        arrives from Atlassian. Used internally by both the blocking
+        `get_project_issues_lite` and the streaming `stream_project_issues_lite`.
+
+        Yields tuples of `(batch_issues, batch_num, is_last)`.
         """
-        fields = [
-            "summary",
-            "status",
-            "assignee",
-            "priority",
-            "issuetype",
-            "updated",
-            "parent",
-            # Epic Link on classic / company-managed projects. Team-managed
-            # projects unify under `parent`; we ask for both so the frontend
-            # can resolve hierarchy regardless of project style.
-            "customfield_10014",
-        ]
-
-        jql = f"project = {project_key} ORDER BY updated DESC"
+        jql = self._build_lite_jql(project_key, since_days)
         url = f"{self.base_url}/rest/api/3/search/jql"
-        page_size = 1000  # Atlassian /search/jql allows up to 5000 per page
-                          # with a slim field set; 1000 is the safe middle
-                          # ground that consistently completes under their
-                          # per-request timeout.
+        # We still pass 1000 even though Atlassian's /search/jql silently caps
+        # at 100. If they ever raise the cap (or for self-hosted Server/DC
+        # variants where the cap is higher), this code automatically picks it up.
+        page_size = 1000
         next_page_token: Optional[str] = None
-        all_issues: List[Dict] = []
         batch_num = 0
+        total = 0
 
         logger.info(f"[Jira-lite] Fetching issue summaries from {url} with JQL: {jql}")
 
-        try:
-            while True:
-                batch_num += 1
-                params: Dict[str, str] = {
-                    "jql": jql,
-                    "maxResults": str(page_size),
-                    "fields": ",".join(fields),
-                }
-                if next_page_token:
-                    params["nextPageToken"] = next_page_token
+        while True:
+            batch_num += 1
+            params: Dict[str, str] = {
+                "jql": jql,
+                "maxResults": str(page_size),
+                "fields": ",".join(self._LITE_FIELDS),
+            }
+            if next_page_token:
+                params["nextPageToken"] = next_page_token
 
-                response = self._session.get(
-                    url,
-                    headers=self.headers,
-                    auth=self.auth,
-                    params=params,
-                    timeout=30,
+            response = self._session.get(
+                url,
+                headers=self.headers,
+                auth=self.auth,
+                params=params,
+                timeout=30,
+            )
+
+            if response.status_code == 400:
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('errorMessages', ['Invalid JQL query'])[0]
+                    raise Exception(f"Invalid request: {error_msg}")
+                except Exception as parse_err:
+                    if "Invalid request" in str(parse_err):
+                        raise
+                    raise Exception(f"Invalid request for project '{project_key}'")
+            elif response.status_code == 404:
+                raise Exception(f"Project '{project_key}' not found.")
+            elif response.status_code == 410:
+                raise Exception(f"Project '{project_key}' may be archived or inaccessible.")
+
+            response.raise_for_status()
+            result = response.json()
+            issues = result.get('issues', []) or []
+            total += len(issues)
+
+            is_last = result.get('isLast')
+            next_page_token = result.get('nextPageToken')
+
+            stop_now = (is_last is True or not next_page_token or len(issues) == 0)
+            # Defensive batch cap — at the observed 100/batch this caps at
+            # 50,000 issues, more than any realistic project (even EPAY's 28k
+            # fits comfortably).
+            if batch_num >= 500:
+                logger.warning(
+                    f"[Jira-lite] project={project_key} reached batch cap (500). "
+                    f"Stopping at {total} issues."
                 )
-
-                if response.status_code == 400:
-                    try:
-                        error_data = response.json()
-                        error_msg = error_data.get('errorMessages', ['Invalid JQL query'])[0]
-                        raise Exception(f"Invalid request: {error_msg}")
-                    except Exception as parse_err:
-                        if "Invalid request" in str(parse_err):
-                            raise
-                        raise Exception(f"Invalid request for project '{project_key}'")
-                elif response.status_code == 404:
-                    raise Exception(f"Project '{project_key}' not found.")
-                elif response.status_code == 410:
-                    raise Exception(f"Project '{project_key}' may be archived or inaccessible.")
-
-                response.raise_for_status()
-                result = response.json()
-                issues = result.get('issues', []) or []
-                all_issues.extend(issues)
-
-                is_last = result.get('isLast')
-                next_page_token = result.get('nextPageToken')
-
-                logger.info(
-                    f"[Jira-lite] project={project_key} batch {batch_num}: {len(issues)} issues "
-                    f"(running total={len(all_issues)}, isLast={is_last})"
-                )
-
-                if is_last is True or not next_page_token or len(issues) == 0:
-                    break
-
-                # Same 500-batch defensive cap. At page_size=1000 this means we
-                # surface up to 500,000 issues before stopping — well above any
-                # realistic project.
-                if batch_num >= 500:
-                    logger.warning(
-                        f"[Jira-lite] project={project_key} reached batch cap (500). "
-                        f"Stopping at {len(all_issues)} issues."
-                    )
-                    break
+                stop_now = True
 
             logger.info(
-                f"[Jira-lite] DONE — {len(all_issues)} issue summaries from "
-                f"project {project_key} across {batch_num} batches"
+                f"[Jira-lite] project={project_key} batch {batch_num}: {len(issues)} issues "
+                f"(running total={total}, isLast={is_last}, since_days={since_days})"
             )
-            return all_issues
 
+            yield issues, batch_num, stop_now
+
+            if stop_now:
+                logger.info(
+                    f"[Jira-lite] DONE — {total} issue summaries from "
+                    f"project {project_key} across {batch_num} batches (since_days={since_days})"
+                )
+                return
+
+    def get_project_issues_lite(
+        self,
+        project_key: str,
+        since_days: Optional[int] = None,
+    ) -> List[Dict]:
+        """List-view variant of `get_project_issues` — slim fields only,
+        optional recency filter. See class-level commentary for full rationale.
+
+        Result is cached per (user-email, project_key, since_days) with a
+        30-min TTL. Re-navigating to the same project within the TTL is instant.
+
+        The RAG sync path (services/sync_service.py) keeps using the
+        full-fat `get_project_issues` — embeddings need description text.
+        """
+        cache_key = (self.email, project_key, since_days)
+        now = time.time()
+        cached = _ISSUES_LITE_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _ISSUES_LITE_CACHE_TTL_SECS:
+            age = int(now - cached[0])
+            logger.info(
+                f"[Jira-lite] cache HIT for {self.email} project={project_key} "
+                f"since_days={since_days} ({len(cached[1])} issues, age={age}s)"
+            )
+            return cached[1]
+
+        try:
+            all_issues: List[Dict] = []
+            for batch_issues, _bnum, _last in self._fetch_issues_lite_batches(project_key, since_days):
+                all_issues.extend(batch_issues)
+            _ISSUES_LITE_CACHE[cache_key] = (now, all_issues)
+            return all_issues
         except requests.exceptions.RequestException as e:
             logger.error(f"[Jira-lite] HTTP error: {e}")
             raise Exception(f"Failed to fetch Jira issues: {str(e)}")
+
+    def stream_project_issues_lite(
+        self,
+        project_key: str,
+        since_days: Optional[int] = None,
+    ):
+        """Same slim fetch as `get_project_issues_lite` but yields each batch
+        as it arrives so the caller can stream progress to the client (SSE).
+
+        Yields dicts: `{"type": "batch", "issues": [...], "running_total": N, "is_last": bool}`
+        On clean completion, yields one final `{"type": "done", "total": N, "batches": K}`.
+
+        Populates `_ISSUES_LITE_CACHE` on successful completion so the next
+        call from this user (streaming or blocking) hits the warm cache.
+        """
+        cache_key = (self.email, project_key, since_days)
+        now = time.time()
+        cached = _ISSUES_LITE_CACHE.get(cache_key)
+        if cached and (now - cached[0]) < _ISSUES_LITE_CACHE_TTL_SECS:
+            age = int(now - cached[0])
+            logger.info(
+                f"[Jira-lite] stream cache HIT for {self.email} project={project_key} "
+                f"since_days={since_days} ({len(cached[1])} issues, age={age}s)"
+            )
+            # Emit the whole cached list as one batch so the consumer protocol
+            # is identical to the cold-fetch path.
+            yield {
+                "type": "batch",
+                "issues": cached[1],
+                "running_total": len(cached[1]),
+                "batch_num": 1,
+                "is_last": True,
+                "from_cache": True,
+            }
+            yield {"type": "done", "total": len(cached[1]), "batches": 1, "from_cache": True}
+            return
+
+        try:
+            all_issues: List[Dict] = []
+            last_batch_num = 0
+            for batch_issues, batch_num, is_last in self._fetch_issues_lite_batches(project_key, since_days):
+                all_issues.extend(batch_issues)
+                last_batch_num = batch_num
+                yield {
+                    "type": "batch",
+                    "issues": batch_issues,
+                    "running_total": len(all_issues),
+                    "batch_num": batch_num,
+                    "is_last": is_last,
+                    "from_cache": False,
+                }
+            _ISSUES_LITE_CACHE[cache_key] = (time.time(), all_issues)
+            yield {"type": "done", "total": len(all_issues), "batches": last_batch_num, "from_cache": False}
+        except Exception as e:
+            logger.error(f"[Jira-lite] stream error: {e}")
+            yield {"type": "error", "message": str(e)}
 
     def get_issue_detail(self, issue_key: str) -> Dict:
         """Fetch full detail for a single Jira issue.
