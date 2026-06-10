@@ -555,6 +555,75 @@ class JiraService:
             logger.error(f"[Jira] HTTP error fetching issue {issue_key}: {e}")
             raise Exception(f"Failed to fetch Jira issue {issue_key}: {str(e)}")
 
+    def get_issue_last_editor(self, issue_key: str) -> Optional[str]:
+        """
+        Return the display name (or email) of whoever made the most recent
+        change to an issue, via the changelog. Used by Jira Sync drift
+        detection to attribute a manual edit. Returns None if unavailable.
+
+        The /changelog endpoint is paginated oldest-first, so we read `total`
+        and fetch the last page entry to get the latest editor.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/3/issue/{issue_key}/changelog"
+            first = requests.get(
+                url, headers=self.headers, auth=self.auth,
+                params={"maxResults": 1}, timeout=30,
+            )
+            first.raise_for_status()
+            data = first.json()
+            total = data.get("total", 0)
+            if not total:
+                return None
+            last_start = max(0, total - 1)
+            if last_start == 0:
+                histories = data.get("values") or data.get("histories") or []
+            else:
+                last = requests.get(
+                    url, headers=self.headers, auth=self.auth,
+                    params={"startAt": last_start, "maxResults": 1}, timeout=30,
+                )
+                last.raise_for_status()
+                payload = last.json()
+                histories = payload.get("values") or payload.get("histories") or []
+            if histories:
+                author = histories[-1].get("author") or {}
+                return author.get("displayName") or author.get("emailAddress")
+            return None
+        except Exception as e:
+            logger.warning(f"[Jira] changelog fetch failed for {issue_key}: {e}")
+            return None
+
+    def get_issue_comments(self, issue_key: str, max_results: int = 50) -> List[Dict]:
+        """
+        Return recent comments on an issue, newest first. Each item:
+        {id, author, created, body}. `body` is the raw ADF (caller flattens).
+        Used by Jira Sync drift detection to judge whether discussion has moved
+        the story away from its requirement. Empty list on failure.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/3/issue/{issue_key}/comment"
+            resp = requests.get(
+                url, headers=self.headers, auth=self.auth,
+                params={"maxResults": max_results, "orderBy": "-created"}, timeout=30,
+            )
+            resp.raise_for_status()
+            out = []
+            for c in resp.json().get("comments", []):
+                author = c.get("author") or {}
+                out.append({
+                    "id": c.get("id"),
+                    "author": author.get("displayName") or author.get("emailAddress"),
+                    "created": c.get("created"),
+                    "body": c.get("body"),  # ADF
+                })
+            # Some instances ignore orderBy — sort newest-first ourselves.
+            out.sort(key=lambda x: x.get("created") or "", reverse=True)
+            return out
+        except Exception as e:
+            logger.warning(f"[Jira] comment fetch failed for {issue_key}: {e}")
+            return []
+
     def get_project_issue_types(self, project_key: str) -> List[Dict]:
         """
         Fetch available issue types for a specific project
@@ -655,6 +724,48 @@ class JiraService:
             if hasattr(e, 'response') and e.response is not None:
                 logger.error(f"Response: {e.response.text}")
             raise Exception(f"Failed to create Jira issue: {str(e)}")
+
+    def update_issue(self, issue_key: str, fields: Dict) -> Dict:
+        """
+        Update an existing Jira issue's fields.
+
+        Args:
+            issue_key: e.g. "PROJ-22"
+            fields:    Dict of Jira field names → values, e.g.
+                       {"summary": "...", "description": {...}, "customfield_10016": 8}
+                       The caller is responsible for shaping the description in
+                       Atlassian Document Format (ADF) when applicable.
+
+        Returns:
+            {"key": issue_key, "updated": True} on success. Jira's PUT
+            endpoint returns 204 No Content, so there's no body to forward.
+        """
+        try:
+            url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
+            logger.info(f"Updating Jira issue {issue_key} fields={list(fields.keys())}")
+
+            response = requests.put(
+                url,
+                json={"fields": fields},
+                headers=self.headers,
+                auth=self.auth,
+                timeout=30,
+            )
+
+            if response.status_code == 400:
+                error_data = response.json() if response.content else {}
+                logger.error(f"Jira validation error updating {issue_key}: {error_data}")
+                raise Exception(f"Invalid update for {issue_key}: {error_data.get('errors', error_data)}")
+
+            response.raise_for_status()
+            logger.info(f"Updated Jira issue {issue_key}")
+            return {"key": issue_key, "updated": True}
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error updating Jira issue {issue_key}: {e}")
+            if hasattr(e, "response") and e.response is not None:
+                logger.error(f"Response: {e.response.text}")
+            raise Exception(f"Failed to update Jira issue {issue_key}: {str(e)}")
 
     def get_boards(self, project_key: str) -> List[Dict]:
         """

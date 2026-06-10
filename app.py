@@ -43,6 +43,7 @@ from routers.orchestration import router as orchestration_router
 from routers.orchestration_internal import router as orchestration_internal_router
 from routers.test_generation import router as test_generation_router
 from routers.brd_comparison import router as brd_comparison_router
+from routers.jira_sync import router as jira_sync_router
 from routers.test_internal import router as test_internal_router
 from routers.design import router as design_router
 from routers.design_sessions import router as design_sessions_router
@@ -195,6 +196,7 @@ app.include_router(orchestration_internal_router)
 app.include_router(jira_generation_router)
 app.include_router(test_generation_router)
 app.include_router(brd_comparison_router)
+app.include_router(jira_sync_router)
 app.include_router(test_internal_router)
 app.include_router(design_router)
 app.include_router(design_sessions_router)
