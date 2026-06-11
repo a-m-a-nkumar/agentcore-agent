@@ -1,6 +1,11 @@
 bedrock-agentcore==1.1.1
-strands-agents[openai]
-boto3>=1.34.0
+# Pinned to a proven-compatible set (matches the working runtime). These three
+# drive most of the dependency graph (boto3/mcp/openai/pydantic via strands +
+# bedrock-agentcore). Left unbounded, pip's resolver backtracks through 90+
+# boto3 / 30+ strands / 16+ mcp versions and CI fails with "resolution-too-deep"
+# under pip 26. Bump these deliberately (ideally via a lockfile), not by hand.
+strands-agents[openai]==1.34.1
+boto3>=1.40.52,<1.43
 fastapi>=0.115.0
 uvicorn[standard]>=0.34.2
 python-docx>=1.1.0,<2.0.0
@@ -14,7 +19,7 @@ cryptography>=43.0.0
 jinja2>=3.0.0
 psycopg2-binary>=2.9.9
 langfuse>=2.0.0
-mcp>=1.0.0
+mcp>=1.25,<1.28  # bounded with strands/boto3 above — see resolver note at top
 httpx>=0.27.0
 langchain-text-splitters>=0.3.0
 tiktoken>=0.7.0
