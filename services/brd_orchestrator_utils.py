@@ -35,6 +35,7 @@ import logging
 import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
@@ -685,9 +686,18 @@ def read_memory_history(
     # Each tuple: (event_ts, actor_priority, message). Sorted ascending
     # by ts; actor_priority breaks ties so the order across calls is
     # deterministic.
-    for priority, actor_id in enumerate(actors_to_query):
+    #
+    # Fan-out the actor queries in parallel — they have no inter-dependence
+    # and only one actor has data for any session created after 2026-06-12
+    # (the others just return empty for backward compatibility). Sequential
+    # made cold-path wall time = 4 × per-call latency (~2-8s); parallel
+    # collapses it to max(per-call latency) ≈ ~500ms typical. boto3 clients
+    # are thread-safe for distinct request invocations.
+    memory = _memory()
+
+    def _fetch(actor_id: str):
         try:
-            resp = _memory().list_events(
+            return actor_id, memory.list_events(
                 memoryId=AGENTCORE_MEMORY_ID,
                 sessionId=session_id,
                 actorId=actor_id,
@@ -698,8 +708,18 @@ def read_memory_history(
             logger.warning(
                 f"[brd_utils] read_memory_history actor={actor_id} session={session_id}: {e}"
             )
-            continue
+            return actor_id, None
 
+    # max_workers matches the actor count so each actor gets its own slot;
+    # the pool is per-call so it's reclaimed after this function returns.
+    with ThreadPoolExecutor(max_workers=len(actors_to_query)) as pool:
+        # Preserve priority order by submitting in actors_to_query order.
+        # ThreadPoolExecutor.map returns results in submission order.
+        results = list(pool.map(_fetch, actors_to_query))
+
+    for priority, (_actor_id, resp) in enumerate(results):
+        if resp is None:
+            continue
         for ev in resp.get("events", []) or []:
             # boto3 returns eventTimestamp as datetime.datetime (NOT an int).
             # Convert to epoch ms for stable cross-actor ordering.
