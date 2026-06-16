@@ -429,6 +429,9 @@ def _record_test_scenario_lineage(
     target_confluence_page_id: str,
 ):
     """Record lineage rows for each test scenario that has a requirement ref."""
+    from services.workspace import get_workspace_key_for_project
+    workspace_key = get_workspace_key_for_project(project_id)
+
     pairs = _extract_scenario_requirement_pairs(content)
     recorded = 0
 
@@ -455,6 +458,7 @@ def _record_test_scenario_lineage(
             target_content_hash=hash_text(json.dumps(scenario_snapshot, sort_keys=True)),
             target_metadata={"confluence_page_id": target_confluence_page_id},
             original_generated_content=scenario_snapshot,
+            workspace_key=workspace_key,
         )
         recorded += 1
 

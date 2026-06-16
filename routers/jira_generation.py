@@ -723,6 +723,12 @@ def create_jira_items(
     
     # Write all lineage records in a background thread (non-blocking)
     if lineage_queue and request.confluence_page_id and brd_page_version:
+        # Compute the workspace_key for the project once so every lineage row
+        # gets tagged. This is what lets Jira Sync find these rows even from
+        # a different user's project mapping to the same Confluence+Jira pair.
+        from services.workspace import get_workspace_key_for_project
+        workspace_key = get_workspace_key_for_project(request.project_id)
+
         def _write_lineage_batch():
             for item in lineage_queue:
                 try:
@@ -751,6 +757,7 @@ def create_jira_items(
                         target_content_hash=hash_text(target_text),
                         target_metadata={},
                         original_generated_content=story_snapshot,
+                        workspace_key=workspace_key,
                     )
                 except Exception as e:
                     logger.warning(f"Lineage write failed for {item.get('jira_story_key')} (non-fatal): {e}")
