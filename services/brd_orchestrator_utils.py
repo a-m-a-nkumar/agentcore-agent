@@ -54,8 +54,17 @@ AGENTCORE_MEMORY_ID           = os.getenv("AGENTCORE_MEMORY_ID", "")
 
 BRD_AGENTCORE_ACTOR_PREFIX    = os.getenv("BRD_AGENTCORE_ACTOR_PREFIX", "user-")
 BRD_AGENTCORE_LEGACY_ACTOR    = os.getenv("BRD_AGENTCORE_LEGACY_ACTOR", "analyst-session")
-BRD_FACTS_NAMESPACE_TEMPLATE  = os.getenv(
-    "BRD_FACTS_NAMESPACE_TEMPLATE", "user-{user_id}:project-{project_id}"
+
+# The built-in SEMANTIC strategy's id on the AgentCore memory store. The
+# built-in strategy extracts every USER event under an actor into its OWN
+# namespace `/strategies/{strategyId}/actors/{actorId}/` — there is NO
+# {project_id} template variable in AgentCore namespaces, so the ONLY way to
+# get project-scoped long-term facts is to bake the project into the actorId
+# (see per_user_actor). The read namespace (facts_namespace) is then derived
+# from that same actor, so writes and reads always agree. This id is stable
+# for a given memory store; it changes only if the store is recreated.
+BRD_SEMANTIC_STRATEGY_ID      = os.getenv(
+    "BRD_SEMANTIC_STRATEGY_ID", "semantic_builtin_v58dl-01tynM7Y5f"
 )
 BRD_FACTS_TOP_K               = int(os.getenv("BRD_FACTS_TOP_K", "10"))
 
@@ -95,30 +104,73 @@ def _memory():
 # Per-user actor + namespace formatters
 # ============================================================================
 
-def per_user_actor(user_id: str) -> str:
-    """Compose the per-user actor_id for AgentCore Memory writes.
-    Empty user_id is rejected — would silently land events under "user-".
+def per_user_actor(
+    user_id: str,
+    project_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+) -> str:
+    """Compose the actor_id for AgentCore Memory writes.
 
-    NOTE on project scoping: this is per-USER, NOT per-(user, project).
-    Project isolation lives in the SEMANTIC strategy's namespace template
-    (`BRD_FACTS_NAMESPACE_TEMPLATE = "user-{user_id}:project-{project_id}"`),
-    not in actor_id. Chat-history reads happen per-sessionId, and each
-    session belongs to exactly one project, so cross-project chat-history
-    leak isn't possible today either. If you ever add a "list events
-    across user's sessions" path, you'll need to add project_id to the
-    actor_id OR filter the listing. Do NOT change this in place without
-    a migration plan — every existing event lives under user-{uid}.
+    SCOPING (session-scoped since 2026-06-13): the actor_id encodes user,
+    project, AND session as `user-{uid}-project-{pid}-session-{sid}`. AgentCore
+    namespaces have NO {project_id}/{session_id} template variables, so the
+    ONLY way to scope extracted long-term facts is to bake the scope into the
+    actorId — the built-in SEMANTIC strategy extracts every USER event under an
+    actor into `/strategies/{strategyId}/actors/{actorId}/`.
+
+    Session-scoping unlocks BOTH read modes from ONE write (verified
+    .scratch/verify_prefix_retrieve.py):
+      • a "Start fresh" session reads its EXACT namespace -> only its own facts
+      • a "Continue" session reads the PROJECT PREFIX
+        (/strategies/{semId}/actors/user-{uid}-project-{pid}) which prefix-matches
+        every `...-session-*` actor -> all sessions' facts.
+
+    Backward compatible: omit session_id for a project-scoped actor (the prefix
+    target / legacy reads), omit project_id for the original `user-{uid}` actor
+    (dual-actor history merge). Empty user_id is rejected.
     """
     if not user_id:
         raise ValueError("per_user_actor: user_id is required")
-    return f"{BRD_AGENTCORE_ACTOR_PREFIX}{user_id}"
+    base = f"{BRD_AGENTCORE_ACTOR_PREFIX}{user_id}"
+    if project_id:
+        base = f"{base}-project-{project_id}"
+        if session_id:
+            base = f"{base}-session-{session_id}"
+    return base
 
 
-def facts_namespace(user_id: str, project_id: str) -> str:
-    """Compose the per-(user, project) namespace for long-term memory."""
+def _semantic_actor_namespace(actor: str) -> str:
+    """The built-in SEMANTIC strategy's namespace for an actor (exact, with
+    trailing slash)."""
+    return f"/strategies/{BRD_SEMANTIC_STRATEGY_ID}/actors/{actor}/"
+
+
+def facts_namespace(
+    user_id: str,
+    project_id: str,
+    session_id: Optional[str] = None,
+) -> str:
+    """The namespace to READ long-term facts from.
+
+    • session_id given  -> EXACT session namespace
+      (/strategies/{semId}/actors/user-{uid}-project-{pid}-session-{sid}/):
+      only THIS session's facts. Used by "Start fresh" sessions so Mary
+      remembers her own session beyond the short-term window WITHOUT pulling
+      other sessions.
+    • session_id omitted -> PROJECT PREFIX
+      (/strategies/{semId}/actors/user-{uid}-project-{pid}, no trailing slash):
+      prefix-matches every `...-session-*` actor -> ALL sessions' facts. Used
+      by "Continue with project context".
+
+    Derived from per_user_actor so reads always agree with writes.
+    """
     if not user_id or not project_id:
         raise ValueError("facts_namespace: both user_id and project_id are required")
-    return BRD_FACTS_NAMESPACE_TEMPLATE.format(user_id=user_id, project_id=project_id)
+    if session_id:
+        return _semantic_actor_namespace(per_user_actor(user_id, project_id, session_id))
+    # Project prefix: deliberately NO trailing slash so it prefix-matches all
+    # session actors. (UUID project_ids can't prefix-collide across projects.)
+    return f"/strategies/{BRD_SEMANTIC_STRATEGY_ID}/actors/{per_user_actor(user_id, project_id)}"
 
 
 # ============================================================================
@@ -539,9 +591,16 @@ def write_memory_event(
     user_id: str,
     role: str,
     content: str,
+    project_id: Optional[str] = None,
 ) -> None:
-    """Append a single user/assistant event to AgentCore Memory under
-    the PER-USER actor.
+    """Append a single user/assistant event to AgentCore Memory under the
+    SESSION-scoped actor (`user-{uid}-project-{pid}-session-{sid}` when both
+    project_id and session_id are present).
+
+    Session-scoping is what lets a "Start fresh" session read back ITS OWN
+    long-term facts (exact namespace) while a "Continue" session reads ALL
+    sessions (project prefix) — one write, both read modes. See per_user_actor
+    / facts_namespace. Callers on the chat path MUST pass project_id.
 
     Failures are logged and swallowed — memory is best-effort context,
     not a primary data store. A failed write should not crash a chat
@@ -562,7 +621,7 @@ def write_memory_event(
         _memory().create_event(
             memoryId=AGENTCORE_MEMORY_ID,
             sessionId=session_id,
-            actorId=per_user_actor(user_id),
+            actorId=per_user_actor(user_id, project_id, session_id),
             eventTimestamp=int(time.time()),
             payload=[{"conversational": {"role": role_upper, "content": {"text": content}}}],
         )
@@ -574,6 +633,7 @@ def read_memory_history(
     session_id: str,
     user_id: str,
     max_messages: int = 30,
+    project_id: Optional[str] = None,
 ) -> List[Dict[str, str]]:
     """Read short-term chat history for a session, MERGING events from
     the per-user actor and the legacy shared actor.
@@ -603,8 +663,23 @@ def read_memory_history(
     if not AGENTCORE_MEMORY_ID or not session_id:
         return []
 
-    actors_to_query = [per_user_actor(user_id), BRD_AGENTCORE_LEGACY_ACTOR] if user_id \
-        else [BRD_AGENTCORE_LEGACY_ACTOR]
+    # Query the SESSION-scoped actor (where new events land), then the legacy
+    # actors for continuity with events written before each scoping change:
+    #   user-{uid}-project-{pid}   (project-scoped, 2026-06-12)
+    #   user-{uid}                 (original per-user)
+    #   analyst-session            (original shared actor)
+    # An event is written under exactly one actor, so merging never double-
+    # counts; chat history is keyed by sessionId so only THIS session's turns
+    # come back regardless of how many actors we query.
+    if user_id:
+        actors_to_query = []
+        if project_id:
+            actors_to_query.append(per_user_actor(user_id, project_id, session_id))  # session-scoped
+            actors_to_query.append(per_user_actor(user_id, project_id))              # legacy project-scoped
+        actors_to_query.append(per_user_actor(user_id))                              # legacy per-user
+        actors_to_query.append(BRD_AGENTCORE_LEGACY_ACTOR)
+    else:
+        actors_to_query = [BRD_AGENTCORE_LEGACY_ACTOR]
 
     merged: List[Tuple[int, str, Dict[str, str]]] = []
     # Each tuple: (event_ts, actor_priority, message). Sorted ascending
@@ -660,12 +735,18 @@ def get_long_term_facts(
     project_id: str,
     query: str,
     top_k: int = None,
+    session_id: Optional[str] = None,
 ) -> List[str]:
-    """Retrieve top-K relevant long-term facts for this (user, project).
+    """Retrieve top-K relevant long-term facts.
 
-    Used by handlers to seed prompts with "KNOWN PROJECT CONTEXT".
-    Returns a flat list of fact strings (formatted, not raw JSON) so
-    callers can render them directly in prompts.
+    SCOPE:
+      • session_id omitted -> PROJECT-wide (all sessions, via the prefix
+        namespace). Used by "Continue with project context".
+      • session_id given   -> only THIS session's facts (exact namespace).
+        Used by "Start fresh" sessions so Mary recalls her own session beyond
+        the short-term window without importing other sessions.
+
+    Returns a flat list of fact strings (formatted, not raw JSON).
 
     Failures are logged and return [] — long-term context is enrichment,
     not a hard dependency, so a failed retrieval should NOT crash the
@@ -684,7 +765,7 @@ def get_long_term_facts(
     if not safe_query:
         return []
 
-    namespace = facts_namespace(user_id, project_id)
+    namespace = facts_namespace(user_id, project_id, session_id)
     k = top_k or BRD_FACTS_TOP_K
 
     logger.info(
@@ -772,28 +853,70 @@ def get_recent_facts(
     user_id: str,
     project_id: str,
     top_k: int = None,
+    session_id: Optional[str] = None,
 ) -> List[str]:
-    """Retrieve a broad sample of long-term facts for this (user, project)
-    when there's no specific query — e.g. session-start "use existing
-    memory" context preview before the user has said anything.
-
-    Pragmatic workaround for AgentCore's empty-query short-circuit (the
-    SEMANTIC API requires a non-empty `searchQuery`; passing empty bails
-    early at :357-359, see git-blame). A broad multi-topic query yields
-    a reasonable "give me the highlights" cross-section.
+    """Retrieve a broad sample of long-term facts when there's no specific
+    query — e.g. session-start context preview, or a meta-question. Scope
+    follows session_id exactly like get_long_term_facts (omitted = project-
+    wide prefix; given = this session only).
 
     Returns a flat list of fact strings, same shape as get_long_term_facts.
     """
     logger.info(
         f"[brd_utils] get_recent_facts user_id_set={bool(user_id)} "
-        f"project_id_set={bool(project_id)} top_k={top_k}"
+        f"project_id_set={bool(project_id)} session_scoped={bool(session_id)} top_k={top_k}"
     )
     return get_long_term_facts(
         user_id=user_id,
         project_id=project_id,
         query=_RECENT_FACTS_QUERY,
         top_k=top_k,
+        session_id=session_id,
     )
+
+
+def get_facts_scoped(
+    user_id: str,
+    project_id: str,
+    session_id: str,
+    query: str,
+    use_long_term: bool,
+    top_k: int = None,
+) -> List[str]:
+    """Single entry point handlers use to load long-term facts with the
+    CORRECT scope based on the session's context mode:
+
+      • use_long_term=True  ("Continue with project context")
+            -> PROJECT-wide facts (all sessions). session_id is NOT passed
+               to the namespace, so the project prefix matches every session.
+      • use_long_term=False ("Start fresh")
+            -> only THIS session's own facts (exact session namespace), so
+               Mary still remembers what was established in this very session
+               beyond the short-term window, WITHOUT importing other sessions.
+
+    Falls back to the broad seed query when `query` is empty (meta-questions
+    like "what have we covered"). Always returns a list (never raises).
+    """
+    if not (user_id and project_id):
+        return []
+    scope_session = None if use_long_term else session_id
+    q = (query or "").strip()
+    try:
+        if q:
+            facts = get_long_term_facts(
+                user_id=user_id, project_id=project_id, query=q,
+                top_k=top_k, session_id=scope_session,
+            )
+            if facts:
+                return facts
+        # empty query, or specific query found nothing -> broad seed
+        return get_recent_facts(
+            user_id=user_id, project_id=project_id,
+            top_k=top_k, session_id=scope_session,
+        )
+    except Exception as e:
+        logger.warning(f"[brd_utils] get_facts_scoped failed (non-fatal): {e}")
+        return []
 
 
 def _format_structured_fact(obj: Dict[str, Any]) -> List[str]:

@@ -1548,7 +1548,6 @@ def _push_brd_to_memory(
     try:
         from services.brd_orchestrator_utils import (
             write_memory_event,
-            batch_create_facts,
             BRD_SNAPSHOT_SESSION_PREFIX,
         )
     except Exception as e:
@@ -1561,12 +1560,27 @@ def _push_brd_to_memory(
 
     logger.info(
         f"[BRD-mem] push start brd_id={brd_id} snapshot_sid={snapshot_sid} "
-        f"project_name={project_name!r} section_count={len(sections)}"
+        f"project_name={project_name!r} project_id={project_id} section_count={len(sections)}"
     )
 
+    # WRITE PATH (corrected 2026-06-12): each BRD fact is written as a USER
+    # create_event under the PROJECT-SCOPED actor (write_memory_event with
+    # project_id -> actor user-{uid}-project-{pid}). The built-in SEMANTIC
+    # strategy then extracts these into the project's long-term namespace
+    # (/strategies/{semId}/actors/user-{uid}-project-{pid}/), the SAME namespace
+    # get_long_term_facts reads. Two things were wrong before and are now fixed:
+    #   1. role was ASSISTANT -> extraction SKIPS assistant turns (only USER
+    #      turns become long-term facts). Now USER.
+    #   2. batch_create_memory_records was used as a "direct write" fallback,
+    #      but writes into a BUILT-IN strategy's managed namespace are silently
+    #      dropped (verified: list returns 0 after a "successful" batch_create).
+    #      Removed — extraction is the only working population path for the
+    #      built-in semantic namespace.
+    # The brdsnap-{brd_id} sessionId keeps these events OUT of chat history
+    # (read_memory_history's leak guard), while extraction is (actor, namespace)-
+    # scoped so they still populate the project facts namespace.
     fact_count = 0
     failed_writes = 0
-    all_facts: List[str] = []  # collected for direct batch_create
     for sec in sections:
         if not isinstance(sec, dict):
             continue
@@ -1584,8 +1598,9 @@ def _push_brd_to_memory(
                 write_memory_event(
                     session_id=snapshot_sid,
                     user_id=user_id,
-                    role="ASSISTANT",
+                    role="USER",
                     content=fact_text,
+                    project_id=project_id,
                 )
                 fact_count += 1
             except Exception as e:
@@ -1593,32 +1608,13 @@ def _push_brd_to_memory(
                 logger.warning(
                     f"[BRD-mem] write_memory_event failed §{n} fact#{i}: {e}"
                 )
-            all_facts.append(fact_text)
         logger.info(f"[BRD-mem] §{n} ({sec.get('title','')!r}) -> {len(section_facts)} facts")
-
-    # CRITICAL FIX (2026-06-03): the memory store's builtin SEMANTIC strategy
-    # was registered (2026-03-05) without proper extraction config, so events
-    # written via create_event above NEVER produce searchable records. Verified
-    # via probes in .scratch/probe_*.py — 4 brdsnap sessions with hundreds of
-    # events produced 0 extracted records, while batch_create_memory_records
-    # writes ARE retrievable via list_memory_records. So we ALSO push each
-    # fact directly as a pre-formed record so get_long_term_facts(...) can
-    # find them via the list fallback path on the read side.
-    direct_written = batch_create_facts(
-        user_id=user_id,
-        project_id=project_id,
-        facts=all_facts,
-    )
-    logger.info(
-        f"[BRD-mem] direct batch_create_facts written={direct_written}/{len(all_facts)} "
-        f"namespace=user-{user_id}:project-{project_id}"
-    )
 
     elapsed = time.time() - t0
     logger.info(
         f"[BRD-mem] push DONE sections={len(sections)} facts_written={fact_count} "
-        f"direct_records_written={direct_written} failed_writes={failed_writes} "
-        f"elapsed={elapsed:0.1f}s sessionId={snapshot_sid}"
+        f"failed_writes={failed_writes} elapsed={elapsed:0.1f}s "
+        f"sessionId={snapshot_sid} (USER events -> project-scoped extraction)"
     )
 
 
@@ -1746,11 +1742,18 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
 
     # Every generation uses all available sources. Require at least one
     # content source — the template alone produces an empty-shell BRD.
+    # This message is user-visible (surfaced via the generation_failed SSE
+    # event → failed card + toast), so phrase it for an end user, not a dev.
     if not (transcript_text or chat_history_text or existing_sections):
+        logger.info(
+            f"[BRD-gen parallel] no content source for brd_id={brd_id} — "
+            f"transcript/chat/existing all empty; failing fast"
+        )
         return _parallel_error_response(
             brd_id,
-            "no content source: provide a transcript, a chat_session_id with "
-            "conversation history, or an existing_brd_id to regenerate",
+            "There's nothing to generate from yet. Tell Mary about your "
+            "project in the chat, or upload a transcript/document, then "
+            "generate the BRD.",
             session_id,
         )
 
@@ -1828,7 +1831,15 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
     _write_generation_status(
         brd_id,
         terminal_status,
-        sections_complete=[s["number"] for s in sections if s.get("status") == "llm_generated"],
+        # Count BOTH fresh (llm_generated) AND regenerated (llm_regenerated)
+        # sections — a re-generation/merge tags sections "llm_regenerated"
+        # (see line ~348), and filtering only "llm_generated" reported
+        # "BRD Generated — 0 sections" on regenerate. startswith("llm_")
+        # covers both without re-introducing failed/awaiting sections.
+        sections_complete=[
+            s["number"] for s in sections
+            if str(s.get("status") or "").startswith("llm_")
+        ],
         missing_sections=(missing + failed) or None,
         error_message=error_msg,
         session_id=session_id,
@@ -1872,7 +1883,29 @@ def _handle_parallel(evt: Dict[str, Any]) -> Dict[str, Any]:
 
 def _parallel_error_response(brd_id: str, message: str, session_id: Optional[str] = None) -> Dict[str, Any]:
     """Uniform error envelope for the parallel path. Same statusCode
-    shape the orchestrator expects from any other action handler."""
+    shape the orchestrator expects from any other action handler.
+
+    CRITICAL: the generator runs as an ASYNC (Event) invoke, so this
+    return value is discarded — nobody reads it. The ONLY channel the
+    frontend's SSE stream (/api/brd/stream/{sid}) watches is
+    brds/{brd_id}/_generation_status.json plus the section partials.
+    Early-error returns (empty corpus, template/transcript fetch failure)
+    happen BEFORE _generate_brd_parallel writes status="running", so unless
+    we write a terminal "failed" status here the stream finds nothing and
+    polls until its 10-min hard timeout — the user sits stuck on "Analyzing
+    sources". Write the failed status so the stream emits generation_failed
+    immediately. Best-effort: a failed status write must never mask the
+    original error.
+    """
+    try:
+        _write_generation_status(
+            brd_id, "failed", error_message=message, session_id=session_id,
+        )
+    except Exception as e:
+        logger.warning(
+            f"[BRD-gen parallel] could not write failed status for {brd_id} "
+            f"(non-fatal): {e}"
+        )
     return {
         "statusCode": 500,
         "body": json.dumps({

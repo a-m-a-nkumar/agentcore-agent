@@ -103,6 +103,12 @@ BRD_AUDIT_MAX_TOKENS             = int(os.getenv("BRD_AUDIT_MAX_TOKENS",   "1500
 BRD_QA_MAX_TOKENS                = int(os.getenv("BRD_QA_MAX_TOKENS",      "900"))
 BRD_SUGGEST_MAX_TOKENS           = int(os.getenv("BRD_SUGGEST_MAX_TOKENS", "900"))
 BRD_GATHER_MAX_TOKENS            = int(os.getenv("BRD_GATHER_MAX_TOKENS",  "600"))
+# How many recent chat turns Mary keeps as SHORT-TERM context. This is the
+# "recent conversational flow" window only — IMPORTANT facts are never lost
+# at the edge of it because the SEMANTIC strategy extracts them into LONG-TERM
+# memory (get_long_term_facts), which has no turn cap. Raised 12 -> 30 so Mary
+# follows longer gathering threads; bump via env if sessions get very long.
+BRD_HISTORY_TURNS                = int(os.getenv("BRD_HISTORY_TURNS",      "30"))
 
 # Per-section revert stack depth.
 BRD_PREVIOUS_VERSIONS_CAP        = int(os.getenv("BRD_PREVIOUS_VERSIONS_CAP", "5"))
@@ -334,7 +340,12 @@ def handle_turn(event: Dict[str, Any]) -> Dict[str, Any]:
         return _handle_multi_file_ingest(event, session)
 
     # ── 5. Persist USER event ────────────────────────────────────────
-    write_memory_event(session_id, user_id, "USER", message)
+    # project_id scopes the actor so the built-in SEMANTIC strategy extracts
+    # this user's statements into the PROJECT's long-term namespace (not a
+    # flat per-user bucket). Each session belongs to exactly one project, so
+    # this is well-defined; fall back to the session row if the event omitted it.
+    project_id = project_id or session.get("project_id")
+    write_memory_event(session_id, user_id, "USER", message, project_id=project_id)
 
     # ── 6. Load BRD structure for section grounding ──────────────────
     brd_id = session.get("brd_id")
@@ -418,7 +429,7 @@ def handle_turn(event: Dict[str, Any]) -> Dict[str, Any]:
         summary = f"[{len(cards_out)} cards]"
     else:
         summary = _summarize_card_for_memory(cards_out[0]) if cards_out else "[empty]"
-    write_memory_event(session_id, user_id, "ASSISTANT", summary)
+    write_memory_event(session_id, user_id, "ASSISTANT", summary, project_id=project_id)
 
     return {
         "cards": cards_out,
@@ -614,34 +625,88 @@ def apply_stage_transition(
 def _do_ask_general(
     event: Dict[str, Any], session: Dict[str, Any], router: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Capabilities / greetings / small talk. One short LLM call with
-    a stable capabilities prompt. Doesn't touch S3 or long-term
-    memory — pure text response.
+    """Greetings / small talk / capabilities AND meta-questions about the
+    project ("what have we covered?", "what do you know so far?").
 
-    Why an LLM call instead of canned templates: users phrase greetings
-    a thousand different ways, and a fixed template feels robotic. A
-    400-token cap + T=0.3 gives natural variety while staying cheap.
+    Grounds on this session's short-term history + the project's long-term
+    facts (when the session opted into project context) so Mary references
+    what was actually established instead of HALLUCINATING a generic BRD
+    example. The fix for the "Smart Inventory Management System" invention:
+    a context-free capabilities prompt let the LLM make up project details
+    when asked "what have we covered" in a fresh session whose real content
+    lives only in long-term memory.
+
+    Stays cheap: short-term history is the current session only, long-term
+    facts are top-K. The stable system prompt remains cacheable; the volatile
+    context rides in the user content.
     """
     from llm_gateway import chat_completion
+    from services.brd_orchestrator_utils import (
+        get_facts_scoped,
+        read_memory_history,
+    )
 
-    message = (event or {}).get("message", "")
-    user_id = (event or {}).get("user_id")
+    message    = (event or {}).get("message", "")
+    user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
+    use_long_term = session.get("use_long_term_context", True)
+
+    # ── Short-term: this session's turns (so "what did we just discuss" works) ──
+    history_lines: List[str] = []
+    if session_id and user_id:
+        try:
+            for m in read_memory_history(
+                session_id, user_id, max_messages=BRD_HISTORY_TURNS, project_id=project_id
+            ):
+                history_lines.append(
+                    f"{(m.get('role') or 'assistant').upper()}: {m.get('content', '')}"
+                )
+        except Exception as e:
+            logger.warning(f"[BRD] _do_ask_general history load failed (non-fatal): {e}")
+
+    # ── Long-term facts, scoped by context mode ──────────────────────────────
+    # Continue -> project-wide (all sessions); Start fresh -> THIS session's own
+    # facts (so Mary still recalls this session beyond the short-term window).
+    facts: List[str] = get_facts_scoped(
+        user_id=user_id, project_id=project_id, session_id=session_id,
+        query=message, use_long_term=use_long_term,
+    )
+
+    context_parts: List[str] = []
+    if facts:
+        context_parts.append(
+            "Known project context (established across prior sessions):\n"
+            + "\n".join(f"  - {f}" for f in facts)
+        )
+    if history_lines:
+        context_parts.append("This session so far:\n" + "\n".join(history_lines))
+    context_block = "\n\n".join(context_parts)
 
     system_prompt = (
-        "You are the BRD assistant. The user sent a greeting / small talk / "
-        "capabilities question that does not require any BRD content. "
-        "Respond in 1-3 short sentences, warmly but concisely. Your "
-        "capabilities are: gather requirements with follow-up questions, "
-        "generate BRDs from chat or uploaded transcripts, edit / regenerate "
-        "sections, audit quality, suggest improvements, and answer questions "
-        "about an existing BRD. Mention only the capabilities the user actually "
-        "asked about — don't dump the full list unless they explicitly ask "
-        "'what can you do'."
+        "You are Mary, the BRD assistant. Reply warmly and concisely (1-4 sentences).\n"
+        "GROUNDING RULES — follow exactly:\n"
+        "- When the user asks what has been covered / discussed / established, or "
+        "anything about THEIR project, answer ONLY from the CONTEXT block in the "
+        "user message (the 'Known project context' and 'This session so far' parts).\n"
+        "- NEVER invent project names, systems, requirements, or details that the "
+        "CONTEXT does not contain. If the CONTEXT is empty or doesn't cover what they "
+        "asked, say plainly that you don't have that captured yet and offer to gather it. "
+        "Do NOT fabricate an example project (e.g. an inventory system).\n"
+        "- For pure greetings or 'what can you do' questions with no project content, "
+        "briefly describe your capabilities: gather requirements, generate BRDs from chat "
+        "or uploaded docs, edit / regenerate sections, audit quality, suggest improvements, "
+        "and answer questions about an existing BRD."
+    )
+
+    user_content = (
+        (f"CONTEXT:\n{context_block}\n\n" if context_block else "CONTEXT: (nothing captured yet)\n\n")
+        + f"User's message:\n{message}"
     )
 
     try:
         text = chat_completion(
-            messages=[{"role": "user", "content": message}],
+            messages=[{"role": "user", "content": user_content}],
             system_prompt=system_prompt,
             model=BRD_HANDLER_MODEL,
             temperature=0.3,
@@ -767,7 +832,8 @@ def _do_ask_question(
     from services.brd_orchestrator_utils import (
         brd_structure_key,
         extract_json,
-        get_long_term_facts,
+        get_facts_scoped,
+        read_memory_history,
         s3_get_json_with_etag,
     )
     from prompts.brd_qa_prompts import QA_SYSTEM_PROMPT, build_qa_prompt
@@ -775,6 +841,7 @@ def _do_ask_question(
 
     user_id = (event or {}).get("user_id")
     project_id = (event or {}).get("project_id") or session.get("project_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
     question = (event or {}).get("message", "")
     brd_id = session.get("brd_id")
 
@@ -811,19 +878,33 @@ def _do_ask_question(
     if not relevant_sections:
         relevant_sections = list(structure["sections"])
 
-    # Long-term facts ONLY when this session opted in (Resolved Q#5).
-    known_facts: List[str] = []
-    if session.get("use_long_term_context", True):
-        known_facts = get_long_term_facts(
-            user_id=user_id,
-            project_id=project_id,
-            query=question,
-        )
+    # Long-term facts, scoped by context mode: project-wide when "Continue",
+    # this session's own facts when "Start fresh".
+    known_facts: List[str] = get_facts_scoped(
+        user_id=user_id, project_id=project_id, session_id=session_id,
+        query=question, use_long_term=session.get("use_long_term_context", True),
+    )
+
+    # Short-term history: lets Q&A resolve conversational follow-ups
+    # ("what about the second risk?", "and its mitigation?") against the
+    # turns just exchanged in THIS session.
+    recent_history: List[str] = []
+    if session_id and user_id:
+        try:
+            for m in read_memory_history(
+                session_id, user_id, max_messages=BRD_HISTORY_TURNS, project_id=project_id
+            ):
+                recent_history.append(
+                    f"{(m.get('role') or 'assistant').upper()}: {m.get('content', '')}"
+                )
+        except Exception as e:
+            logger.warning(f"[BRD] _do_ask_question history load failed (non-fatal): {e}")
 
     user_content = build_qa_prompt(
         question=question,
         relevant_sections=relevant_sections,
         known_facts=known_facts,
+        recent_history=recent_history,
     )
 
     try:
@@ -1113,8 +1194,7 @@ def _build_mary_followup(
     )
     from prompts.cache_control import cache_control_value
     from services.brd_orchestrator_utils import (
-        get_long_term_facts,
-        get_recent_facts,
+        get_facts_scoped,
         read_memory_history,
     )
     from llm_gateway import chat_completion
@@ -1129,7 +1209,7 @@ def _build_mary_followup(
     history_lines: List[str] = []
     if session_id and user_id:
         try:
-            history = read_memory_history(session_id, user_id, max_messages=12)
+            history = read_memory_history(session_id, user_id, max_messages=BRD_HISTORY_TURNS, project_id=project_id)
             for m in history[-12:]:
                 role = (m.get("role") or "assistant").upper()
                 history_lines.append(f"{role}: {m.get('content', '')}")
@@ -1137,29 +1217,23 @@ def _build_mary_followup(
         except Exception as e:
             logger.warning(f"[BRD-mary] history load failed (non-fatal): {e}")
 
-    # ── 2. Long-term project facts (when session opted in) ────────────────
+    # ── 2. Long-term facts, scoped by context mode ────────────────────────
+    # Continue -> project-wide (all sessions); Start fresh -> THIS session's
+    # own facts (so Mary recalls this session beyond the short-term window).
     facts_block = ""
-    if use_long_term:
-        try:
-            q = (user_message or "").strip()
-            if q:
-                facts = get_long_term_facts(
-                    user_id=user_id,
-                    project_id=project_id,
-                    query=q,
-                )
-            else:
-                facts = get_recent_facts(user_id=user_id, project_id=project_id)
-            if facts:
-                facts_block = (
-                    "\n\nKNOWN PROJECT CONTEXT (do not contradict; cite when relevant):\n"
-                    + "\n".join(f"  - {f}" for f in facts)
-                )
-            logger.info(f"[BRD-mary] long-term facts loaded count={len(facts)}")
-        except Exception as e:
-            logger.warning(f"[BRD-mary] long-term facts load failed (non-fatal): {e}")
-    else:
-        logger.info("[BRD-mary] long-term facts SKIPPED (use_long_term=False)")
+    facts = get_facts_scoped(
+        user_id=user_id, project_id=project_id, session_id=session_id,
+        query=user_message, use_long_term=use_long_term,
+    )
+    if facts:
+        facts_block = (
+            "\n\nKNOWN PROJECT CONTEXT (do not contradict; cite when relevant):\n"
+            + "\n".join(f"  - {f}" for f in facts)
+        )
+    logger.info(
+        f"[BRD-mary] long-term facts loaded count={len(facts)} "
+        f"scope={'project' if use_long_term else 'session'}"
+    )
 
     conversation_context = "Conversation so far:\n" + (
         "\n".join(history_lines) if history_lines else "(this is the first message)"
@@ -1576,12 +1650,17 @@ def _build_generation_context(
     if existing_brd_id:
         context["existing_brd_id"] = existing_brd_id
 
-    # Long-term facts — opt-in, best-effort enrichment (Resolved Q#5).
-    if session.get("use_long_term_context", True) and user_id and project_id:
+    # Long-term facts for generation, scoped by context mode: "Continue" pulls
+    # project-wide facts (all sessions); "Start fresh" pulls only THIS session's
+    # own gathered facts so a fresh-angle BRD isn't polluted by other sessions.
+    if user_id and project_id:
         try:
-            from services.brd_orchestrator_utils import get_long_term_facts
+            from services.brd_orchestrator_utils import get_facts_scoped
             query = ((event or {}).get("message") or session.get("title") or "").strip()
-            facts = get_long_term_facts(user_id, project_id, query=query) if query else []
+            facts = get_facts_scoped(
+                user_id=user_id, project_id=project_id, session_id=session_id,
+                query=query, use_long_term=session.get("use_long_term_context", True),
+            )
             if facts:
                 context["long_term_facts"] = facts
         except Exception as e:
@@ -1740,7 +1819,7 @@ def _do_regenerate_section(
         ConcurrentEditError,
         brd_structure_key,
         extract_json,
-        get_long_term_facts,
+        get_facts_scoped,
         s3_get_json_with_etag,
         s3_put_json_if_match,
     )
@@ -1748,6 +1827,7 @@ def _do_regenerate_section(
 
     user_id    = (event or {}).get("user_id")
     project_id = (event or {}).get("project_id") or session.get("project_id")
+    session_id = (event or {}).get("session_id") or session.get("session_id")
     brd_id     = session.get("brd_id")
     regen_reason = (router.get("edit_instruction") or (event or {}).get("message") or "").strip()
 
@@ -1779,60 +1859,28 @@ def _do_regenerate_section(
                           f"Try specifying a section number (1-{len(structure['sections'])})."),
                     kind="warning")
 
-    known_facts: List[str] = []
-    if session.get("use_long_term_context", True):
-        try:
-            known_facts = get_long_term_facts(
-                user_id=user_id,
-                project_id=project_id,
-                query=section.get("title") or f"section {section_number}",
-            )
-        except Exception as e:
-            logger.warning(f"[BRD] regen long-term facts load failed (non-fatal): {e}")
+    known_facts: List[str] = get_facts_scoped(
+        user_id=user_id, project_id=project_id, session_id=session_id,
+        query=section.get("title") or f"section {section_number}",
+        use_long_term=session.get("use_long_term_context", True),
+    )
 
     logger.info(
         f"[BRD] regenerate §{section_number} brd={brd_id} "
         f"facts={len(known_facts)} reason={regen_reason[:60]!r}"
     )
-    user_content = _build_regenerate_prompt(
+    ok = _regenerate_section_in_memory(
+        section,
         section_number=section_number,
-        section_title=section.get("title") or "",
-        current_content=section.get("content") or [],
         known_facts=known_facts,
         regen_reason=regen_reason,
+        user_id=user_id,
     )
-
-    try:
-        raw = chat_completion(
-            messages=[{"role": "user", "content": user_content}],
-            system_prompt=cached_system_blocks(_REGENERATE_SYSTEM_PROMPT),
-            model=BRD_HANDLER_MODEL,
-            temperature=0.3,
-            max_tokens=BRD_SECTION_MAX_TOKENS,
-            user_id=user_id,
-            token_source=f"lambda_brd_orchestrator:regenerate_section_{section_number}",
-        )
-        parsed = extract_json(raw)
-    except Exception as e:
-        logger.warning(f"[BRD] _do_regenerate_section LLM/parse failed: {e}")
+    if not ok:
         return card("text",
                     text="Sorry, the regeneration failed — model returned an unexpected response.",
                     kind="warning")
-
-    new_content = parsed.get("content") if isinstance(parsed, dict) else None
-    if not isinstance(new_content, list):
-        return card("text",
-                    text="The model returned the section without a content array. "
-                         "Try rephrasing or use a more specific instruction.",
-                    kind="warning")
-
-    _push_previous_version(section, reason="regenerate_section")
-    section["content"] = new_content
-    section["status"] = "llm_regenerated"
-    section["last_updated_ts"] = _now_iso()
-    logger.info(f"[BRD] regenerate §{section_number} ✓ {len(new_content)} block(s) written")
-    if isinstance(parsed.get("title"), str) and parsed["title"].strip():
-        section["title"] = parsed["title"].strip()
+    logger.info(f"[BRD] regenerate §{section_number} ✓ {len(section['content'])} block(s) written")
 
     try:
         s3_put_json_if_match(brd_structure_key(brd_id), structure, etag)
@@ -1926,12 +1974,27 @@ def _build_regenerate_prompt(
     current_content: List[Dict[str, Any]],
     known_facts: List[str],
     regen_reason: str,
+    new_source_material: str = "",
 ) -> str:
-    """Compose the user-content block for the regenerate call."""
+    """Compose the user-content block for the regenerate call.
+
+    new_source_material: text from a just-uploaded document (Fix #3). It is
+    GROUNDED, user-provided fact — content folded in from here needs NO
+    [AI-ASSUMPTION] marker.
+    """
     facts_block = (
         "\n".join(f"  - {f}" for f in known_facts)
         if known_facts else "(no project context loaded for this session)"
     )
+    source_block = ""
+    if new_source_material:
+        source_block = (
+            "NEW SOURCE DOCUMENT (just uploaded by the user — treat as GROUNDED, "
+            "authoritative fact; fold every relevant item into this section. "
+            "Content sourced from here is user-provided and needs NO "
+            "[AI-ASSUMPTION] marker):\n"
+            f"{new_source_material}\n\n"
+        )
     instruction_block = (
         f"User's regeneration request:\n  {regen_reason}\n\n"
         if regen_reason else
@@ -1944,9 +2007,63 @@ def _build_regenerate_prompt(
         f"Current content (JSON):\n"
         f"```json\n{json.dumps(current_content, indent=2)}\n```\n\n"
         f"Known project context:\n{facts_block}\n\n"
+        f"{source_block}"
         f"{instruction_block}"
         f"Return regenerated section JSON."
     )
+
+
+def _regenerate_section_in_memory(
+    section: Dict[str, Any],
+    *,
+    section_number: int,
+    known_facts: List[str],
+    regen_reason: str,
+    user_id: Optional[str],
+    new_source_material: str = "",
+) -> bool:
+    """Regenerate ONE section's content IN PLACE (no S3 write). Shared by
+    _do_regenerate_section (single write) and the doc-ingest auto-regen
+    (Fix #3, batched write across multiple sections). Returns True on success.
+    """
+    from llm_gateway import chat_completion
+    from services.brd_orchestrator_utils import extract_json
+
+    user_content = _build_regenerate_prompt(
+        section_number=section_number,
+        section_title=section.get("title") or "",
+        current_content=section.get("content") or [],
+        known_facts=known_facts,
+        regen_reason=regen_reason,
+        new_source_material=new_source_material,
+    )
+    try:
+        raw = chat_completion(
+            messages=[{"role": "user", "content": user_content}],
+            system_prompt=cached_system_blocks(_REGENERATE_SYSTEM_PROMPT),
+            model=BRD_HANDLER_MODEL,
+            temperature=0.3,
+            max_tokens=BRD_SECTION_MAX_TOKENS,
+            user_id=user_id,
+            token_source=f"lambda_brd_orchestrator:regenerate_section_{section_number}",
+        )
+        parsed = extract_json(raw)
+    except Exception as e:
+        logger.warning(f"[BRD] regen-in-memory §{section_number} LLM/parse failed: {e}")
+        return False
+
+    new_content = parsed.get("content") if isinstance(parsed, dict) else None
+    if not isinstance(new_content, list):
+        logger.warning(f"[BRD] regen-in-memory §{section_number}: no content array")
+        return False
+
+    _push_previous_version(section, reason="regenerate_section")
+    section["content"] = new_content
+    section["status"] = "llm_regenerated"
+    section["last_updated_ts"] = _now_iso()
+    if isinstance(parsed.get("title"), str) and parsed["title"].strip():
+        section["title"] = parsed["title"].strip()
+    return True
 
 
 def _do_ingest_doc(
@@ -2050,6 +2167,7 @@ def _ingest_one_doc(
     from llm_gateway import chat_completion
 
     user_id    = (event or {}).get("user_id")
+    project_id = (event or {}).get("project_id") or session.get("project_id")
     session_id = (event or {}).get("session_id") or session.get("session_id")
     filename   = (file_payload or {}).get("filename") or "(unnamed)"
     doc_text   = ((file_payload or {}).get("extracted_text") or "").strip()
@@ -2067,18 +2185,23 @@ def _ingest_one_doc(
     # Load current sections (if any) so the relevance classifier can
     # score against them. If there's no BRD yet, suggested_sections
     # will simply be empty and the frontend treats this as
-    # "fact accumulated, no section pinning yet".
+    # "fact accumulated, no section pinning yet". We KEEP the structure +
+    # etag (Fix #3) so we can fold the doc into the affected sections.
     available_sections: List[Dict[str, Any]] = []
+    brd_structure: Optional[Dict[str, Any]] = None
+    brd_etag: Optional[str] = None
     brd_id = session.get("brd_id")
     if brd_id:
         try:
-            structure, _etag = s3_get_json_with_etag(brd_structure_key(brd_id))
-            if structure and isinstance(structure.get("sections"), list):
+            brd_structure, brd_etag = s3_get_json_with_etag(brd_structure_key(brd_id))
+            if brd_structure and isinstance(brd_structure.get("sections"), list):
                 available_sections = [
                     {"number": s.get("number"), "title": s.get("title") or "(untitled)"}
-                    for s in structure["sections"]
+                    for s in brd_structure["sections"]
                     if s.get("number") is not None
                 ]
+            else:
+                brd_structure = None
         except Exception as e:
             logger.warning(f"[BRD] ingest: structure load failed (non-fatal): {e}")
 
@@ -2183,9 +2306,70 @@ def _ingest_one_doc(
                         f"[INGESTED DOC: {filename}] "
                         f"{json.dumps(parsed_facts, ensure_ascii=False)}"
                     ),
+                    project_id=project_id,
                 )
     except Exception as e:
         logger.warning(f"[BRD] ingest fact extraction failed (non-fatal): {e}")
+
+    # ── Fix #3: fold the uploaded doc INTO the BRD sections it affects ────────
+    # When a BRD already exists and the doc maps to sections, regenerate those
+    # sections IN PLACE with the doc as GROUNDED source material, write the
+    # updated structure back once, and persist the regenerated content to the
+    # project's long-term memory (USER events -> SEMANTIC extraction). This is
+    # what makes the card's "folding in now" promise real: the doc isn't stored
+    # as a separate long-term entry — the UPDATED BRD is.
+    regenerated_sections: List[int] = []
+    if brd_structure is not None and suggested_sections and parsed_facts and brd_id:
+        try:
+            from services.brd_orchestrator_utils import (
+                get_facts_scoped,
+                s3_put_json_if_match,
+                ConcurrentEditError,
+            )
+            new_source_material = (
+                f"[Document: {filename}]\n"
+                + json.dumps(parsed_facts, ensure_ascii=False, indent=2)
+            )[:BRD_INGEST_MAX_CHARS]
+            known_facts = get_facts_scoped(
+                user_id=user_id, project_id=project_id, session_id=session_id,
+                query=filename, use_long_term=session.get("use_long_term_context", True),
+            )
+            sections_by_num = {
+                s.get("number"): s
+                for s in brd_structure["sections"] if isinstance(s, dict)
+            }
+            for n in suggested_sections:
+                sec = sections_by_num.get(n)
+                if sec and _regenerate_section_in_memory(
+                    sec, section_number=n, known_facts=known_facts,
+                    regen_reason=f"Incorporate the newly uploaded document '{filename}'.",
+                    user_id=user_id, new_source_material=new_source_material,
+                ):
+                    regenerated_sections.append(n)
+            if regenerated_sections:
+                try:
+                    s3_put_json_if_match(brd_structure_key(brd_id), brd_structure, brd_etag)
+                except ConcurrentEditError as ce:
+                    logger.warning(f"[BRD] ingest auto-regen concurrent edit — write skipped: {ce}")
+                    regenerated_sections = []
+                else:
+                    # Persist updated sections to PROJECT long-term as USER events
+                    # (session-scoped actor -> SEMANTIC extraction -> retrievable).
+                    for n in regenerated_sections:
+                        sec = sections_by_num.get(n) or {}
+                        title = sec.get("title") or f"section {n}"
+                        body = _render_section_numbered(sec.get("content") or [])[:1500]
+                        write_memory_event(
+                            session_id=session_id, user_id=user_id, role="USER",
+                            content=f"BRD §{n} {title} (updated from {filename}): {body}",
+                            project_id=project_id,
+                        )
+                    logger.info(
+                        f"[BRD] ingest auto-regen: folded {filename} into "
+                        f"§{regenerated_sections} + pushed to long-term"
+                    )
+        except Exception as e:
+            logger.warning(f"[BRD] ingest auto-regen failed (non-fatal): {e}")
 
     if not summary:
         summary = (
@@ -2194,15 +2378,23 @@ def _ingest_one_doc(
             if facts_extracted else
             f"Ingested {filename}: no structured facts extracted."
         )
+    if regenerated_sections:
+        summary = (
+            f"Folded {filename} into §{', §'.join(str(n) for n in regenerated_sections)} "
+            f"and saved the update to project memory."
+        )
 
     return card(
         "doc_ingested",
         fact_id=f"doc-{uuid.uuid4().hex[:8]}",
         filename=filename,
         suggested_sections=suggested_sections,
+        regenerated_sections=regenerated_sections,
         summary=summary,
         facts_extracted=facts_extracted,
-        auto_regen=auto_regen and bool(suggested_sections),
+        # auto_regen now reflects what ACTUALLY happened server-side (sections
+        # were regenerated + written back), not a frontend-dispatch hint.
+        auto_regen=bool(regenerated_sections),
     )
 
 

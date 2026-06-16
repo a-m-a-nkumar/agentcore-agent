@@ -295,10 +295,13 @@ def _facts_namespace_user_project(user_id: str, project_id: str) -> str:
     """Compose the per-(user, project) long-term namespace. Mirrors
     services.brd_orchestrator_utils.facts_namespace -- repeated here so
     the router has no import-time dependency on the orchestrator's
-    Lambda module (which has its own boto3 init cost on load)."""
-    template = os.getenv("BRD_FACTS_NAMESPACE_TEMPLATE",
-                         "user-{user_id}:project-{project_id}")
-    return template.format(user_id=user_id, project_id=project_id)
+    Lambda module (which has its own boto3 init cost on load).
+
+    Project scoping lives in the ACTOR (`user-{uid}-project-{pid}`); the
+    built-in SEMANTIC strategy extracts that actor's events into this
+    namespace. Keep in sync with brd_orchestrator_utils.facts_namespace."""
+    strategy_id = os.getenv("BRD_SEMANTIC_STRATEGY_ID", "semantic_builtin_v58dl-01tynM7Y5f")
+    return f"/strategies/{strategy_id}/actors/user-{user_id}-project-{project_id}/"
 
 
 def _load_long_term_facts_for_router(
@@ -874,13 +877,14 @@ def get_history(
     response doesn't balloon on very-long sessions; default 50 is
     enough for a chat panel's initial paint with infinite-scroll up.
     """
-    _ensure_session_owned(session_id, current_user["id"])
+    _sess = _ensure_session_owned(session_id, current_user["id"])
     from services.brd_orchestrator_utils import read_memory_history
     try:
         messages = read_memory_history(
             session_id=session_id,
             user_id=current_user["id"],
             max_messages=max(1, min(max_messages, 200)),
+            project_id=_sess.get("project_id"),
         )
     except Exception as e:
         logger.error(f"[BRD history] read failed: {e}")
@@ -1534,10 +1538,15 @@ def _stream_gather(*, user_message: str, session: Dict[str, Any], user_id: str):
     )
     from services.brd_orchestrator_utils import get_long_term_facts, read_memory_history
 
-    # Build the same context the Lambda's _do_gather would.
+    # Build the same context the Lambda's _do_gather would. Keep the turn
+    # window in sync with the Lambda's BRD_HISTORY_TURNS (default 30).
     history_lines: List[str] = []
     try:
-        for m in read_memory_history(session["id"], user_id, max_messages=12):
+        for m in read_memory_history(
+            session["id"], user_id,
+            max_messages=int(os.getenv("BRD_HISTORY_TURNS", "30")),
+            project_id=session.get("project_id"),
+        ):
             history_lines.append(f"{(m.get('role') or 'assistant').upper()}: {m.get('content', '')}")
     except Exception as e:
         logger.warning(f"[BRD /turn-stream gather] history load failed: {e}")

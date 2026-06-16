@@ -21,6 +21,9 @@ You answer questions about a Business Requirements Document (BRD).
 
 You receive:
   • The user's question.
+  • Optional "recent conversation" — the last several turns of THIS chat
+    so you can resolve follow-ups ("what about the second one?", "and the
+    timeline for that?") against what was just discussed.
   • A list of relevant BRD sections (number, title, JSON content).
   • Optional "known project context" — long-term facts gathered across
     prior sessions (only present when use_long_term_context is True).
@@ -59,6 +62,7 @@ def build_qa_prompt(
     question: str,
     relevant_sections: List[Dict[str, Any]],
     known_facts: Optional[List[str]] = None,
+    recent_history: Optional[List[str]] = None,
 ) -> str:
     """
     Compose the user-content block for the Q&A call.
@@ -70,12 +74,23 @@ def build_qa_prompt(
         known_facts: Optional long-term facts from AgentCore Memory
             (formatted strings, e.g. "stack: AWS Bedrock + Postgres").
             Only present when session.use_long_term_context is True.
+        recent_history: Optional last-N turns of THIS session (formatted
+            "USER: ...", "ASSISTANT: ..." lines) so the model can resolve
+            conversational follow-ups against what was just discussed.
     """
     rendered_sections: List[str] = []
     for s in relevant_sections:
         rendered_sections.append(f"--- Section {s.get('number')}: {s.get('title')} ---")
         rendered_sections.append(json.dumps(s.get("content", []), indent=2))
         rendered_sections.append("")
+
+    history_block = ""
+    if recent_history:
+        history_block = (
+            "\nRecent conversation (this session):\n"
+            + "\n".join(recent_history)
+            + "\n"
+        )
 
     facts_block = ""
     if known_facts:
@@ -92,6 +107,7 @@ def build_qa_prompt(
 
     return (
         f"Question: {question}\n"
+        f"{history_block}"
         f"{facts_block}\n"
         f"Relevant BRD sections:\n"
         f"```\n{sections_text}\n```\n\n"

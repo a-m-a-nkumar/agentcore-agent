@@ -1,9 +1,9 @@
-"""
+﻿"""
 Per-section BRD prompt builders (Phase 6).
 
 Two exports drive the in-Lambda parallel section generator:
 
-  SHARED_SYSTEM_PROMPT  — the cacheable prose block. Contains the
+  SHARED_SYSTEM_PROMPT  â€” the cacheable prose block. Contains the
                           template-fidelity rules, tiered sourcing
                           guidance, empty handling, no-padding rules,
                           cross-section reference policy, and the
@@ -12,9 +12,9 @@ Two exports drive the in-Lambda parallel section generator:
                           the system block with cache_control: ephemeral
                           and Anthropic Sonnet 4.5 caches it for 5 min.
 
-  SECTION_PROMPT_BUILDERS — dict[int, Callable[[Dict], str]] keyed by
+  SECTION_PROMPT_BUILDERS â€” dict[int, Callable[[Dict], str]] keyed by
                           section number (1..16). Each builder returns
-                          the *short* per-section user-message body —
+                          the *short* per-section user-message body â€”
                           section-specific guidance only, no context
                           duplication. Context lives in the cached
                           prefix once.
@@ -32,7 +32,7 @@ Helpers:
       builder by number, raises KeyError on bad input.
 
 Architecture: see C:/Users/T479888/.claude/plans/hazy-gliding-hammock.md
-"Phase 6 — Parallel section generation with prompt caching".
+"Phase 6 â€” Parallel section generation with prompt caching".
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from prompts.cache_control import cache_control_value
 
 
 # ============================================================================
-# SHARED_SYSTEM_PROMPT — the cacheable rules block.
+# SHARED_SYSTEM_PROMPT â€” the cacheable rules block.
 # Stays exactly the same across every section call within a generation.
 # Token count target: ~1.5K tokens (well over Sonnet 4.5's 1024 cache
 # minimum). See .scratch/gateway_cache_passthrough_test.py for proof
@@ -63,9 +63,9 @@ Deluxe template. Other parallel agents are concurrently writing the
 other 15 sections from the same source input. You must not duplicate
 their work, contradict their work, or rewrite the template.
 
-═══════════════════════════════════════════════════════════════════════
-TEMPLATE FIDELITY — non-negotiable
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+TEMPLATE FIDELITY â€” non-negotiable
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 The section you are assigned has a FIXED format. The per-section
 format specs live in the JSON `template_section_specs` block in the
@@ -80,18 +80,18 @@ assigned section's spec exactly:
     blocks. No table, no bullets.
   - "bullet_list" sections: produce one `bullet_list` block. No
     paragraphs, no tables.
-  - "subsection_bullets" sections (only §5 Scope): produce two
+  - "subsection_bullets" sections (only Â§5 Scope): produce two
     `heading` blocks (level 3) followed by one `bullet_list` each,
     one per subsection in the spec, in the spec's order.
   - "glossary" sections: produce one `bullet_list` block where each
-    item is formatted "Term — definition".
+    item is formatted "Term â€” definition".
 
 Never reorder, skip, merge, or split sections. Never change column
 counts or names. Never replace prose with a table or vice versa.
 
-═══════════════════════════════════════════════════════════════════════
-CONTENT SOURCING & PROVENANCE — flag everything the USER did not state
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+CONTENT SOURCING & PROVENANCE â€” flag everything the USER did not state
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 The context bundle below is the ONLY source of truth. The reader MUST be
 able to tell, at a glance, which content the user actually provided and
@@ -109,67 +109,78 @@ SPEAKER ATTRIBUTION (the chat_history labels every line):
     treat its content as Tier-1 source material.
 
 THREE TIERS:
-  TIER 1 — Explicitly stated by the USER (or present in an uploaded
+  TIER 1 â€” Explicitly stated by the USER (or present in an uploaded
     document). Use directly, UNMARKED.
-    e.g. the user said "small businesses and ecommerce shops" → write it
+    e.g. the user said "small businesses and ecommerce shops" â†’ write it
     with no marker.
 
-  TIER 2 — Inferred from Tier-1 facts, OR stated only by the ANALYST and
+  TIER 2 â€” Inferred from Tier-1 facts, OR stated only by the ANALYST and
     never confirmed by the user. Conservative inference only (a named eng
-    lead → "Engineering Lead" is OK; "VP of Product because most projects
+    lead â†’ "Engineering Lead" is OK; "VP of Product because most projects
     have one" is NOT). Competitor names, prices, compliance frameworks,
     roles, or KPIs that Mary raised but the user never confirmed are Tier 2.
 
-  TIER 3 — A conservative professional default, only when Tiers 1–2 give
+  TIER 3 â€” A conservative professional default, only when Tiers 1â€“2 give
     nothing for a field but a sensible default exists.
 
-PROVENANCE MARK — append " [AI-ASSUMPTION]" to EVERY Tier-2 and Tier-3
+PROVENANCE MARK â€” append " [AI-ASSUMPTION]" to EVERY Tier-2 and Tier-3
 item so the user can see what they did not state:
-  - Table cell  → end the cell's text with " [AI-ASSUMPTION]".
-  - Bullet/para → end the line with " [AI-ASSUMPTION]".
+  - Table cell  â†’ end the cell's text with " [AI-ASSUMPTION]".
+  - Bullet/para â†’ end the line with " [AI-ASSUMPTION]".
   Tier-1 (user-stated) content is the ONLY content left unmarked.
 
   NEVER present an ANALYST suggestion or your own inference as a user
-  fact — i.e. never leave Tier-2/Tier-3 content unmarked. Do NOT invent
+  fact â€” i.e. never leave Tier-2/Tier-3 content unmarked. Do NOT invent
   named individuals. If you supply a conservative default for dates,
   ROI numbers, compliance frameworks, or technology choices the input
   never mentioned, it is Tier 3 and MUST carry [AI-ASSUMPTION].
 
-  LONG-TERM FACTS — items in `context_bundle.long_term_facts` carry a
+  LONG-TERM FACTS â€” items in `context_bundle.long_term_facts` carry a
   trailing "[from prior session]" marker; keep that marker (they are
   Tier-2 supporting context from earlier sessions). The current input
   WINS on any conflict.
 
-═══════════════════════════════════════════════════════════════════════
-EMPTY HANDLING — never drop a section
-═══════════════════════════════════════════════════════════════════════
+  ðŸš¨ CRITICAL: ONLY items literally present in `context_bundle.long_term_facts`
+  may carry the "[from prior session]" marker. The marker is a provenance
+  stamp tied to specific bundle data, NOT a stylistic annotation you may
+  apply to make outputs look more grounded. If `context_bundle.long_term_facts`
+  is absent, empty, or does not contain a given fact verbatim, you MUST NOT
+  emit "[from prior session]" anywhere in that field â€” use [AI-ASSUMPTION]
+  for Tier-2/Tier-3 content instead, or "[Awaiting input]" per the empty-
+  handling rules. Inventing the "[from prior session]" marker on content
+  the user never provided AND the bundle never contained is a fabrication
+  of provenance â€” strictly forbidden.
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+EMPTY HANDLING â€” never drop a section
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 If the input genuinely contains nothing for your section:
 
   - Table sections: produce the table header plus ONE row. First cell
     contains "[Awaiting input]". All other cells contain "TBD".
   - Bullet-list sections: produce ONE bullet:
-    "[Awaiting input — to be defined in requirements review]".
+    "[Awaiting input â€” to be defined in requirements review]".
   - Prose sections: produce ONE short paragraph:
     "[Section context to be confirmed with project sponsor.]"
-  - Subsection-bullets sections (§5): produce BOTH subsections; each
+  - Subsection-bullets sections (Â§5): produce BOTH subsections; each
     gets one bullet matching the empty-bullet rule above.
   - Glossary: produce ONE bullet:
-    "[No domain-specific terms identified — to be populated as the
+    "[No domain-specific terms identified â€” to be populated as the
     project progresses.]"
 
 Never output an empty table. Never drop a section heading. Never
 emit zero content blocks.
 
-═══════════════════════════════════════════════════════════════════════
-LENGTH AND PADDING — match the input
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+LENGTH AND PADDING â€” match the input
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
   - Output exactly as much content as the input supports. No more.
   - Do NOT add template boilerplate ("Stakeholders are critical to
     project success because...").
   - Do NOT add transition sentences between rows or bullets.
-  - Do NOT preface the section with "In this section, we will discuss…"
+  - Do NOT preface the section with "In this section, we will discussâ€¦"
   - Each table row is one line of structured data. Not a paragraph
     in a cell.
   - A rich-input section may produce 20 rows. A thin-input section
@@ -177,21 +188,21 @@ LENGTH AND PADDING — match the input
   - Do NOT target any length. The natural length is whatever the
     input supports.
 
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 CROSS-SECTION REFERENCES
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 You are running in parallel with 15 other section writers. You do NOT
 have access to their output. To reference another section, use the
-section number only — "see §4" — never reproduce content.
+section number only â€” "see Â§4" â€” never reproduce content.
 
-Example: in §7 (Functional Requirements), a row may say "Owner:
-Engineering Lead (see §4)" rather than "Owner: Sarah Johnson".
-Names belong in §4 only.
+Example: in Â§7 (Functional Requirements), a row may say "Owner:
+Engineering Lead (see Â§4)" rather than "Owner: Sarah Johnson".
+Names belong in Â§4 only.
 
-═══════════════════════════════════════════════════════════════════════
-REGENERATION — merge, don't overwrite
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+REGENERATION â€” merge, don't overwrite
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 When the user message includes a "Current draft of this section" block,
 you are REGENERATING because new inputs have arrived (a doc, a fact, an
@@ -206,14 +217,14 @@ already seen and may have lightly edited. Your job:
   3. Add any new fact / row / item the new inputs introduce that the
      current draft does not yet cover.
   4. Do NOT delete content from the current draft just because the new
-     inputs don't mention it — silence is not a conflict.
+     inputs don't mention it â€” silence is not a conflict.
   5. Preserve the section's existing structure (table column order, list
      ordering, ID sequences like FR-001) unless the new inputs force a
      reorganisation.
 
-═══════════════════════════════════════════════════════════════════════
-OUTPUT FORMAT — JSON array of content blocks
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+OUTPUT FORMAT â€” JSON array of content blocks
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 Your entire response is a JSON array. No markdown fences. No prose
 before or after. The array elements are content blocks of these types:
@@ -230,7 +241,7 @@ Validity rules:
   - For headings, `level` is an integer (2 or 3).
   - For bullet_list, `items` is a non-empty list of strings.
 
-═══════════════════════════════════════════════════════════════════════
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 The next system message contains:
   - `template_section_specs`: the format for every section, so you
@@ -267,7 +278,7 @@ Filling rules:
     appear, use the most-formal one. Tier-3 fallback: "[Awaiting input]".
   - Author: the BA/owner if named; else the project sponsor; else "TBD".
   - Version: "1.0" (every freshly generated BRD is v1.0).
-  - Last Updated: leave as "TBD" — the platform fills this on save.
+  - Last Updated: leave as "TBD" â€” the platform fills this on save.
   - Status: "Draft".
 
 Output a single `table` content block.
@@ -278,7 +289,7 @@ def _b2(context: Dict[str, Any]) -> str:
     return """\
 Write Section 2: Purpose.
 
-Spec: 1–3 paragraphs of prose. Output is a list of one to three
+Spec: 1â€“3 paragraphs of prose. Output is a list of one to three
 `paragraph` content blocks.
 
 What to cover (in this order, only what the input supports):
@@ -295,11 +306,11 @@ def _b3(context: Dict[str, Any]) -> str:
     return """\
 Write Section 3: Background / Context.
 
-Spec: 1–3 paragraphs of prose. Output is a list of one to three
+Spec: 1â€“3 paragraphs of prose. Output is a list of one to three
 `paragraph` content blocks.
 
 What to cover (only what the input supports):
-  - The current state — what exists today.
+  - The current state â€” what exists today.
   - Why the current state is insufficient.
   - What changed to prompt this initiative now.
 
@@ -333,7 +344,7 @@ def _b5(context: Dict[str, Any]) -> str:
     return """\
 Write Section 5: Scope.
 
-Spec: "subsection_bullets" — two subsections, each with a bullet list.
+Spec: "subsection_bullets" â€” two subsections, each with a bullet list.
 Output is FOUR blocks in this order:
   1. `heading` level 3, text "In Scope"
   2. `bullet_list` of in-scope items
@@ -341,7 +352,7 @@ Output is FOUR blocks in this order:
   4. `bullet_list` of out-of-scope items
 
 Each bullet is one concrete item. Cross-reference other sections by
-number where it helps ("Functional requirements detailed in §7").
+number where it helps ("Functional requirements detailed in Â§7").
 Do NOT pad with vague items like "documentation"; only what the
 input supports.
 
@@ -358,14 +369,14 @@ Spec: 3-column table, headers exactly
 ["Objective ID", "Description", "Priority"].
 
 Filling rules:
-  - Objective ID: pattern BO-001, BO-002, BO-003, … (zero-padded to 3).
+  - Objective ID: pattern BO-001, BO-002, BO-003, â€¦ (zero-padded to 3).
   - Description: one sentence. The business outcome, not the feature.
   - Priority: one of MUST, SHOULD, COULD. Default SHOULD if input is
     silent on priority.
 
 Only include objectives stated in the input. Specific ROI numbers
 (percent savings, dollar amounts, headcount delta) ONLY if explicitly
-provided — never invented.
+provided â€” never invented.
 """
 
 
@@ -377,15 +388,15 @@ Spec: 5-column table, headers exactly
 ["Req ID", "Description", "Priority", "Status", "Notes"].
 
 Filling rules:
-  - Req ID: pattern FR-001, FR-002, FR-003, … (zero-padded to 3).
-  - Description: one sentence, imperative voice. "The system shall…"
-    OR "Users can…". Pick one voice and use it for every row.
-  - Priority: one of MUST, SHOULD, COULD. Use MUST sparingly — reserve
+  - Req ID: pattern FR-001, FR-002, FR-003, â€¦ (zero-padded to 3).
+  - Description: one sentence, imperative voice. "The system shallâ€¦"
+    OR "Users canâ€¦". Pick one voice and use it for every row.
+  - Priority: one of MUST, SHOULD, COULD. Use MUST sparingly â€” reserve
     for requirements explicitly called out as mandatory in input.
   - Status: default "Proposed" unless input says otherwise (e.g.
     "Approved", "In Review").
   - Notes: cross-references to other sections, edge cases the input
-    mentions, or "—" if there's nothing to add.
+    mentions, or "â€”" if there's nothing to add.
 
 Extract every distinct functional requirement from the input. Do not
 merge two requirements into one row; do not split one requirement
@@ -401,7 +412,7 @@ Spec: 3-column table, headers exactly
 ["NFR ID", "Description", "Category"].
 
 Filling rules:
-  - NFR ID: pattern NFR-001, NFR-002, … (zero-padded to 3).
+  - NFR ID: pattern NFR-001, NFR-002, â€¦ (zero-padded to 3).
   - Description: the measurable quality attribute. Quantify where the
     input supports it ("p95 page load < 2s", "99.5% uptime").
   - Category: ONE of:
@@ -422,16 +433,16 @@ Spec: 5-column table, headers exactly
 ["ID", "Title", "As a...", "I want to...", "So that..."].
 
 Filling rules:
-  - ID: pattern US-001, US-002, … (zero-padded to 3).
-  - Title: 2–6 words, capturing the user story's essence.
-  - As a…: the user role (must match a Section 4 stakeholder where
+  - ID: pattern US-001, US-002, â€¦ (zero-padded to 3).
+  - Title: 2â€“6 words, capturing the user story's essence.
+  - As aâ€¦: the user role (must match a Section 4 stakeholder where
     possible; can be a broader user type like "End User" otherwise).
-  - I want to…: the action the user wants to perform.
-  - So that…: the business value the user gains.
+  - I want toâ€¦: the action the user wants to perform.
+  - So thatâ€¦: the business value the user gains.
 
 Build user stories only from concrete user actions the input
 describes. Don't generate a story just because you have a stakeholder
-in §4 — the user must be described doing something specific.
+in Â§4 â€” the user must be described doing something specific.
 """
 
 
@@ -441,7 +452,7 @@ Write Section 10: Assumptions.
 
 Spec: one `bullet_list` content block.
 
-Each bullet is one concrete assumption — something the project takes
+Each bullet is one concrete assumption â€” something the project takes
 as a given that, if invalidated, would change the requirements. Only
 include assumptions the input states or strongly implies. Common
 examples:
@@ -459,7 +470,7 @@ Write Section 11: Constraints.
 
 Spec: one `bullet_list` content block.
 
-Each bullet is one concrete constraint — a bounded restriction on
+Each bullet is one concrete constraint â€” a bounded restriction on
 scope, timeline, budget, technology, compliance, or team. Examples:
   - "Must run in AWS GovCloud."
   - "Budget capped at $1.2M for v1."
@@ -481,10 +492,10 @@ Each row is one measurable success criterion:
     ("Average claim assignment time") but qualitative is OK if the
     input only provides qualitative goals ("Adjuster satisfaction").
   - Target Value: the value at which the goal is considered met
-    ("< 4 hours", "≥ 4.0/5.0", "100% of claims have audit trails").
+    ("< 4 hours", "â‰¥ 4.0/5.0", "100% of claims have audit trails").
 
 Only include KPIs the input mentions or strongly implies. Never
-invent target values — if the input says "fast" but no number,
+invent target values â€” if the input says "fast" but no number,
 write "TBD" in Target Value with "[AI-ASSUMPTION]" suffix marker on
 the Metric/Goal cell.
 """
@@ -503,9 +514,9 @@ Filling rules:
   - Duration: relative ("4 weeks", "2 sprints") if input gives no
     dates. Absolute dates only if the input provides them. Never
     invent specific dates.
-  - Owner: the responsible role/team. Cross-reference §4 by role
+  - Owner: the responsible role/team. Cross-reference Â§4 by role
     name; never invent individuals.
-  - Deliverables: 1–3 short bullets within the cell, separated by
+  - Deliverables: 1â€“3 short bullets within the cell, separated by
     "; ". The concrete artifact produced.
 
 If the input has no timeline information, produce one row with
@@ -548,8 +559,8 @@ Filling rules:
     otherwise the role name (e.g. "Project Sponsor").
   - Role: the approver's function. Common values: Project Sponsor,
     Business Owner, IT Director, Compliance Lead.
-  - Date: always "TBD" — the platform fills this on sign-off.
-  - Comments: always "—" (signatures gathered post-generation).
+  - Date: always "TBD" â€” the platform fills this on sign-off.
+  - Comments: always "â€”" (signatures gathered post-generation).
 
 For most v1 BRDs the input has not yet identified approvers. The
 empty-handling row is appropriate when input gives you no
@@ -564,7 +575,7 @@ def _b16(context: Dict[str, Any]) -> str:
 Write Section 16: Glossary & Appendix.
 
 Spec: one `bullet_list` content block. Each item is formatted
-"Term — definition" (em-dash, single space on each side).
+"Term â€” definition" (em-dash, single space on each side).
 
 Include ONLY domain-specific terms that actually appeared in the
 input. Examples worth including:
@@ -596,7 +607,7 @@ assert set(SECTION_PROMPT_BUILDERS) == set(n for n, _, _ in BRD_SECTIONS), (
 
 
 # ============================================================================
-# Helpers used by the Lambda — keep these stable since lambda code will
+# Helpers used by the Lambda â€” keep these stable since lambda code will
 # import them directly.
 # ============================================================================
 
@@ -611,14 +622,14 @@ def build_cached_system_blocks(context_bundle: Dict[str, Any]) -> List[Dict[str,
         "cache_control": {"type": "ephemeral"}}]
 
     Why one block, not two: the DLX gateway proxy collapses multi-block
-    system content unreliably — empirically a two-block system payload
+    system content unreliably â€” empirically a two-block system payload
     arrives at Bedrock with the prose block dropped (verified in the
     Phase 6 cache smoke test: two-block call showed prompt_tokens=16).
     One-block payloads pass through cleanly and cache as expected.
 
-    Anthropic Sonnet 4.5 requires ≥1024-token cached prefix to activate
+    Anthropic Sonnet 4.5 requires â‰¥1024-token cached prefix to activate
     caching. SHARED_SYSTEM_PROMPT alone is ~1640 tokens; combined with
-    the spec+context JSON the prefix is ~2300+ tokens — comfortably above.
+    the spec+context JSON the prefix is ~2300+ tokens â€” comfortably above.
 
     Context bundle shape (caller-controlled):
       {
@@ -638,7 +649,7 @@ def build_cached_system_blocks(context_bundle: Dict[str, Any]) -> List[Dict[str,
     # clear delimiter so it knows where the JSON starts.
     combined_text = (
         SHARED_SYSTEM_PROMPT
-        + "\n\n<CONTEXT BUNDLE BELOW — JSON>\n"
+        + "\n\n<CONTEXT BUNDLE BELOW â€” JSON>\n"
         + json.dumps(spec_and_context, indent=2, default=str)
     )
     return [
@@ -668,7 +679,7 @@ def build_section_user_message(n: int, context: Dict[str, Any] | None = None) ->
 
     The body is a few hundred tokens at most; the heavy lifting (rules,
     format specs, context) is in the cached prefix. The user message is
-    the variable per-call tail — it tells the model which section to
+    the variable per-call tail â€” it tells the model which section to
     write and any section-specific emphasis.
     """
     ctx = context or {}
@@ -684,20 +695,20 @@ def build_section_user_message(n: int, context: Dict[str, Any] | None = None) ->
     if rag_chunks:
         body += (
             "\n\nRELEVANT SOURCE EXCERPTS for this section (retrieved from the "
-            "project inputs — treat as the Tier-1 source material; if empty or "
+            "project inputs â€” treat as the Tier-1 source material; if empty or "
             "thin, apply the empty-handling rules):\n"
             + _format_rag(rag_chunks)
         )
 
     # Facts ledger: deterministic surface-fact extraction (dates, names,
     # vendors, percentages, severity counts, sprint IDs) routed to this
-    # section by category. Additive to RAG — embeddings under-retrieve these
+    # section by category. Additive to RAG â€” embeddings under-retrieve these
     # because they don't carry semantic weight against generic section prompts.
     facts_ledger = ctx.get("facts_ledger")
     if facts_ledger:
         body += (
             "\n\nSTRUCTURED FACTS LEDGER for this section (extracted directly "
-            "from source — these are Tier-1 facts that may not appear in the "
+            "from source â€” these are Tier-1 facts that may not appear in the "
             "excerpts above; incorporate the relevant ones, ignore those that "
             "don't belong in this section):\n"
             + "\n".join(facts_ledger[:30])
@@ -707,7 +718,7 @@ def build_section_user_message(n: int, context: Dict[str, Any] | None = None) ->
 
 def _format_rag(chunks: List[Dict[str, Any]]) -> str:
     """Render retrieved chunks as bounded <source> blocks. Mirrors
-    prompts/sad_section_prompts.py::_format_rag — cap the count and the
+    prompts/sad_section_prompts.py::_format_rag â€” cap the count and the
     per-chunk length so the per-section user message stays predictable."""
     if not chunks:
         return "(no relevant excerpts found)"

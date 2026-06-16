@@ -75,3 +75,12 @@ _recovered_messages.json
 
 # Cloned upstream MCP repo (independent git repo, tracked separately)
 src/mcp/
+
+# Scratch / diagnostics (probe scripts, logs, dumps — never commit)
+.scratch/
+.claude/scheduled_tasks.lock
+
+# Stray Node artifacts — this is a Python repo; these landed here by mistake
+node_modules/
+/package.json
+/package-lock.json
