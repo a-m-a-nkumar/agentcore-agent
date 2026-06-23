@@ -1,0 +1,68 @@
+[
+  {
+    "query": "How do I check if my BRD was successfully pushed to Confluence and verify the content?",
+    "expected": [
+      "brd-confluence-tab"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I export my BRD to Confluence or save it as a Word file?",
+    "expected": [
+      "brd-push-confluence"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I create and import Lucidchart diagrams into my architecture session using AI-generated prompts?",
+    "expected": [
+      "arch-diagrams"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I talk to the SAD agent and get my architecture document generated?",
+    "expected": [
+      "arch-sad"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I automatically generate test cases from Confluence pages and send them to my testing tools?",
+    "expected": [
+      "testing-mcp-configured"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I generate test cases from my code and match them against my requirements in Velox?",
+    "expected": [
+      "testing-mcp-not-configured"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I connect my GitHub and other tools to my Velox account?",
+    "expected": [
+      "my-profile"
+    ],
+    "category": "leaf-d2"
+  },
+  {
+    "query": "How do I ask questions about my project documentation and get AI answers with sources?",
+    "expected": [
+      "knowledge-base-chat"
+    ],
+    "category": "leaf-d1"
+  },
+  {
+    "query": "how do I change my notification settings?",
+    "expected": [],
+    "category": "out-of-scope"
+  },
+  {
+    "query": "how do I integrate Velox with Slack?",
+    "expected": [],
+    "category": "out-of-scope"
+  }
+]

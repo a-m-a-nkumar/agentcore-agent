@@ -1,0 +1,1025 @@
+{
+  "node_id": "velox-user-guide",
+  "title": "Velox — User Guide v2.0",
+  "parent_id": null,
+  "depth": 0,
+  "summary": "Root of the Velox SDLC Orchestrator user guide, covering onboarding plus every feature module from BRD generation through deployment and drift alignment.",
+  "details": "Velox (Deluxe SDLC Orchestration) is an AI-powered SDLC platform. This tree organizes the v2.0 user guide into getting-started/setup and the feature modules: BRD Generation, Planning, Knowledge Base Chat, Automated Sync, Pair Programming, Architecture, Testing, Deployment, and Drift Alignment.",
+  "coming_soon": false,
+  "cross_refs": [],
+  "guide_link": {
+    "section_title": "Velox - User Guide v2.0",
+    "pages": [
+      1
+    ],
+    "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#top"
+  },
+  "children": [
+    {
+      "node_id": "getting-started",
+      "title": "Getting started & setup",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Prerequisite onboarding: request access, set up your profile/integrations, connect Atlassian and create a project workspace.",
+      "details": "Grouping of the foundational steps every user completes before using feature modules: requesting the right Saviynt persona, configuring the My Profile page and its integrations, connecting Atlassian via API token, and creating/selecting a project workspace that ties a Jira project to a Confluence space.",
+      "coming_soon": false,
+      "cross_refs": [],
+      "guide_link": {
+        "section_title": "Getting Started",
+        "pages": [
+          2,
+          3,
+          4,
+          5,
+          6,
+          7
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#getting-started"
+      },
+      "children": [
+        {
+          "node_id": "request-access",
+          "title": "Request access for modules",
+          "parent_id": "getting-started",
+          "depth": 2,
+          "summary": "STEP ZERO - request access/permission to use Velox modules via Saviynt (choose a Business or Tech persona). About getting permission before any setup.",
+          "details": "Velox has two personas. The Business User persona unlocks BRD Assistant, Confluence, Jira and Drift Alignment (target users: Business Analyst, Product Manager/Owner, Program Manager, Scrum Master, Project Manager). The Tech User persona unlocks Pair Programming, Architecture, Testing, Deployment plus read-only Jira and Confluence (target users: Developer, Tester, DevOps Engineer, Architect). To request: open Saviynt, select the 'SDLC Orchestrator' application, add the AD group for your role (SDLC_Orchestrator_App_Prod_Business for Business, SDLC_Orchestrator_App_Prod_Tech for Tech), add a comment stating the purpose, and click Submit. Access must be approved before the modules become available — check the 'Pending Request' section in Saviynt for approval status.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "How to request the access for modules",
+            "pages": [
+              2
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#request-access"
+          },
+          "children": []
+        },
+        {
+          "node_id": "my-profile",
+          "title": "My Profile page",
+          "parent_id": "getting-started",
+          "depth": 2,
+          "summary": "The Profile page hub - account info, token usage, and where you CONNECT every external tool (Atlassian, Lucid, Harness, GitHub, Bitbucket). Start here to manage any integration.",
+          "details": "Click the profile icon (top-right) then 'My Profile'. The page has three areas. (1) Account Information: display name, email, role (TECH / BUSINESS / BOTH) and Atlassian connection status. (2) Usage Summary: total tokens consumed across all modules and last login date. (3) Connected Tools (Integration): manage access for every tool used with Velox — Atlassian, Lucid, Harness, GitHub and Bitbucket each have a Connect action. This page is the single hub from which all external credentials/tokens are linked.",
+          "coming_soon": false,
+          "cross_refs": [
+            "connect-atlassian",
+            "lucid-linkage",
+            "connecting-harness",
+            "testing-github",
+            "testing-bitbucket"
+          ],
+          "guide_link": {
+            "section_title": "My Profile Page",
+            "pages": [
+              2,
+              3
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#my-profile"
+          },
+          "children": []
+        },
+        {
+          "node_id": "connect-atlassian",
+          "title": "Login & connect Atlassian account",
+          "parent_id": "getting-started",
+          "depth": 2,
+          "summary": "Link the ATLASSIAN account specifically (Jira + Confluence) with an API token after SSO login. The Atlassian connection all sync depends on.",
+          "details": "Navigate to https://ai-labs.deluxe.com/sdlc and sign in with SSO (Sign in with Microsoft / Azure AD). Open the profile icon then 'My Profile', scroll to Connected Tools, click Connect under Atlassian and enter your Atlassian domain and email (e.g. TID@deluxe.com). Click the provided link to id.atlassian.com to create an API token: click 'Create an API Token', give it a name, set 'Expires on' to one year out, and click Create. Copy the token immediately — it cannot be viewed again. Paste it into the Link Atlassian Account dialog and click Link Account. Verify the connection from the profile icon. Atlassian linkage is foundational because Jira and Confluence sync depend on it.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "How to login and connect to Atlassian account",
+            "pages": [
+              3,
+              4,
+              5
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#connect-atlassian"
+          },
+          "children": []
+        },
+        {
+          "node_id": "project-workspace",
+          "title": "Project workspace creation / selection",
+          "parent_id": "getting-started",
+          "depth": 2,
+          "summary": "Create or pick a PROJECT that links one Jira project to one Confluence space. Project/workspace setup, not tool connection.",
+          "details": "Each Velox project links to one Jira project and one Confluence space, enabling bi-directional sync. From Project Workspace, either select an existing project under 'My Project', or click 'New Project' and fill in: Project Name (descriptive), a BRD Template, the linked Jira Project (dropdown), and the linked Confluence Space (dropdown). Linking to Atlassian is required. Click 'Create Project', then verify the project appears under 'My Project' with the correct Jira and Confluence spaces. Almost every module operates in the context of a selected project.",
+          "coming_soon": false,
+          "cross_refs": [
+            "connect-atlassian"
+          ],
+          "guide_link": {
+            "section_title": "Project Workspace Creation / Selection",
+            "pages": [
+              6,
+              7
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#project-workspace"
+          },
+          "children": []
+        }
+      ]
+    },
+    {
+      "node_id": "brd-generation",
+      "title": "BRD Generation Module",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Generate Business Requirements Documents from supporting documents (Agent PM) or from an AI conversation (Agent Analyst), then edit and publish to Confluence.",
+      "details": "The BRD module lets users create Business Requirement Documents two ways: Agent PM generates from uploaded transcripts/support documents/meeting notes, while Agent Analyst generates from a chat conversation. After generation, BRDs can be edited section-wise or fully, pushed to the linked Confluence space, downloaded as Word, and viewed in the Confluence tab with two-way sync. Start by selecting the project under Project Workspace then opening the 'BRD Assistant' tab.",
+      "coming_soon": false,
+      "cross_refs": [
+        "project-workspace"
+      ],
+      "guide_link": {
+        "section_title": "BRD Generation Module",
+        "pages": [
+          7,
+          8,
+          9,
+          10,
+          11,
+          12
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-generation"
+      },
+      "children": [
+        {
+          "node_id": "brd-agent-pm",
+          "title": "BRD generation from transcript (Agent PM)",
+          "parent_id": "brd-generation",
+          "depth": 2,
+          "summary": "Create a BRD from UPLOADED files (transcripts, notes, research) - the document-based generator (Agent PM). Use when you already have source docs.",
+          "details": "The PM Agent generates a Business Requirements Document from supporting documentation such as meeting transcripts, market research or whiteboarding notes. Supported formats are .txt, .docx and .pdf; multiple files can be uploaded at once and their content is concatenated. Steps: click 'Upload Files', select one or more documents (listed for review before submission), then click 'Submit'. Agent PM reads all files, understands the context and produces a BRD per the chosen template (typically 30–90 seconds, with a loading indicator). The generated BRD contains sections such as Executive Summary, Project Scope, Functional Requirements, Non-Functional Requirements, and Assumptions & Constraints, derived from the uploaded documents.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "BRD Generation from Transcript - Agent PM",
+            "pages": [
+              8,
+              9
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-agent-pm"
+          },
+          "children": []
+        },
+        {
+          "node_id": "brd-editing",
+          "title": "Editing the generated BRD",
+          "parent_id": "brd-generation",
+          "depth": 2,
+          "summary": "EDIT an already-generated BRD - one section or the whole document, via chat.",
+          "details": "After generation, the BRD can be edited two ways: section-wise (clicking a heading to edit one section in chat) or as a full document ('View Entire BRD' and prompt-driven edits). Edits persist across page refreshes.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "Editing the Generated BRD",
+            "pages": [
+              9,
+              10
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-editing"
+          },
+          "children": [
+            {
+              "node_id": "brd-editing-section",
+              "title": "Section-wise BRD editing",
+              "parent_id": "brd-editing",
+              "depth": 3,
+              "summary": "Edit ONE section of the BRD by clicking its heading; only that section changes.",
+              "details": "In the generated BRD view, click a specific section heading (e.g. 'Stakeholders'). Its content appears in the chat. Add, remove or rephrase the text. Only that section is updated; all other sections remain unchanged.",
+              "coming_soon": false,
+              "cross_refs": [],
+              "guide_link": {
+                "section_title": "A. Section-wise Editing",
+                "pages": [
+                  9
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-editing-section"
+              },
+              "children": []
+            },
+            {
+              "node_id": "brd-editing-full",
+              "title": "Full BRD editing",
+              "parent_id": "brd-editing",
+              "depth": 3,
+              "summary": "Edit the WHOLE BRD at once via View Entire BRD and document-wide prompts.",
+              "details": "Click 'View Entire BRD' from the BRD Progress section to see the complete document, then make edits across the BRD by providing a prompt. Changes apply document-wide and persist — refreshing the page shows the updated BRD.",
+              "coming_soon": false,
+              "cross_refs": [],
+              "guide_link": {
+                "section_title": "B. Full BRD Editing",
+                "pages": [
+                  10
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-editing-full"
+              },
+              "children": []
+            }
+          ]
+        },
+        {
+          "node_id": "brd-push-confluence",
+          "title": "Push BRD to Confluence & download",
+          "parent_id": "brd-generation",
+          "depth": 2,
+          "summary": "Get a finished BRD OUT of Velox - publish to Confluence and/or download as Word. The export/publish action.",
+          "details": "From the BRD view, click 'Upload to Confluence' and wait for the push to complete — Velox redirects to the created Confluence page, and the BRD is then available in the linked space. Optionally click 'Download BRD' to export the BRD as a Word (.docx) document.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "Push BRD to Confluence & Download",
+            "pages": [
+              10
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-push-confluence"
+          },
+          "children": []
+        },
+        {
+          "node_id": "brd-confluence-tab",
+          "title": "Confluence tab — view generated BRDs",
+          "parent_id": "brd-generation",
+          "depth": 2,
+          "summary": "BROWSE/view BRDs already published to Confluence, inside Velox. Read-only review, not creating or publishing.",
+          "details": "Open the 'Confluence' tab within the project to see a list of BRDs pushed to Confluence. Click a BRD to view it and verify the content matches what was generated/edited in the BRD Assistant. There is a two-way sync between Velox and Confluence: any change made in the Confluence page is reflected in the Confluence tab inside Velox.",
+          "coming_soon": false,
+          "cross_refs": [
+            "automated-sync",
+            "planning"
+          ],
+          "guide_link": {
+            "section_title": "Confluence Tab - View Generated BRDs",
+            "pages": [
+              10
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-confluence-tab"
+          },
+          "children": []
+        },
+        {
+          "node_id": "brd-agent-analyst",
+          "title": "BRD generation by conversing with AI (Agent Analyst)",
+          "parent_id": "brd-generation",
+          "depth": 2,
+          "summary": "Create a BRD by CHATTING with the AI, no documents - the conversational generator (Agent Analyst). Use when you have nothing to upload.",
+          "details": "The Analyst Agent generates a BRD from the chat conversation rather than uploaded transcripts. In the BRD Assistant tab click 'Create BRD with Analyst', then chat about the project — the Analyst asks intelligent clarifying questions (and can search for information). Answer as fully as possible, then click 'Generate BRD' (90–300 seconds depending on conversation length). Once generated you can 'Download BRD' and 'Push to Confluence'. The conversation can continue and a new BRD regenerated with extra information. The output tags content as 'User - Provided' or 'AI - Assumption' to distinguish user-supplied facts from AI assumptions.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "BRD Generation by conversing with AI - Agent Analyst",
+            "pages": [
+              11,
+              12
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-agent-analyst"
+          },
+          "children": []
+        },
+        {
+          "node_id": "brd-switch-workflow",
+          "title": "Switching between Agent PM and Agent Analyst",
+          "parent_id": "brd-generation",
+          "depth": 2,
+          "summary": "SWITCH between the document-based (Agent PM) and conversational (Agent Analyst) BRD workflows.",
+          "details": "Click 'Switch workflow' to move from Agent PM (document-based BRD generation) to Agent Analyst (conversational BRD generation), and back.",
+          "coming_soon": false,
+          "cross_refs": [
+            "brd-agent-pm",
+            "brd-agent-analyst"
+          ],
+          "guide_link": {
+            "section_title": "Switching between Agent PM and Agent Analyst",
+            "pages": [
+              12
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#brd-switch-workflow"
+          },
+          "children": []
+        }
+      ]
+    },
+    {
+      "node_id": "planning",
+      "title": "Planning Module",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Generate Jira Epics and User Stories from a BRD and push selected items into a linked Jira board.",
+      "details": "From the Confluence tab, select a BRD and click 'Generate Jira Stories'. Velox analyses the BRD and generates Epics (major feature areas) and User Stories (with title, description and acceptance criteria) under their respective Epics — typically 30–60 seconds. Review the generated structure, then select the Epics/Stories to push via their checkboxes and click 'Create Selected in Jira'. Choose the target Jira board from the dropdown and click 'Create in Jira'. Stories are pushed with correct Epic links, descriptions and acceptance criteria; you are redirected to the 'Jira' tab where created issues appear. Verify in Jira that the stories exist. Note: if the push fails, confirm the target Jira project allows Epic/Story issue creation.",
+      "coming_soon": false,
+      "cross_refs": [
+        "brd-confluence-tab"
+      ],
+      "guide_link": {
+        "section_title": "Planning Module",
+        "pages": [
+          13,
+          14,
+          15
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#planning"
+      },
+      "children": []
+    },
+    {
+      "node_id": "knowledge-base-chat",
+      "title": "Velox Home Page — Knowledge Base Chat",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "RAG chat on the home page that answers project questions from synced Confluence and Jira content, with source citations.",
+      "details": "The Velox Home Page uses Retrieval-Augmented Generation over synced Confluence and Jira content for the project. Open it via the Velox logo. Ensure the project has synced data — if you have created or edited Confluence pages or Jira issues, click 'Sync Docs' and wait for completion. Type a project-related question (e.g. 'What are the main requirements for the authentication module?'), submit, and the agent returns a relevant answer with cited sources (Confluence pages or Jira issues). Verify citations by clicking source links, and ask follow-ups to test conversational context. Answer quality depends on synced content — re-sync if answers seem incomplete.",
+      "coming_soon": false,
+      "cross_refs": [
+        "automated-sync"
+      ],
+      "guide_link": {
+        "section_title": "Velox Home Page - Knowledge Base Chat",
+        "pages": [
+          15,
+          16
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#knowledge-base-chat"
+      },
+      "children": []
+    },
+    {
+      "node_id": "automated-sync",
+      "title": "Automated Sync (Confluence / Jira / Velox)",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Refresh / sync the project knowledge base: pull changed Confluence pages and Jira issues into Velox so chat and the MCP have current docs. Use whenever you have edited docs or issues and want them synced.",
+      "details": "The platform performs incremental sync between Confluence, Jira and Velox's vector store to keep the knowledge base current. Click 'Sync Docs' in the project view; the system fetches Confluence pages and Jira issues changed since the last sync and updates embeddings in the vector store. A status indicator shows progress. Verify by checking updated counts and asking about recently added/changed content — new or modified items are reflected in the Analyst Agent's responses.",
+      "coming_soon": false,
+      "cross_refs": [
+        "knowledge-base-chat",
+        "pair-programming"
+      ],
+      "guide_link": {
+        "section_title": "Automated Sync (Confluence / Jira / Velox)",
+        "pages": [
+          17
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#automated-sync"
+      },
+      "children": []
+    },
+    {
+      "node_id": "pair-programming",
+      "title": "Pair Programming Module",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "AI coding assistant with MCP/IDE integration; follow the on-tab setup instructions. Also produces code summaries used by Drift Alignment.",
+      "details": "An AI coding assistant connected to the project's knowledge base via an MCP (Prompt Enhancer) integration and compatible IDEs (VS Code Copilot / Claude Code / Cursor). Prerequisites shown on the tab include Python 3.10+, Git installed and a compatible IDE. Follow the setup steps as laid out on the Pair Programming tab (open project in VS Code, install/configure the MCP server, etc.). The Pair Programming MCP integration also produces the code summaries consumed by the Drift Alignment / BRD Sync feature.",
+      "coming_soon": false,
+      "cross_refs": [
+        "drift-accessing-brd-sync",
+        "automated-sync"
+      ],
+      "guide_link": {
+        "section_title": "Pair Programming Module",
+        "pages": [
+          17
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#pair-programming"
+      },
+      "children": []
+    },
+    {
+      "node_id": "architecture",
+      "title": "Architecture Module",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Create solution architecture artifacts in two phases — Lucid diagrams first, then a written Solution Architecture Document (SAD). Shown as 'Architecture' (Design Assistant) in the sidebar.",
+      "details": "The Architecture module (left sidebar 'Design Assistant', displayed as 'Architecture') builds solution architecture artifacts in two phases: visual diagrams via Lucidchart, then a written SAD. It requires a linked Lucid account. Phase 1 generates Lucidchart prompts from Confluence context and imports the resulting diagrams; Phase 2 converses with Agent SAD and generates a ~10-section document with diagrams embedded, which can then be edited, audited, exported to Word and pushed to Confluence.",
+      "coming_soon": false,
+      "cross_refs": [],
+      "guide_link": {
+        "section_title": "Architecture Module",
+        "pages": [
+          18,
+          19,
+          20,
+          21,
+          22,
+          23,
+          24,
+          25
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#architecture"
+      },
+      "children": [
+        {
+          "node_id": "lucid-linkage",
+          "title": "Lucid account linkage",
+          "parent_id": "architecture",
+          "depth": 2,
+          "summary": "SETUP only - connect your Lucid account with an API token so diagrams can be fetched. Account linking, not drawing.",
+          "details": "Go to the Profile page and link your Lucid account via API tokens. Create the API key at https://lucid.app/developer#/apikeys (name it, set expiration, and set Documents/Folders grants as needed), copy it safely (it is shown once), and use it in Velox's Lucid integration. The Lucid REST API key is used to fetch diagrams generated in Lucid back into the Architecture session so they can be embedded in the SAD.",
+          "coming_soon": false,
+          "cross_refs": [
+            "my-profile"
+          ],
+          "guide_link": {
+            "section_title": "Lucid account Linkage",
+            "pages": [
+              18,
+              19
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#lucid-linkage"
+          },
+          "children": []
+        },
+        {
+          "node_id": "arch-diagrams",
+          "title": "Part 1 — Diagrams",
+          "parent_id": "architecture",
+          "depth": 2,
+          "summary": "Part 1 - CREATE the architecture diagrams: generate Lucid prompts, draw in Lucid, fetch/save into the session.",
+          "details": "Open Architecture from the Tools sidebar and start or open a session. The Diagram Hub shows supported templates (logical, infrastructure, security, etc.). For each diagram: click 'Generate', select the Confluence page(s) to use as context and click 'Generate Prompt'; review/edit the prompt and copy it; in Lucidchart open a blank diagram, paste the prompt into the Lucid AI chatbox and generate; rename the diagram (this name links it to the project in Velox). Back in Velox, click refresh in the Import diagram section, use the same diagram name to link it, then click 'Fetch & Save' to commit it to the session — it will be embedded in the SAD when generated. Click 'Skip' to defer a row. When done (or to skip entirely), click 'Continue to SAD' to advance to Phase 2; you can skip diagrams entirely and add them later.",
+          "coming_soon": false,
+          "cross_refs": [
+            "lucid-linkage"
+          ],
+          "guide_link": {
+            "section_title": "Part 1 - Diagrams",
+            "pages": [
+              19,
+              20,
+              21,
+              22,
+              23
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#part-1-diagrams"
+          },
+          "children": []
+        },
+        {
+          "node_id": "arch-sad",
+          "title": "Part 2 — Solution Architecture Document (SAD)",
+          "parent_id": "architecture",
+          "depth": 2,
+          "summary": "Part 2 - WRITE the Solution Architecture Document (SAD) by chatting with Agent SAD; produces the doc with diagrams embedded.",
+          "details": "After 'Continue to SAD', the view switches to the SAD chat. Converse with Agent SAD: describe your stack, constraints, scaling needs and security requirements, and upload supporting documents (PDF/TXT/DOCX). The AI references your saved diagrams when asking clarifying questions. When ready click 'Generate SAD'. The generated SAD (around ten sections — Summary, Problem Statement, Architecturally Significant Requirements, Logical Architecture Diagram, Pending Decisions, Security View, Infrastructure, Risks & Mitigations, Non-Functional Requirements, Cost Estimate) is displayed with the diagrams embedded.",
+          "coming_soon": false,
+          "cross_refs": [
+            "arch-diagrams"
+          ],
+          "guide_link": {
+            "section_title": "Part 2 - Solution Architecture Document (SAD)",
+            "pages": [
+              23,
+              24
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#part-2-sad"
+          },
+          "children": []
+        },
+        {
+          "node_id": "arch-sad-editing",
+          "title": "Editing & exporting the SAD",
+          "parent_id": "architecture",
+          "depth": 2,
+          "summary": "EDIT and EXPORT a finished SAD - revise sections, audit, download as Word, push to Confluence.",
+          "details": "Click any section heading in the SAD outline to view and edit it; send edit instructions in chat (e.g. 'add a Redis caching layer to the data flow section') and edits apply per the context provided. Click 'Audit SAD' to validate completeness and consistency — it suggests audit notes, and section-wise audits are supported. Click 'Download SAD' to export as Word (.docx) and 'Push to Confluence' to publish to the linked space. A tab at the top of the session lets you toggle back to Diagrams to add/modify a diagram even after generation; diagram updates are referenced the next time you regenerate or audit the SAD.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "Editing and Exporting the SAD",
+            "pages": [
+              24,
+              25
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#editing-exporting-sad"
+          },
+          "children": []
+        }
+      ]
+    },
+    {
+      "node_id": "testing",
+      "title": "Testing Module",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Generate BRD-based test scenarios and code-based Gherkin test cases, with two flows (MCP configured or not), then push to GitHub/Bitbucket and run in Katalon.",
+      "details": "The testing module turns BRDs into test scenarios and codebases into Gherkin test cases. First generate test scenarios from a BRD and publish them to Confluence. Then choose one of two flows: MCP Configured (IDE generates Gherkin that auto-syncs back to Velox) or MCP Not Configured (manual copy/paste of prompt and Gherkin, with Velox building a coverage matrix). Generated '.feature' files are pushed to GitHub/Bitbucket and executed in Katalon AI. Repository linking (GitHub PAT or Bitbucket token) is done once in My Profile.",
+      "coming_soon": false,
+      "cross_refs": [],
+      "guide_link": {
+        "section_title": "Testing Module",
+        "pages": [
+          25,
+          26,
+          27,
+          28,
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          35,
+          36,
+          37,
+          38
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#testing-module"
+      },
+      "children": [
+        {
+          "node_id": "test-scenarios",
+          "title": "Test scenarios generation",
+          "parent_id": "testing",
+          "depth": 2,
+          "summary": "PREREQUISITE - generate test SCENARIOS from a BRD and publish to Confluence. Done first, before any test cases. Scenarios, not Gherkin.",
+          "details": "First create test scenarios for the project. Go to Confluence from the tools sidebar, select the BRD for which test scenarios are needed and click 'Generate Test Scenarios'. Review and edit the generated scenarios, then click 'Push to Confluence' to publish the page for downstream use in the testing module (both MCP-configured and not-configured flows reference these scenario pages).",
+          "coming_soon": false,
+          "cross_refs": [
+            "brd-confluence-tab"
+          ],
+          "guide_link": {
+            "section_title": "Test Scenarios Generation",
+            "pages": [
+              25,
+              26
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#test-scenarios"
+          },
+          "children": []
+        },
+        {
+          "node_id": "testing-mcp-configured",
+          "title": "Option 1: MCP configured",
+          "parent_id": "testing",
+          "depth": 2,
+          "summary": "Generate Gherkin test CASES AUTOMATICALLY using the MCP in your IDE - the IDE writes the .feature and the MCP sends it back. The auto / MCP-on path.",
+          "details": "Go to Testing and select the 'MCP Configured' tile. In your IDE (with the AgentCore MCP connected) use the provided prompt to generate test cases for the codebase — the MCP fetches the test-scenario Confluence pages from the linked space; select the appropriate page in chat. A prompt is generated to create the test cases; ask to execute it. A Gherkin '.feature' file is produced and the MCP automatically sends it to Velox. Optionally publish the Gherkin file to Confluence with the coverage matrix. Push the Gherkin file to a GitHub/Bitbucket repository (connect the repo via My Profile). To execute, open Katalon, fetch the Gherkin file from the repository and run the tests within Katalon AI.",
+          "coming_soon": false,
+          "cross_refs": [
+            "test-scenarios",
+            "testing-github",
+            "testing-bitbucket",
+            "pair-programming"
+          ],
+          "guide_link": {
+            "section_title": "Option 1: MCP Configured",
+            "pages": [
+              26,
+              27,
+              28
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#option-1-mcp-configured"
+          },
+          "children": []
+        },
+        {
+          "node_id": "testing-mcp-not-configured",
+          "title": "Option 2: MCP not configured",
+          "parent_id": "testing",
+          "depth": 2,
+          "summary": "Generate Gherkin test CASES MANUALLY without MCP - copy a prompt to your IDE, paste the .feature back. The manual / MCP-off path.",
+          "details": "Go to Testing and select the 'MCP Not Configured' tile. Select the test-scenario Confluence page(s) created earlier; Velox detects the scenarios and generates a prompt — click 'Copy Prompt to Clipboard'. In your IDE open the relevant codebase, start a new chat, paste the prompt and run it; a Gherkin '.feature' file is generated in the tests folder — copy its content. Back in Velox, paste the '.feature' output into the provided space; Velox builds a matrix showing coverage of code-derived test cases against the BRD-derived test scenarios. Optionally publish the Gherkin file with the coverage matrix to Confluence. Push the Gherkin file to GitHub/Bitbucket (connect via My Profile). To execute, open Katalon, fetch the Gherkin file from the repository and run within Katalon AI.",
+          "coming_soon": false,
+          "cross_refs": [
+            "test-scenarios",
+            "testing-github",
+            "testing-bitbucket"
+          ],
+          "guide_link": {
+            "section_title": "Option 2: MCP Not Configured",
+            "pages": [
+              29,
+              30,
+              31,
+              32
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#option-2-mcp-not-configured"
+          },
+          "children": []
+        },
+        {
+          "node_id": "testing-github",
+          "title": "Link GitHub account",
+          "parent_id": "testing",
+          "depth": 2,
+          "summary": "Connect your GITHUB account (Personal Access Token) so Velox can push test files to a GitHub repo.",
+          "details": "Linking uses a classic GitHub Personal Access Token. Generate it on github.com (Settings -> Developer settings -> Personal access tokens -> Tokens classic) with three scopes: repo (all sub-options), read:user, and user:email. Then in Velox go to Profile -> Integrations -> Connect under GitHub, paste the token, and click Connect — a green Connected badge confirms. One-time setup per account. Common gotcha: tick all of repo's sub-options, not just the parent checkbox.",
+          "coming_soon": false,
+          "cross_refs": [
+            "my-profile"
+          ],
+          "guide_link": {
+            "section_title": "How to link Github account?",
+            "pages": [
+              33,
+              35
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#how-to-link-github-account"
+          },
+          "children": []
+        },
+        {
+          "node_id": "testing-bitbucket",
+          "title": "Link Bitbucket account",
+          "parent_id": "testing",
+          "depth": 2,
+          "summary": "Connect your BITBUCKET account (Atlassian API token) so Velox can push test/IaC files to a Bitbucket repo.",
+          "details": "From the profile icon go to Integrations -> Bitbucket -> Connect and enter your email (e.g. TID@deluxe.com). Create the token at id.atlassian.com/manage-profile/security/api-tokens: click 'Create and manage API tokens', name it (e.g. 'SDLC Platform') and click Next, select 'Bitbucket' as the app and click Next, then enable all five required scopes — read:user, read:workspace, read:repository, write:repository, write:pullrequest — and click Next. Click 'Create token', copy it (shown once), return to Velox and paste it into the API Token field. A green 'Connected' badge confirms the link. Used by both Testing (push Gherkin files) and Deployment/IaC (Existing Project fetch and push).",
+          "coming_soon": false,
+          "cross_refs": [
+            "my-profile",
+            "connect-atlassian"
+          ],
+          "guide_link": {
+            "section_title": "How to link Bitbucket account?",
+            "pages": [
+              36,
+              37,
+              38
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#how-to-link-bitbucket-account"
+          },
+          "children": []
+        }
+      ]
+    },
+    {
+      "node_id": "deployment",
+      "title": "Deployment Module",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Connect Harness CI/CD for a unified view of pipelines, deployments, logs and Terraform IaC, plus MCP-based pipeline troubleshooting. Route /harness.",
+      "details": "The Deployment module (left sidebar 'Deployment', route /harness) connects Velox to your Harness CI/CD account and provides a unified view of pipelines, deployments, logs and infrastructure code. After connecting Harness (via My Profile), the module offers two tiles: 'DevOps' (Settings, Overview, Pipelines, Deployments, Logs, and IaC generation from a SAD) and 'Troubleshooting using MCP' (IDE-based root-cause analysis).",
+      "coming_soon": false,
+      "cross_refs": [],
+      "guide_link": {
+        "section_title": "Deployment Module",
+        "pages": [
+          38,
+          39,
+          40,
+          41,
+          42,
+          43,
+          44,
+          45,
+          46,
+          47,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#deployment-module"
+      },
+      "children": [
+        {
+          "node_id": "connecting-harness",
+          "title": "Connecting Harness",
+          "parent_id": "deployment",
+          "depth": 2,
+          "summary": "Connect your HARNESS account (PAT) to unlock the Deployment dashboards.",
+          "details": "In My Profile connect your Harness PAT. In Harness go to Profile -> Profile Overview -> My API Keys, click '+API Key', name it and Save; then click '+Token', set name and expiration and click 'Generate Token'. Copy the generated token (shown once) and paste it into Velox. A green 'Connected' badge appears and the Overview / Pipelines / Deployments / Logs sections become available.",
+          "coming_soon": false,
+          "cross_refs": [
+            "my-profile"
+          ],
+          "guide_link": {
+            "section_title": "Connecting Harness",
+            "pages": [
+              39,
+              40,
+              41
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#connecting-harness"
+          },
+          "children": []
+        },
+        {
+          "node_id": "devops",
+          "title": "DevOps",
+          "parent_id": "deployment",
+          "depth": 2,
+          "summary": "The DevOps view container - unified Harness CI/CD with settings, overview, pipelines, deployments, logs, IaC. Pick a sub-section.",
+          "details": "Open Deployment from the sidebar and click the 'DevOps' tile. The DevOps view exposes a sidebar with Settings (connect Harness, pick org/project), Overview (health dashboard), Pipelines (list/edit/AI-edit pipeline YAML), Deployments (recent executions, filter by date), Logs (AI root-cause analysis and fixes), and IaC (generate Terraform from a SAD). It connects Velox to your Harness CI/CD account for an end-to-end view of pipelines, deployments, logs and infrastructure code.",
+          "coming_soon": false,
+          "cross_refs": [],
+          "guide_link": {
+            "section_title": "DevOps",
+            "pages": [
+              41,
+              42
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#devops"
+          },
+          "children": [
+            {
+              "node_id": "devops-setting",
+              "title": "Settings",
+              "parent_id": "devops",
+              "depth": 3,
+              "summary": "CONNECT Harness and choose the Org/Project for the DevOps view. Configuration/setup of the view.",
+              "details": "On first load you land in Settings. If Harness is not connected you see a 'Harness Not Connected' screen prompting you to connect from My Profile -> Integrations. Once the API token is saved, select your Organization and Project from the dropdowns (per your access) and Save Workspace. When connected, the Settings page shows a 'Harness Connected' badge with Account ID, Organization and Project.",
+              "coming_soon": false,
+              "cross_refs": [
+                "connecting-harness"
+              ],
+              "guide_link": {
+                "section_title": "Setting",
+                "pages": [
+                  42,
+                  43
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#devops-setting"
+              },
+              "children": []
+            },
+            {
+              "node_id": "devops-overview",
+              "title": "Overview",
+              "parent_id": "devops",
+              "depth": 3,
+              "summary": "Dashboard SUMMARY of pipeline health - counts, what is running, recent failures at a glance.",
+              "details": "The Overview section is a centralized dashboard for the overall health and activity of the DevOps environment — a high-level view of configured pipelines, current execution status, recent failures and recent pipeline activity (e.g. pipeline count, currently running, recent failures, and a recent executions list).",
+              "coming_soon": false,
+              "cross_refs": [],
+              "guide_link": {
+                "section_title": "Overview",
+                "pages": [
+                  43
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#devops-overview"
+              },
+              "children": []
+            },
+            {
+              "node_id": "devops-pipelines",
+              "title": "Pipelines",
+              "parent_id": "devops",
+              "depth": 3,
+              "summary": "View, inspect and AI-EDIT pipeline definitions (YAML); manage triggers and input sets.",
+              "details": "The Pipelines section lists all pipelines in the connected Harness project with status indicators and lets you filter by status (Running, Succeeded, Failed, Aborted). Capabilities include viewing pipelines and their status, monitoring health, reviewing pipeline definitions in YAML, managing triggers and input sets, editing configurations in the YAML editor, AI-assisted editing via natural-language instructions, saving changes directly to Harness, and reviewing metadata (creation date, modification date, storage type). A new run appears in run history with a Running status.",
+              "coming_soon": false,
+              "cross_refs": [],
+              "guide_link": {
+                "section_title": "Pipelines",
+                "pages": [
+                  44
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#devops-pipelines"
+              },
+              "children": []
+            },
+            {
+              "node_id": "devops-deployments",
+              "title": "Deployments",
+              "parent_id": "devops",
+              "depth": 3,
+              "summary": "List recent pipeline EXECUTIONS / deployment runs; filter by date; click into a run.",
+              "details": "The Deployments section displays the most recent pipeline executions and deployment activities — by default the latest 20 records, with the option to load more. Filter records by a date range using the From and To fields. Clicking any pipeline redirects you to the Logs section.",
+              "coming_soon": false,
+              "cross_refs": [],
+              "guide_link": {
+                "section_title": "Deployments",
+                "pages": [
+                  45
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#devops-deployments"
+              },
+              "children": []
+            },
+            {
+              "node_id": "devops-logs",
+              "title": "Logs",
+              "parent_id": "devops",
+              "depth": 3,
+              "summary": "READ and diagnose a failed run LOGS - AI summarises the failure, finds root cause, applies a fix. Use to understand WHY a pipeline failed (in the Velox UI).",
+              "details": "The Logs section provides detailed pipeline execution information and AI-powered diagnosis: AI summaries of executions identifying potential root causes of failures, AI-recommended troubleshooting and remediation steps, the ability to apply AI-proposed fixes, recommended actions (checking build logs, dependencies, code errors, environment variables), and an 'AI Proposed Fix' panel with an 'Apply This Fix' button that applies the remediation and saves the updated configuration in Harness.",
+              "coming_soon": false,
+              "cross_refs": [],
+              "guide_link": {
+                "section_title": "Logs",
+                "pages": [
+                  45,
+                  46
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#devops-logs"
+              },
+              "children": []
+            },
+            {
+              "node_id": "iac-generation",
+              "title": "IaC generation from SAD document",
+              "parent_id": "devops",
+              "depth": 3,
+              "summary": "Entry point for Infrastructure-as-Code - routes to New Project (from a SAD, from scratch) or Existing Project (modify a repo). Only chooses between the two.",
+              "details": "Generate Terraform IaC directly from a Solution Architecture Document. Choose New Project to generate Terraform from scratch based on the SAD, or Existing Project to modify/extend existing Terraform code fetched from a Bitbucket repository.",
+              "coming_soon": false,
+              "cross_refs": [
+                "arch-sad"
+              ],
+              "guide_link": {
+                "section_title": "IaC Generation from SAD Document",
+                "pages": [
+                  46,
+                  47,
+                  48,
+                  49,
+                  50,
+                  51,
+                  52
+                ],
+                "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#iac-generation"
+              },
+              "children": [
+                {
+                  "node_id": "iac-new-project",
+                  "title": "IaC — New Project",
+                  "parent_id": "iac-generation",
+                  "depth": 4,
+                  "summary": "Generate Terraform from a SAD FROM SCRATCH (no existing code) - upload/paste the SAD, extract components, produce modular Terraform.",
+                  "details": "Click 'Get Started' in the New Project card. Either upload a SAD file (.docx) or paste the SAD content into the text area (set Document Title, Project Name, AWS Region and Environment DEV/STAGING/PROD). Click 'Extract Components' — the AI parses the SAD and identifies infrastructure components (compute, storage, networking, IAM, databases, etc.) as a checklist you can select/deselect. Click 'Generate Terraform'; code streams in section by section with each component as a separate module file (e.g. compute.tf, network.tf, iam.tf). You can then edit files inline, copy individual files, or 'Download All' as a zip, and push the code to GitHub/Bitbucket. A Checkov security-scan feature is coming soon. Result: a complete modular Terraform project where each component lives in its own file and a top-level main.tf references the modules.",
+                  "coming_soon": false,
+                  "cross_refs": [
+                    "arch-sad",
+                    "testing-github",
+                    "testing-bitbucket"
+                  ],
+                  "guide_link": {
+                    "section_title": "New Project",
+                    "pages": [
+                      47,
+                      48,
+                      49,
+                      50
+                    ],
+                    "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#iac-new-project"
+                  },
+                  "children": []
+                },
+                {
+                  "node_id": "iac-existing-project",
+                  "title": "IaC — Existing Project",
+                  "parent_id": "iac-generation",
+                  "depth": 4,
+                  "summary": "Modify EXISTING Terraform - connect Bitbucket, fetch a repo Terraform, edit it, push back. Use when you already have IaC.",
+                  "details": "Click 'Get Started' in the Existing Project card. If Bitbucket is already connected, skip ahead; otherwise connect it from My Profile (Connect to Bitbucket). Once connected, enter the Bitbucket workspace name to retrieve repositories, select the required repository and branch (optionally a subfolder; only .tf/.tfvars/.hcl files load), and click 'Fetch & Analyze' to retrieve the existing IaC. Edit the IaC with the 'Edit' button, then push the updated code back to the connected Bitbucket repository to save and version-control your changes.",
+                  "coming_soon": false,
+                  "cross_refs": [
+                    "testing-bitbucket",
+                    "arch-sad"
+                  ],
+                  "guide_link": {
+                    "section_title": "Existing Project",
+                    "pages": [
+                      50,
+                      51,
+                      52
+                    ],
+                    "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#iac-existing-project"
+                  },
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "node_id": "troubleshooting-mcp",
+          "title": "Troubleshooting using MCP",
+          "parent_id": "deployment",
+          "depth": 2,
+          "summary": "Diagnose a failed pipeline FROM YOUR IDE via MCP - pulls Harness data, YAML and incidents into your IDE for root-cause. IDE-based, not the Velox UI.",
+          "details": "Diagnose failed pipelines faster with full context. The MCP tool consolidates Harness execution data, the pipeline YAML and matched past incidents from Confluence and Jira, then provides the IDE AI a balanced payload for objective root-cause analysis — all inside the IDE, with no separate tool and no context-switching. It exists because failure screenshots get exchanged in chat, each team is biased toward blaming the other, and the real cause (infrastructure config vs application code) gets lost in the back-and-forth. Follow the steps on Deployment -> Troubleshooting using MCP.",
+          "coming_soon": false,
+          "cross_refs": [
+            "pair-programming",
+            "devops-pipelines"
+          ],
+          "guide_link": {
+            "section_title": "Troubleshooting using MCP",
+            "pages": [
+              53
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#troubleshooting-using-mcp"
+          },
+          "children": []
+        }
+      ]
+    },
+    {
+      "node_id": "drift-alignment",
+      "title": "Drift Alignment — BRD Sync",
+      "parent_id": "velox-user-guide",
+      "depth": 1,
+      "summary": "Keep published BRDs aligned with shipped code: index IDE-published code summaries and reconcile them against Confluence BRDs.",
+      "details": "Drift Alignment keeps published BRDs aligned with the code your team is actually shipping, accessed from the Drift Alignment popover in the sidebar. Its BRD Sync page indexes code summaries published from the IDE (via the Pair Programming code-summary MCP tool), lets you create and publish code documentation, compare a code documentation against an existing Confluence BRD (with tagged MODIFY/ADD/REMOVE changes committed back to Confluence), and — coming soon — seed a brand-new BRD from a code documentation.",
+      "coming_soon": false,
+      "cross_refs": [],
+      "guide_link": {
+        "section_title": "Drift Alignment - BRD Sync",
+        "pages": [
+          54,
+          55,
+          56,
+          57,
+          58,
+          59
+        ],
+        "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#drift-alignment-brd-sync"
+      },
+      "children": [
+        {
+          "node_id": "drift-accessing-brd-sync",
+          "title": "Accessing BRD Sync",
+          "parent_id": "drift-alignment",
+          "depth": 2,
+          "summary": "Open BRD Sync from the Drift Alignment popover; left rail lists code summaries, right canvas is the comparison workspace.",
+          "details": "Click 'Drift Alignment' in the sidebar, then 'BRD Sync' in the popover. The BRD Sync page has two areas: a Left Rail 'Code Summary Index' listing all code summaries published from your IDE via the code-summary MCP tool, and a Right Canvas for comparison and actions. Note: code summaries are produced by the Pair Programming MCP integration — if the list is empty, ensure your IDE is connected and that you have run the code-summary tool against your repo.",
+          "coming_soon": false,
+          "cross_refs": [
+            "pair-programming"
+          ],
+          "guide_link": {
+            "section_title": "Accessing BRD Sync",
+            "pages": [
+              55
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#accessing-brd-sync"
+          },
+          "children": []
+        },
+        {
+          "node_id": "drift-code-documentation",
+          "title": "Create Code Documentation using MCP",
+          "parent_id": "drift-alignment",
+          "depth": 2,
+          "summary": "Prompt your IDE (via MCP) to create code documentation and publish it to Confluence.",
+          "details": "In your IDE, prompt to create code documentation — the MCP tool generates it. Then publish the code documentation to Confluence using MCP. This documentation feeds the BRD Sync comparison and seeding workflows.",
+          "coming_soon": false,
+          "cross_refs": [
+            "pair-programming"
+          ],
+          "guide_link": {
+            "section_title": "How to create Code Documentation using MCP?",
+            "pages": [
+              55,
+              56
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#create-code-documentation-mcp"
+          },
+          "children": []
+        },
+        {
+          "node_id": "drift-seed-brd",
+          "title": "Seeding a new BRD from code documentation",
+          "parent_id": "drift-alignment",
+          "depth": 2,
+          "summary": "SEED a brand-new BRD from code documentation (planned - coming soon, not yet available).",
+          "details": "This feature is currently being developed. Expected flow: in the left rail select a code documentation; in the right canvas click 'Seed New BRD'; Velox creates a new BRD session in the BRD Assistant pre-populated with context from the documentation; continue in the BRD Assistant as usual (chat with the analyst, generate, edit, publish). Expected result: a new BRD session appears in the BRD Assistant sidebar with a 'Seeded from code documentation' badge.",
+          "coming_soon": true,
+          "cross_refs": [
+            "brd-generation",
+            "drift-code-documentation"
+          ],
+          "guide_link": {
+            "section_title": "Seeding a New BRD from a Code Documentation (Coming Soon)",
+            "pages": [
+              56
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#seeding-new-brd-from-code-doc"
+          },
+          "children": []
+        },
+        {
+          "node_id": "drift-compare-brd",
+          "title": "Comparing code documentation against an existing BRD",
+          "parent_id": "drift-alignment",
+          "depth": 2,
+          "summary": "COMPARE shipped code against the published BRD to detect drift / misalignment.",
+          "details": "With a code documentation selected, click 'Compare with Existing BRD' and pick the target Confluence BRD. The workflow steps are Select (confirm code summary + target BRD), Scan (AI diff detecting three change categories), Review (proposed changes listed), Commit (approved changes applied) and Done (confirmation with a link). In Review, changes are tagged MODIFY (section content needs updating to match the code), ADD (section present in code but missing from the BRD) and REMOVE (BRD section no longer reflects the code). Filter by type via tabs (All / Modify / Add / Remove); for each change review the before/after diff and check to accept or uncheck to reject; use 'Select All' to bulk-accept a category; click 'Commit Changes' to apply approved changes to the Confluence BRD. Only approved changes are written; rejected ones are discarded. Note: BRD Sync is read-only on the code side — it never modifies your repo, only writes back to Confluence.",
+          "coming_soon": false,
+          "cross_refs": [
+            "drift-code-documentation",
+            "brd-confluence-tab"
+          ],
+          "guide_link": {
+            "section_title": "Comparing a Code Documentation Against an Existing BRD",
+            "pages": [
+              57,
+              58,
+              59
+            ],
+            "url": "https://yourco.atlassian.net/wiki/spaces/SDLC/pages/PAGEID/Velox-User-Guide-v2.0#comparing-code-doc-against-brd"
+          },
+          "children": []
+        }
+      ]
+    }
+  ]
+}

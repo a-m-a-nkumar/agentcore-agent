@@ -1,0 +1,334 @@
+[
+  {
+    "query": "How do I get access to the features I need in Velox based on my role?",
+    "expected": [
+      "request-access"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I connect my GitHub and other tools to my Velox account?",
+    "expected": [
+      "my-profile"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I connect my Atlassian account to generate API tokens for Jira and Confluence integration?",
+    "expected": [
+      "connect-atlassian"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I connect my Velox project to Jira and Confluence when setting it up?",
+    "expected": [
+      "project-workspace"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I create a BRD from my meeting notes and research files?",
+    "expected": [
+      "brd-agent-pm"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I edit just one section of my BRD without changing the rest?",
+    "expected": [
+      "brd-editing-section"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I edit my entire business requirements document at once instead of section by section?",
+    "expected": [
+      "brd-editing-full"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I publish my BRD to Confluence or save it as a Word file?",
+    "expected": [
+      "brd-push-confluence"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I check if my BRD was successfully sent to Confluence and verify the content?",
+    "expected": [
+      "brd-confluence-tab"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I create a requirements document by chatting instead of uploading files?",
+    "expected": [
+      "brd-agent-analyst"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I change between document mode and conversation mode for creating BRDs?",
+    "expected": [
+      "brd-switch-workflow"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I automatically create Jira epics and user stories from my requirements document?",
+    "expected": [
+      "planning"
+    ],
+    "category": "leaf-d1",
+    "source_depth": 1
+  },
+  {
+    "query": "How do I ask questions about my project documentation and get AI answers with sources?",
+    "expected": [
+      "knowledge-base-chat"
+    ],
+    "category": "leaf-d1",
+    "source_depth": 1
+  },
+  {
+    "query": "How do I update the knowledge base when new Confluence pages or Jira tickets are added?",
+    "expected": [
+      "automated-sync"
+    ],
+    "category": "leaf-d1",
+    "source_depth": 1
+  },
+  {
+    "query": "How do I set up the AI coding assistant to work with my IDE and project knowledge base?",
+    "expected": [
+      "pair-programming"
+    ],
+    "category": "leaf-d1",
+    "source_depth": 1
+  },
+  {
+    "query": "How do I connect my Lucid account to Velox to import diagrams into my architecture documentation?",
+    "expected": [
+      "lucid-linkage"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I create and import Lucidchart diagrams into my architecture session using AI-generated prompts?",
+    "expected": [
+      "arch-diagrams"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I chat with the SAD agent and what happens after I generate the document?",
+    "expected": [
+      "arch-sad"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I edit specific sections of my system architecture document and check if it's complete?",
+    "expected": [
+      "arch-sad-editing"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I create and publish test scenarios from a BRD in Confluence?",
+    "expected": [
+      "test-scenarios"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I automatically generate test cases from Confluence and send them to my testing tools?",
+    "expected": [
+      "testing-mcp-configured"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I generate test cases from my code and match them against my requirements in Velox?",
+    "expected": [
+      "testing-mcp-not-configured"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I connect my GitHub account to Velox so I can link repositories?",
+    "expected": [
+      "testing-github"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I connect my Bitbucket account to push test files and fetch repositories?",
+    "expected": [
+      "testing-bitbucket"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I link my Harness account to Velox using an API token?",
+    "expected": [
+      "connecting-harness"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I connect my Harness account after installing the extension?",
+    "expected": [
+      "devops-setting"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I see all my pipelines and which ones are running or failed recently?",
+    "expected": [
+      "devops-overview"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I see all my pipelines and check which ones are currently running or failed?",
+    "expected": [
+      "devops-pipelines"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I see my recent pipeline runs and when they were deployed?",
+    "expected": [
+      "devops-deployments"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I troubleshoot why my pipeline failed and get suggested fixes?",
+    "expected": [
+      "devops-logs"
+    ],
+    "category": "leaf-d3",
+    "source_depth": 3
+  },
+  {
+    "query": "How do I create a new Terraform project from my architecture document?",
+    "expected": [
+      "iac-new-project"
+    ],
+    "category": "leaf-d4",
+    "source_depth": 4
+  },
+  {
+    "query": "How do I import my Terraform code from Bitbucket into the platform?",
+    "expected": [
+      "iac-existing-project"
+    ],
+    "category": "leaf-d4",
+    "source_depth": 4
+  },
+  {
+    "query": "Why did my deployment pipeline fail and how do I figure out what caused it?",
+    "expected": [
+      "troubleshooting-mcp"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I sync code summaries from my IDE to compare them in the drift alignment tool?",
+    "expected": [
+      "drift-accessing-brd-sync"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I generate and publish code documentation to Confluence from my IDE?",
+    "expected": [
+      "drift-code-documentation"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I create a BRD from existing code documentation in Velox?",
+    "expected": [
+      "drift-seed-brd"
+    ],
+    "category": "abstain",
+    "source_depth": 2
+  },
+  {
+    "query": "How do I sync my code documentation changes back to a Confluence BRD document?",
+    "expected": [
+      "drift-compare-brd"
+    ],
+    "category": "leaf-d2",
+    "source_depth": 2
+  },
+  {
+    "query": "how do I deploy to a Kubernetes cluster?",
+    "expected": [],
+    "category": "out-of-scope",
+    "source_depth": null
+  },
+  {
+    "query": "how do I reset my Velox password?",
+    "expected": [],
+    "category": "out-of-scope",
+    "source_depth": null
+  },
+  {
+    "query": "what are the pricing plans for Velox?",
+    "expected": [],
+    "category": "out-of-scope",
+    "source_depth": null
+  },
+  {
+    "query": "how do I export everything to Excel?",
+    "expected": [],
+    "category": "out-of-scope",
+    "source_depth": null
+  },
+  {
+    "query": "can I use Velox to send emails to customers?",
+    "expected": [],
+    "category": "out-of-scope",
+    "source_depth": null
+  },
+  {
+    "query": "how do I roll back a database migration?",
+    "expected": [],
+    "category": "out-of-scope",
+    "source_depth": null
+  }
+]

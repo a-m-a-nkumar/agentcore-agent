@@ -53,6 +53,8 @@ from routers.harness import router as harness_router
 from routers.pipeline_generator import router as pipeline_generator_router
 from routers.terraform_generator import router as terraform_generator_router
 from routers.figma import router as figma_router
+from routers.velox_guide import router as velox_guide_router
+from routers.home_assistant import router as home_assistant_router
 from routers.internal_utils import validate_api_key
 # Import database helpers for session persistence
 from db_helper import (
@@ -210,6 +212,8 @@ app.include_router(harness_router)
 app.include_router(pipeline_generator_router)
 app.include_router(terraform_generator_router)
 app.include_router(figma_router)
+app.include_router(velox_guide_router)
+app.include_router(home_assistant_router)
 
 # Add request logging middleware
 @app.middleware("http")

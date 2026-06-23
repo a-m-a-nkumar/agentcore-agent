@@ -103,6 +103,19 @@ EMBEDDING_DIMENSIONS = 1536
 BEDROCK_EMBEDDING_MODEL = "amazon.titan-embed-text-v1"
 
 # ---------------------------------------------------------------------------
+# FAQ retrieval (pluggable backend A/B — services/vectorless_rag/faq)
+# ---------------------------------------------------------------------------
+# One switch selects the retrieval method; the eval suite picks the winner.
+# THRESHOLD is calibrated PER BACKEND (scores are absolute-normalized to [0,1]).
+FAQ_ENABLED      = os.getenv("FAQ_ENABLED", "true").lower() == "true"
+FAQ_BACKEND      = os.getenv("FAQ_BACKEND", "bm25")          # bm25 | embeddings | hybrid
+FAQ_TOP_K        = int(os.getenv("FAQ_TOP_K", "3"))          # candidates to surface
+FAQ_THRESHOLD    = float(os.getenv("FAQ_THRESHOLD", "0.5"))  # min top score to inject (Phase 6)
+FAQ_W_BM25       = float(os.getenv("FAQ_W_BM25", "0.5"))     # hybrid blend (tunable)
+FAQ_W_EMB        = float(os.getenv("FAQ_W_EMB", "0.5"))
+FAQ_TOP_N_INJECT = int(os.getenv("FAQ_TOP_N_INJECT", "1"))   # top-1 vs top-N injection
+
+# ---------------------------------------------------------------------------
 # Lambda name defaults  (Local AWS account: 448049797912)
 # ---------------------------------------------------------------------------
 DEFAULT_LAMBDA_BRD_GENERATOR           = "brd_generator_lambda"

@@ -1,0 +1,489 @@
+[
+  {
+    "faq_id": "what-is-velox",
+    "category": "General",
+    "question": "What is Velox?",
+    "answer": "Velox is an AI-powered platform that automates key phases of the software development lifecycle including BRD generation, sprint planning, architecture design, pair programming, testing, and deployment. It integrates with Atlassian Jira and Confluence to provide a unified workflow.",
+    "keywords": ["what is", "overview", "about", "platform", "SDLC", "AI-powered", "Jira", "Confluence"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "supported-browsers",
+    "category": "General",
+    "question": "What browsers are supported?",
+    "answer": "For the best experience, we recommend using the latest version of Safari.",
+    "keywords": ["browser", "supported", "Safari", "Chrome", "Edge", "compatibility", "which browser"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "who-can-use-velox",
+    "category": "General",
+    "question": "Who can use Velox?",
+    "answer": "The platform is designed for engineering teams including Product Managers, Scrum Masters, Solution Architects, Developers, QA Engineers, and DevOps Engineers.",
+    "keywords": ["who", "users", "roles", "personas", "team", "audience", "Product Manager", "Developer", "QA", "DevOps"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "new-and-existing-projects",
+    "category": "General",
+    "question": "Does the platform support both new and existing projects?",
+    "answer": "Yes. Velox supports both greenfield (new projects from scratch) and brownfield (existing projects with pre-existing documentation and a Jira backlog). For brownfield projects, Velox discovers and indexes your existing Confluence pages and Jira issues so you can build on what already exists.",
+    "keywords": ["greenfield", "brownfield", "new project", "existing project", "legacy", "from scratch", "support"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "view-others-projects",
+    "category": "General",
+    "question": "How do we see the existing projects created by other team members in Velox?",
+    "answer": "In Velox you can only view and access projects you created yourself; projects created by others are not visible even at the same access level. To collaborate, share generated artifacts (BRDs via Confluence, code via GitHub or Bitbucket), or create your own project pointing at the same Confluence space or Jira project your teammate used so you can work with the same outputs.",
+    "keywords": ["other team members", "shared projects", "collaboration", "see others projects", "access", "visibility", "teammate"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "how-to-login",
+    "category": "Account & Authentication",
+    "question": "How do I log in to the platform?",
+    "answer": "Sign in with Microsoft — Velox uses Azure AD SSO for production environments.",
+    "keywords": ["login", "log in", "sign in", "cannot log in", "login not working", "SSO", "Azure AD", "Microsoft", "authenticate"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "link-atlassian-account",
+    "category": "Account & Authentication",
+    "question": "How do I link my Atlassian account?",
+    "answer": "Follow the steps in the user guide to connect Atlassian: open your profile, choose Atlassian Account, and enter your API token.",
+    "keywords": ["link Atlassian", "connect Atlassian", "Atlassian account", "integration", "connect Jira", "connect Confluence"],
+    "guide_ref": "connect-atlassian",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "atlassian-token-generate",
+    "category": "Account & Authentication",
+    "question": "How do I generate an Atlassian API token?",
+    "answer": "Visit https://id.atlassian.com/manage-profile/security/api-tokens, click Create API token, give it a name and expiry date, then click Create. Copy the token immediately — it cannot be viewed again later.",
+    "keywords": ["Atlassian", "API token", "PAT", "generate token", "create token", "expiry", "id.atlassian.com"],
+    "guide_ref": "connect-atlassian",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "atlassian-token-expired",
+    "category": "Account & Authentication",
+    "question": "My Atlassian token expired. What do I do?",
+    "answer": "Generate a new API token from the Atlassian security page, then click your profile icon in Velox, select Atlassian Account, and enter the new token. Your existing project links will continue to work.",
+    "keywords": ["token expired", "expired", "renew token", "re-link", "invalid token", "Atlassian", "API token", "update token"],
+    "guide_ref": "connect-atlassian",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "dropdowns-empty",
+    "category": "Account & Authentication",
+    "question": "Why are the Jira and Confluence dropdowns empty when creating a project?",
+    "answer": "This usually means your Atlassian account is not linked or the credentials are invalid. Verify that: (1) your Atlassian account is linked (check your profile for 'Atlassian Connected' status), (2) your API token has not expired, and (3) your Atlassian account has access to the Jira projects and Confluence spaces you need.",
+    "keywords": ["blank", "empty", "not showing", "missing", "no options", "dropdown", "dropdowns", "Jira dropdown", "Confluence dropdown", "create project", "credentials invalid", "nothing appears"],
+    "guide_ref": "connect-atlassian",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "multiple-members-same-project",
+    "category": "Account & Authentication",
+    "question": "Can multiple team members use the same project?",
+    "answer": "Yes, the platform supports concurrent access by 10+ users. Each team member should link their own Atlassian account for individual access.",
+    "keywords": ["multiple users", "concurrent", "same project", "team access", "shared", "simultaneous", "collaboration"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "greenfield-vs-brownfield",
+    "category": "Projects",
+    "question": "What is the difference between greenfield and brownfield projects?",
+    "answer": "Greenfield is a new project with no pre-existing documentation or backlog — everything is generated fresh. Brownfield links to a Jira project and Confluence space that already contain data; Velox imports and indexes your existing content so you can enhance it rather than start over.",
+    "keywords": ["greenfield", "brownfield", "difference", "new vs existing", "project type", "fresh", "legacy"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "setup-brownfield-project",
+    "category": "Projects",
+    "question": "How do I set up a brownfield project?",
+    "answer": "Create a new project and select a Jira project and Confluence space that already contain data. After creation, click Sync Docs to import all existing content. Velox indexes your existing Confluence pages and Jira issues into its knowledge base.",
+    "keywords": ["set up brownfield", "create brownfield", "existing project", "import data", "Sync Docs", "onboard existing"],
+    "guide_ref": "project-workspace",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "brownfield-modify-data",
+    "category": "Projects",
+    "question": "Will creating a brownfield project modify my existing Jira or Confluence data?",
+    "answer": "No. Velox only reads your existing data during sync. It never modifies, deletes, or reorders pre-existing content. New BRDs and Jira stories created through Velox are added alongside your existing data.",
+    "keywords": ["modify data", "overwrite", "safe", "read only", "change existing", "delete", "brownfield", "data safety"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "delete-project",
+    "category": "Projects",
+    "question": "Can I delete a project?",
+    "answer": "Yes, you can delete projects from the dashboard. Deleting a project in Velox does not affect your Jira or Confluence data — it only removes the project from Velox.",
+    "keywords": ["delete project", "remove project", "dashboard", "data loss", "delete"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "transcript-file-formats",
+    "category": "BRD Generation",
+    "question": "What file formats are supported for transcript upload?",
+    "answer": "The PM Agent supports .txt, .docx, and .pdf files. You can upload multiple files simultaneously, and their content is concatenated for BRD generation.",
+    "keywords": ["file formats", "supported files", "upload", "txt", "docx", "pdf", "transcript", "file type"],
+    "guide_ref": "brd-agent-pm",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "brd-generation-time",
+    "category": "BRD Generation",
+    "question": "How long does BRD generation take?",
+    "answer": "BRD generation typically takes 30 to 90 seconds depending on the length and complexity of the uploaded transcripts. A loading indicator is shown during processing.",
+    "keywords": ["how long", "duration", "time", "BRD generation speed", "slow", "wait", "seconds"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "multiple-transcript-files",
+    "category": "BRD Generation",
+    "question": "Can I upload multiple transcript files?",
+    "answer": "Yes. You can upload multiple files at once and the AI synthesizes content from all of them into a single BRD. Ensure all files are in supported formats (.txt, .docx, .pdf).",
+    "keywords": ["multiple files", "upload several", "many transcripts", "batch upload", "combine transcripts"],
+    "guide_ref": "brd-agent-pm",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "brd-missing-information",
+    "category": "BRD Generation",
+    "question": "My BRD is missing information. What can I do?",
+    "answer": "You can edit the BRD two ways: (1) section-wise editing — click a section in the sidebar and give instructions in the chatbox; (2) full BRD editing — click 'View entire BRD' and provide comprehensive edit prompts. You can also upload additional transcripts and regenerate if the originals were incomplete.",
+    "keywords": ["missing info", "incomplete BRD", "edit BRD", "fix BRD", "add details", "regenerate", "wrong BRD"],
+    "guide_ref": "brd-editing",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "pm-vs-analyst-agent",
+    "category": "BRD Generation",
+    "question": "What is the difference between BRD generation via PM Agent vs. Analyst Agent?",
+    "answer": "PM Agent generates BRDs from uploaded meeting transcripts — best when you have recorded notes or written requirements. Analyst Agent generates BRDs through an interactive chat conversation, asking questions about your project and creating the BRD from your responses, with content tagged as 'User - Provided' or 'AI - Assumption'.",
+    "keywords": ["PM Agent", "Analyst Agent", "difference", "which agent", "transcript vs chat", "BRD method"],
+    "guide_ref": "brd-switch-workflow",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "brd-edits-autosave",
+    "category": "BRD Generation",
+    "question": "Are my edits saved automatically?",
+    "answer": "Yes. All BRD edits are persisted automatically. Refreshing the page will show the updated BRD content.",
+    "keywords": ["autosave", "saved automatically", "persist edits", "lose changes", "save BRD"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "multiple-brds-same-project",
+    "category": "BRD Generation",
+    "question": "Can I generate multiple BRDs for the same project?",
+    "answer": "Yes. Each BRD generation creates a new document. Previous BRDs are not overwritten and remain accessible in the Confluence tab.",
+    "keywords": ["multiple BRDs", "several BRDs", "regenerate", "overwrite BRD", "BRD versions", "same project"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "push-brd-to-confluence",
+    "category": "Confluence Integration",
+    "question": "How do I push a BRD to Confluence?",
+    "answer": "In the BRD view, click 'Upload to Confluence' in the Actions panel on the right side. The BRD is published to your project's linked Confluence space.",
+    "keywords": ["push BRD", "upload to Confluence", "publish BRD", "export BRD", "Confluence"],
+    "guide_ref": "brd-push-confluence",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "push-same-brd-again",
+    "category": "Confluence Integration",
+    "question": "What happens if I push the same BRD again after editing?",
+    "answer": "The existing Confluence page is updated rather than creating a duplicate. The version history in Confluence is incremented.",
+    "keywords": ["push again", "re-upload", "duplicate page", "version history", "update Confluence", "overwrite"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "download-brd-word",
+    "category": "Confluence Integration",
+    "question": "Can I download the BRD as a Word document?",
+    "answer": "Yes. Click 'Download BRD' in the Actions panel to download a .docx file with the full BRD content and proper formatting.",
+    "keywords": ["download BRD", "Word document", "docx", "export", "save locally", "offline"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "confluence-edits-reflected",
+    "category": "Confluence Integration",
+    "question": "Are changes made directly in Confluence reflected in Velox?",
+    "answer": "Yes, after syncing. If you edit a page directly in Confluence, the updates are reflected in Velox once you sync.",
+    "keywords": ["Confluence changes", "reflected", "sync", "external edits", "update from Confluence"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "brd-not-showing-confluence-tab",
+    "category": "Confluence Integration",
+    "question": "I pushed a BRD but it is not showing in the Confluence tab.",
+    "answer": "Try clicking 'Sync Docs' to refresh the connection. If the issue persists, verify that your Atlassian account is still connected and that the Confluence space is accessible.",
+    "keywords": ["not showing", "missing BRD", "Confluence tab", "BRD disappeared", "sync docs", "not visible"],
+    "guide_ref": "brd-confluence-tab",
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "generate-jira-epics-stories",
+    "category": "Jira Integration",
+    "question": "How are Jira Epics and Stories generated?",
+    "answer": "From the Confluence tab, select a BRD and click 'Generate Jira Stories'. The AI analyzes the BRD content and creates Epics for major feature areas and User Stories under each Epic, complete with titles, descriptions, acceptance criteria, and priorities.",
+    "keywords": ["Jira stories", "Epics", "generate stories", "user stories", "backlog", "from BRD", "create issues"],
+    "guide_ref": "planning",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "select-stories-to-push",
+    "category": "Jira Integration",
+    "question": "Can I select which stories to push to Jira?",
+    "answer": "Yes. After generation you'll see a review panel where you can select individual stories with checkboxes or use 'Select All' on an Epic. Only selected stories are pushed when you click 'Create Selected in Jira'.",
+    "keywords": ["select stories", "choose stories", "review panel", "checkboxes", "push selected", "Jira"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "jira-stories-affect-backlog",
+    "category": "Jira Integration",
+    "question": "Will generating Jira stories affect my existing backlog?",
+    "answer": "No. New stories are added alongside your existing backlog. Existing issues are never modified, deleted, or duplicated.",
+    "keywords": ["affect backlog", "existing issues", "safe", "overwrite backlog", "modify Jira", "data safety"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "generate-stories-twice",
+    "category": "Jira Integration",
+    "question": "What happens if I generate stories from the same BRD twice?",
+    "answer": "The system generates a new set of stories. Be aware this may create duplicates in your Jira project. We recommend checking for existing stories before generating again.",
+    "keywords": ["generate twice", "duplicate stories", "regenerate", "same BRD", "duplicates in Jira"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "view-jira-issues",
+    "category": "Jira Integration",
+    "question": "Can I view Jira issues directly from Velox?",
+    "answer": "Yes. The Jira tab shows all issues with full details. You can also click 'View in Jira' to open any issue directly in your Jira project.",
+    "keywords": ["view Jira", "Jira tab", "see issues", "open in Jira", "tickets"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "jira-push-failed",
+    "category": "Jira Integration",
+    "question": "The Jira push failed. What should I check?",
+    "answer": "Common causes: (1) expired Atlassian API token — re-link your account with a new token; (2) Jira project permissions — ensure your account can create issues; (3) rate limiting — if you pushed many stories quickly, wait a moment and retry.",
+    "keywords": ["push failed", "Jira error", "cannot create issue", "permissions", "rate limit", "token expired", "troubleshoot Jira"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "what-is-rag-assistant",
+    "category": "Knowledge Base & RAG Assistant",
+    "question": "What is the RAG Assistant?",
+    "answer": "The RAG (Retrieval-Augmented Generation) Assistant is an AI chatbot on the Velox home page that answers questions about your project based on synced Confluence and Jira content. It uses vector embeddings to find relevant information and provides source citations with its answers.",
+    "keywords": ["RAG Assistant", "chatbot", "knowledge base", "project questions", "citations", "ask about project"],
+    "guide_ref": "knowledge-base-chat",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "rag-not-finding-content",
+    "category": "Knowledge Base & RAG Assistant",
+    "question": "Why isn't the RAG Assistant finding my content?",
+    "answer": "The most common cause is that the content hasn't been synced yet. Click 'Sync Docs', wait for the sync to complete, then try your question again. For brownfield projects, the initial sync may take longer with large amounts of data.",
+    "keywords": ["not finding", "no answer", "missing content", "RAG empty", "sync docs", "cannot find", "no results"],
+    "guide_ref": "knowledge-base-chat",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "rag-answer-accuracy",
+    "category": "Knowledge Base & RAG Assistant",
+    "question": "How accurate are the RAG Assistant's answers?",
+    "answer": "The RAG Assistant retrieves information directly from your synced project documentation. Accuracy depends on the quality and completeness of your synced content. Always verify answers by checking the source citations provided.",
+    "keywords": ["accuracy", "reliable", "trust answers", "hallucination", "citations", "verify"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "rag-old-and-new-content",
+    "category": "Knowledge Base & RAG Assistant",
+    "question": "Can the RAG Assistant answer questions about both old and new content?",
+    "answer": "Yes. For brownfield projects, the RAG Assistant can synthesize information from both pre-existing documentation and newly generated content, providing cross-referenced answers with citations to both sources.",
+    "keywords": ["old and new", "existing content", "brownfield", "combined", "cross-reference", "all content"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "how-often-sync",
+    "category": "Knowledge Base & RAG Assistant",
+    "question": "How often should I sync?",
+    "answer": "Sync whenever you've made changes to Confluence or Jira outside Velox, or when you want the RAG Assistant to have the latest information. The sync is incremental, so it only fetches changes since the last sync.",
+    "keywords": ["how often sync", "sync frequency", "when to sync", "refresh", "update knowledge base"],
+    "guide_ref": "automated-sync",
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "how-analyst-agent-works",
+    "category": "BRD Generation - Analyst Agent",
+    "question": "How does the Analyst Agent work?",
+    "answer": "The Analyst Agent generates BRDs through conversation. You describe your project and the agent asks follow-up questions about target users, pain points, features, and constraints. After enough discussion, clicking 'Generate BRD' creates a document based on the conversation context.",
+    "keywords": ["Analyst Agent", "chat BRD", "conversation", "interactive", "no transcript", "questions"],
+    "guide_ref": "brd-agent-analyst",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "user-provided-ai-assumption-tags",
+    "category": "BRD Generation - Analyst Agent",
+    "question": "What do the 'User - Provided' and 'AI - Assumption' tags mean?",
+    "answer": "These tags distinguish content that came directly from your chat responses ('User - Provided') from content the AI inferred or assumed ('AI - Assumption'). Review AI assumptions carefully and correct any inaccuracies before publishing.",
+    "keywords": ["tags", "User Provided", "AI Assumption", "labels", "what do tags mean", "annotations"],
+    "guide_ref": "brd-agent-analyst",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "analyst-access-existing-docs",
+    "category": "BRD Generation - Analyst Agent",
+    "question": "Can the Analyst Agent access my existing project documentation?",
+    "answer": "No. The Analyst Agent does not have the functionality to access existing documentation.",
+    "keywords": ["access docs", "existing documentation", "read project", "Analyst Agent limitation"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "multiple-chat-sessions",
+    "category": "BRD Generation - Analyst Agent",
+    "question": "Can I have multiple chat sessions?",
+    "answer": "Yes. Click '+ New Chat' to start a fresh session. Previous sessions are saved and accessible from the Chat Sessions panel, letting you switch between them.",
+    "keywords": ["multiple chats", "new chat", "sessions", "switch session", "chat history"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "what-does-sync-docs-do",
+    "category": "Sync & Data Management",
+    "question": "What does 'Sync Docs' do?",
+    "answer": "Sync Docs triggers an incremental sync that (1) fetches changed Confluence pages since the last sync, (2) fetches changed Jira issues since the last sync, and (3) updates the vector store embeddings used by the RAG Assistant.",
+    "keywords": ["Sync Docs", "what does sync do", "refresh", "incremental sync", "update embeddings", "import changes"],
+    "guide_ref": "automated-sync",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "how-long-sync-takes",
+    "category": "Sync & Data Management",
+    "question": "How long does syncing take?",
+    "answer": "Incremental syncs (after the initial sync) typically take a few seconds to a minute. The initial sync for brownfield projects with large data sets (50+ Confluence pages, 100+ Jira issues) may take several minutes.",
+    "keywords": ["sync time", "how long sync", "slow sync", "duration", "initial sync"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "delete-synced-content",
+    "category": "Sync & Data Management",
+    "question": "What happens if I delete a Confluence page or Jira issue after it's been synced?",
+    "answer": "On the next sync, the deleted content is removed from the Velox knowledge base, and the RAG Assistant will no longer reference it.",
+    "keywords": ["delete page", "delete issue", "removed", "sync deletion", "knowledge base cleanup"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "sync-bidirectional",
+    "category": "Sync & Data Management",
+    "question": "Is the sync bi-directional?",
+    "answer": "The sync fetches changes from Confluence and Jira into Velox. When you push BRDs to Confluence or stories to Jira through Velox, those are separate write operations. Changes made directly in Confluence or Jira are picked up during the next sync.",
+    "keywords": ["bi-directional", "two way", "sync direction", "write back", "push and pull"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "how-pair-programming-works",
+    "category": "Pair Programming",
+    "question": "How does Pair Programming work?",
+    "answer": "The Pair Programming module uses MCP (Model Context Protocol) server integration to connect AI assistance to your IDE. Once configured, the AI helps with code writing, debugging, and code review, with awareness of your project context.",
+    "keywords": ["pair programming", "MCP", "IDE", "code assistant", "how it works", "Model Context Protocol"],
+    "guide_ref": "pair-programming",
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "pair-programming-existing-codebases",
+    "category": "Pair Programming",
+    "question": "Does Pair Programming work with existing codebases?",
+    "answer": "Yes. For brownfield projects, the AI assistant can reference your existing codebase context to provide suggestions compatible with your current code patterns and conventions.",
+    "keywords": ["existing codebase", "brownfield code", "pair programming", "legacy code", "context aware"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+
+  {
+    "faq_id": "authentication-error",
+    "category": "Troubleshooting",
+    "question": "I'm getting an authentication error. What should I do?",
+    "answer": "Try: (1) check if your Atlassian API token has expired — generate a new one and re-link; (2) verify your Azure AD session hasn't timed out — log out and back in; (3) clear your browser cache and cookies, then try again.",
+    "keywords": ["authentication error", "auth error", "cannot authenticate", "login error", "token expired", "session timeout", "401"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "platform-loading-slowly",
+    "category": "Troubleshooting",
+    "question": "The platform is loading slowly. What can I do?",
+    "answer": "Try: (1) check your internet connection; (2) clear your browser cache; (3) if working with a large brownfield project, allow extra time for initial data loading; (4) try a different browser to rule out browser-specific issues.",
+    "keywords": ["slow", "loading slowly", "performance", "lag", "hangs", "freezing", "slow load"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "brd-longer-than-90s",
+    "category": "Troubleshooting",
+    "question": "My BRD generation is taking longer than 90 seconds.",
+    "answer": "Large or complex transcripts may take longer; the platform has a maximum response time of 300 seconds (5 minutes) for AI operations. If generation fails, try splitting very large transcripts into smaller files, ensuring files are in supported formats, and retrying after a few minutes.",
+    "keywords": ["taking too long", "slow BRD", "timeout", "stuck", "over 90 seconds", "generation failed"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "pushed-incorrect-jira-stories",
+    "category": "Troubleshooting",
+    "question": "I accidentally pushed incorrect stories to Jira. How do I fix this?",
+    "answer": "Velox does not provide a bulk-delete function for Jira issues. You'll need to delete or modify the incorrect stories directly in Jira. Always review generated stories carefully in the review panel before pushing.",
+    "keywords": ["wrong stories", "incorrect stories", "delete stories", "undo Jira push", "bulk delete", "mistake"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  },
+  {
+    "faq_id": "where-to-get-help",
+    "category": "Troubleshooting",
+    "question": "Where can I get help?",
+    "answer": "Click 'Support' in the left sidebar for help options. You can also contact the platform team directly for technical issues.",
+    "keywords": ["help", "support", "contact", "assistance", "get help", "where to ask"],
+    "guide_ref": null,
+    "last_updated": "2025-06-01"
+  }
+]
